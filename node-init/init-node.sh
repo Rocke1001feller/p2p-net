@@ -169,10 +169,18 @@ install_tunnel() {
 }
 
 write_configs() {
-  render_turnserver_conf > /etc/turnserver.conf
-  render_caddyfile > /etc/caddy/Caddyfile
-  render_tunnel_service > /etc/systemd/system/p2p-net-tunnel.service
-  chmod 0640 /etc/systemd/system/p2p-net-tunnel.service   # 含 TUNNEL_SECRET，收紧本机可读面
+  # 含密文件经 mktemp（0600）中转 + install -m 落盘，全程无 0644 窗口；
+  # turnserver.conf 须被 turnserver 组读（apt unit User=turnserver），不能 0600 root:root
+  getent group turnserver >/dev/null || die "turnserver 组不存在（coturn 安装异常）"
+  local tmp
+  tmp="$(mktemp)"
+  render_turnserver_conf > "$tmp"
+  install -m 0640 -o root -g turnserver "$tmp" /etc/turnserver.conf
+  render_caddyfile > "$tmp"
+  install -m 0644 -o root -g root "$tmp" /etc/caddy/Caddyfile
+  render_tunnel_service > "$tmp"
+  install -m 0600 -o root -g root "$tmp" /etc/systemd/system/p2p-net-tunnel.service
+  rm -f "$tmp"
 }
 
 enable_services() {

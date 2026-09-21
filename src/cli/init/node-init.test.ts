@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 const SH = 'node-init/init-node.sh';
 
@@ -51,4 +52,11 @@ test('非 Ubuntu/Debian 明确拒绝', () => {
       return true;
     },
   );
+});
+
+test('含密文件落盘收紧权限：turnserver.conf 0640 root:turnserver，隧道 unit 0600（凭据文件纪律）', () => {
+  // dryrun 不落盘，权限行为无法经进程断言；改为锚定 write_configs 的 install -m 写法
+  const src = readFileSync(SH, 'utf8');
+  assert.match(src, /install -m 0640 -o root -g turnserver .*\/etc\/turnserver\.conf/);
+  assert.match(src, /install -m 0600 -o root -g root .*p2p-net-tunnel\.service/);
 });
