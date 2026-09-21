@@ -8,7 +8,7 @@ test('PORTS 与 contracts/ports.json 一致', () => {
   assert.deepEqual(PORTS, raw);
 });
 
-test('端口段不与 DevAnyWhere 19527-19529 冲突', () => {
+test('端口段避开遗留占用段 19527-19529', () => {
   for (const p of Object.values(PORTS)) {
     assert.ok(p < 19527 || p > 19529, `${p} 落在老段内`);
   }
