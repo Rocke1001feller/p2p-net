@@ -1621,6 +1621,8 @@ git commit -m "docs+test: README、E2E 真机手册、npm 包内容门禁"
 
 （实施期决策在此追加，格式：`日期 | 决策点 | 结论 | 理由`。首条待填：Task 7 Step 0 的函数部署通道。）
 
+- 2026-09-22 | Task 7 Step 0 函数部署通道 | **纯 API**，不走 npx fallback | ① 官方 OpenAPI spec（https://api.supabase.com/api/v1-json）明列 `POST /v1/projects/{ref}/functions/deploy`（"Deploy a function… create if function does not exist"），且 `POST /v1/projects/{ref}/functions` 与 `PATCH /v1/projects/{ref}/functions/{slug}` 均接受 `application/json` 内联源码 body（V1CreateFunctionBody/V1UpdateFunctionBody）——无需本地 eszip 打包、零新依赖。② 哑 token 探针 `POST /v1/projects/fake-ref/functions/deploy?slug=turn-credentials` 返回 401 `JWT could not be decoded`（到达鉴权网关）；对照组 `/v1/projects/fake-ref/functions/nonexistent-xyz` 同为 401——本网关鉴权先于路由，HTTP 状态码无法区分路由存在性，决定性证据以官方 spec 为准。③ 两个 edge function 均为单文件 index.ts，内联 body 通道完全够用。运行期不引入 supabase CLI/npx。
+
 ## Self-Review 记录
 
 - Spec 覆盖：§4 init→Task 5-13；§5 start/service→Task 14-18（§5.3 洞→Task 3）；§6 可观测性→Task 4/19/20；§7 契约→Task 1 + 各测试；§8 后端精简→Task 5/6；§9 测试→各 Task + Task 21；§10 阶段→P0-P5 章节标题；§11 风险→Review Focus 5 条 + Task 内测试。
