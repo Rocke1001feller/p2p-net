@@ -37,3 +37,23 @@ test('WsBridge.handle：收到 1006 关闭帧不得抛出（事故回归护栏�
   await bridge.handle(dc, { k: 'ws-close', wid: 12345 });
   assert.ok(true, 'handle 未抛出即通过');
 });
+
+test('WsBridge.open：非法 port（99999）回 ws-open-err 且无 unhandled rejection（回归护栏）', async () => {
+  // 99999 能通过 isWsOpen 的 numeric 检查与 open() 的 truthiness 检查，
+  // 但 `new WebSocket('ws://localhost:99999/...')` 同步抛错；open() 是 async，
+  // host 侧 `void this.wsBridge.handle(...)` 会让其成为 unhandled rejection → Node≥20 直接 crash。
+  const bridge = new WsBridge({});
+  const sent: Array<{ k: string; wid?: number }> = [];
+  const dc = { send: (d: string) => sent.push(JSON.parse(d)), bufferedAmount: 0, readyState: 'open' };
+  const rejections: unknown[] = [];
+  const onRejection = (e: unknown) => { rejections.push(e); };
+  process.on('unhandledRejection', onRejection);
+  try {
+    void bridge.handle(dc, { k: 'ws-open', wid: 7, path: '/', port: 99999 }); // 与 host.ts 一致：void 调用
+    await new Promise((r) => setTimeout(r, 50));
+  } finally {
+    process.off('unhandledRejection', onRejection);
+  }
+  assert.ok(sent.some((f) => f.k === 'ws-open-err' && f.wid === 7), '非法 port 必须回 ws-open-err，不静默');
+  assert.equal(rejections.length, 0, '不得产生 unhandled rejection（Node≥20 默认 crash）');
+});

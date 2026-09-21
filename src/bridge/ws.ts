@@ -66,8 +66,21 @@ export class WsBridge {
 
   private async open(dc: DcLike, frame: WsOpenFrame): Promise<void> {
     const port = frame.port ?? this.opts.port;
-    if (!port) { void dcSend(dc, { k: 'ws-open-err', wid: frame.wid }); return; }
-    const ws = new WebSocket(`ws://localhost:${port}${frame.path}`);
+    // 端口校验与 HttpBridge（http.ts doReq）对齐：缺省/非法端口 → open-err，不静默。
+    // 必须前置校验——构造器对非法 port 同步抛错，open() 是 async，
+    // host 侧 void 调用会让其成为 unhandled rejection（Node≥20 默认 crash）。
+    if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0 || port > 65535) {
+      void dcSend(dc, { k: 'ws-open-err', wid: frame.wid });
+      return;
+    }
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`ws://localhost:${port}${frame.path}`);
+    } catch {
+      // 防御纵深：一个坏帧（如非法 path）绝不能把被控端进程带走
+      void dcSend(dc, { k: 'ws-open-err', wid: frame.wid });
+      return;
+    }
     this.sockets.set(frame.wid, ws);
     ws.on('open', () => { void dcSend(dc, { k: 'ws-open-ok', wid: frame.wid }); });
     ws.on('error', () => { void dcSend(dc, { k: 'ws-open-err', wid: frame.wid }); });
