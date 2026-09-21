@@ -15,8 +15,9 @@
  */
 import type { RTCDataChannel, RTCIceServer } from 'werift';
 import { Peer, type LinkStatus } from './peer.js';
-import { HttpBridge, type DcLike } from './bridge/http.js';
+import { dcSend, HttpBridge, type DcLike } from './bridge/http.js';
 import { WsBridge } from './bridge/ws.js';
+import { assertPortAllowed, PortNotAllowedError } from './bridge/guard.js';
 import { decodeFrame, isPing, isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen, type TunnelFrame } from './frames.js';
 import { SignalingClient, type PollResult } from './signaling/client.js';
 import { isSigMessage, roomFor, type SigMessage } from './signaling/protocol.js';
@@ -51,6 +52,12 @@ export interface HostAgentOptions {
   pollMs?: number;
   /** ws-open 帧缺省目标本地端口（帧可自带 port 覆盖；两处皆无时 ws-open 回 open-err）。 */
   wsPort?: number;
+  /**
+   * 端口白名单（spec §5.3 安全洞补洞）：req/ws-open 帧分发进桥之前强制校验目标端口。
+   * 缺省放行（库层向后兼容）；CLI/daemon 装配必须传入（Task 17），否则 WebRTC 路径
+   * 可被 PWA 驱使打任意 localhost 端口。
+   */
+  isPortAllowed?: (port: number) => boolean;
 }
 
 // 调试日志（P2P_NET_DEBUG=1 启用）；错误类日志不受开关限制（轮询/onSignal 失败必须留痕）
@@ -89,9 +96,24 @@ export class PeerSession {
   lastStatus: LinkStatus = { state: 'closed', pairType: null };
   private disposed = false;
   private graceTimer?: ReturnType<typeof setTimeout>;
+  private readonly wsPort?: number;
+  private readonly isPortAllowed?: (port: number) => boolean;
 
-  constructor(wsPort?: number) {
+  constructor(wsPort?: number, isPortAllowed?: (port: number) => boolean) {
+    this.wsPort = wsPort;
+    this.isPortAllowed = isPortAllowed;
     this.wsBridge = new WsBridge({ port: wsPort });
+  }
+
+  /** §5.3 白名单校验：true=放行；仅 PortNotAllowedError 折成 false（拒绝），其余异常上抛。 */
+  private portAllowed(port: number): boolean {
+    try {
+      assertPortAllowed(this.isPortAllowed, port);
+      return true;
+    } catch (e) {
+      if (e instanceof PortNotAllowedError) return false;
+      throw e;
+    }
   }
 
   wireChannel(dc: RTCDataChannel, label: string, onServiceFrame?: (dc: RTCDataChannel, frame: unknown) => void): void {
@@ -106,8 +128,32 @@ export class PeerSession {
       dc.onmessage = (ev) => {
         const m = decodeFrame(ev.data);
         if (!m) return;
-        if (isReq(m) || isReqAbort(m)) { dbg('req', (m as { method?: string }).method, 'port=' + (m as { port?: number }).port, (m as { path?: string }).path); void this.httpBridge.handle(dc, m); return; }
-        if (isWsOpen(m) || isWsMsg(m) || isWsClose(m)) { void this.wsBridge.handle(dc, m); return; }
+        if (isReq(m)) {
+          // §5.3 白名单强制：先校验再触达 localhost——PWA 不得借 host 打任意端口。
+          // 403 后补 done 帧收尾（与 http.ts 400/502 错误路径同约定），否则客户端 SW 挂到 30s 超时。
+          if (!this.portAllowed(m.port)) {
+            console.error(`[p2p-net] req 拒绝：端口 ${m.port} 不在白名单（id=${m.id} ${m.method} ${m.path}）`);
+            void dcSend(dc, { k: 'res-head', id: m.id, status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+            void dcSend(dc, { k: 'res-chunk', id: m.id, dataB64: Buffer.from(`bridge error: port ${m.port} not in allowlist`, 'utf8').toString('base64'), done: true });
+            return;
+          }
+          dbg('req', m.method, 'port=' + m.port, m.path);
+          void this.httpBridge.handle(dc, m);
+          return;
+        }
+        if (isReqAbort(m)) { dbg('req-abort', m.id); void this.httpBridge.handle(dc, m); return; }
+        if (isWsOpen(m)) {
+          // 校验解析后的目标端口（帧可自带 port 覆盖，缺省回落 wsPort；两处皆无交桥回 open-err）
+          const port = m.port ?? this.wsPort;
+          if (typeof port === 'number' && !this.portAllowed(port)) {
+            console.error(`[p2p-net] ws-open 拒绝：端口 ${port} 不在白名单（wid=${m.wid} ${m.path}）`);
+            void dcSend(dc, { k: 'ws-close', wid: m.wid, code: 4403, reason: `port ${port} not in allowlist` });
+            return;
+          }
+          void this.wsBridge.handle(dc, m);
+          return;
+        }
+        if (isWsMsg(m) || isWsClose(m)) { void this.wsBridge.handle(dc, m); return; }
         onServiceFrame?.(dc, m);
       };
       return;
@@ -230,7 +276,7 @@ export class HostAgent {
       // 同设备换绑：dispose 旧会话并新建 PeerSession（POC「最新 offer 优先」语义限定在单设备内）。
       // dispose 不可逆（disposed 永久置位），复用旧对象会挡死宽限回调并让后续 dispose 早退。
       if (existing) { dbg('session replace', clientKey); existing.dispose(); this.sessions.delete(clientKey); }
-      const session = new PeerSession(this.opts.wsPort);
+      const session = new PeerSession(this.opts.wsPort, this.opts.isPortAllowed);
       this.sessions.set(clientKey, session);
       dbg('offer accepted', 'from=' + clientKey);
       await session.peer.setIceServers(ice);

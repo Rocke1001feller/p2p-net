@@ -15,6 +15,7 @@ export * from './status.js';
 export * from './peer.js';
 export * from './bridge/http.js';
 export * from './bridge/ws.js';
+export * from './bridge/guard.js';
 export * from './host.js';
 export * from './tunnel/client.js';
 export * from './tunnel/relay.js';
