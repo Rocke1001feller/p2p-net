@@ -157,6 +157,40 @@ test('HostAgent 集成：werift↔werift offer→DC→req→res→ctrl ping/pong
   assert.equal(agent.isRunning, false);
 });
 
+test('HostAgent：同设备重绑必须换新会话——替换后 disconnected 仍能 grace-drop（回归护栏）', async () => {
+  // 回归：旧代码 `session = existing ?? new PeerSession(...)` 后 `session.dispose()` 再 set 回路由表，
+  // 复用了同一个已 dispose 的对象。dispose 不可逆（disposed 永久置位）：
+  // (a) startGrace 回调被 `if (!this.disposed)` 永久挡死——被替换的会话再也无法 grace-drop；
+  // (b) 后续 dropSession/stop 的 dispose 早退，pc 与 bridges 永不关闭。
+  const agent = new HostAgent({
+    supabaseUrl: 'http://unused.invalid', publishableKey: 'pk', accessToken: () => null,
+    deviceId: 'd', uid: 'u', turnFetcher: async () => ({ iceServers: [] }),
+    signaling: new MemSignaling(), pollMs: 30,
+  });
+  const onSignal = (agent as unknown as { onSignal: (m: unknown) => Promise<void> }).onSignal.bind(agent);
+  const sessions = (agent as unknown as { sessions: Map<string, PeerSession> }).sessions;
+  // bogus sdp：acceptOffer 会失败，但会话已先入路由表——正是本测试要触达的状态
+  const bogusSdp = { type: 'offer', sdp: 'v=0 bogus' };
+  await onSignal({ type: 'offer', sid: 's1', from: 'phone-1', sdp: bogusSdp }).catch(() => {});
+  const first = sessions.get('phone-1');
+  assert.ok(first, '首个 offer 后应登记会话');
+  await onSignal({ type: 'offer', sid: 's2', from: 'phone-1', sdp: bogusSdp }).catch(() => {});
+  const second = sessions.get('phone-1');
+  assert.ok(second);
+  assert.notEqual(second, first, '重绑必须是新 PeerSession（dispose 不可逆，复用=宽限回调永久挡死）');
+  assert.equal(agent.sessionCount, 1, '同设备重绑后仍只有一个会话');
+  // 旧会话已 dispose：grace 回调不得再触发
+  let oldFired = 0;
+  first.startGrace(5, () => { oldFired += 1; });
+  // 关键断言：替换后的会话 disconnected → 宽限到期必须能回调（dropSession 路径）
+  let dropped = 0;
+  second.startGrace(5, () => { dropped += 1; });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(oldFired, 0, '旧会话 dispose 后不得再回调');
+  assert.equal(dropped, 1, '替换后的会话必须仍能 grace-drop');
+  agent.stop();
+});
+
 test('HostAgent：ws-open 在未配置 wsPort 时回 open-err（不静默）', async () => {
   const agent = new HostAgent({
     supabaseUrl: 'http://unused.invalid',

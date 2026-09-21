@@ -227,9 +227,10 @@ export class HostAgent {
       if (!clientKey) { console.error('[p2p-net] offer 缺 from，无法路由应答（客户端必须带身份）'); return; }
       const ice = await this.getIceServers();
       const existing = this.sessions.get(clientKey);
-      const session = existing ?? new PeerSession(this.opts.wsPort);
-      // 同设备换绑：先关旧 peer，再点新连接（POC「最新 offer 优先」语义限定在单设备内）
-      if (existing) { dbg('session replace', clientKey); session.dispose(); this.sessions.delete(clientKey); }
+      // 同设备换绑：dispose 旧会话并新建 PeerSession（POC「最新 offer 优先」语义限定在单设备内）。
+      // dispose 不可逆（disposed 永久置位），复用旧对象会挡死宽限回调并让后续 dispose 早退。
+      if (existing) { dbg('session replace', clientKey); existing.dispose(); this.sessions.delete(clientKey); }
+      const session = new PeerSession(this.opts.wsPort);
       this.sessions.set(clientKey, session);
       dbg('offer accepted', 'from=' + clientKey);
       await session.peer.setIceServers(ice);
