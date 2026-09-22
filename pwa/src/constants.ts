@@ -37,3 +37,12 @@ export function stunServersFromRelays(relays: { url: string }[]): RTCIceServer[]
   }
   return urls.length ? [{ urls }] : [];
 }
+
+/**
+ * tunnelUrl 形态闸门：`https?://<host>/tunnel/s/<sid>`。配对数据在扫码/粘贴/投递链路可能被
+ * 截断或损坏（2026-09-22 真机实锤：localStorage 存进含 U+FFFD 的脏串，隧道探针打到 SPA 回退页，
+ * 报出误导性 JSON 错误且静默丧失兜底能力）。入口只认此形态，脏值一律拒绝并由上层提示重新配对。
+ */
+export function isPlausibleTunnelUrl(u: string): boolean {
+  return /^https?:\/\/[^\s/]+\/tunnel\/s\/[^\s/]+\/?$/.test(u);
+}

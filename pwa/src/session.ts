@@ -14,7 +14,7 @@
  * 会话语义：connect() 可重复调用 = 重连（规则②平移）；stop() 为用户主动断开（不触发自动重连）。
  */
 import { SignalingClient } from 'p2p-net/browser';
-import { CASCADE_TIMEOUT_MS, DISCOVERY_PORT } from './constants.js';
+import { CASCADE_TIMEOUT_MS, DISCOVERY_PORT, isPlausibleTunnelUrl } from './constants.js';
 import { fetchTurnCredentials } from './cloud.js';
 import { WebRtcSession, type LightStatus } from './signaling-web.js';
 
@@ -55,6 +55,8 @@ const isOk = (s: LightStatus) => s.state === 'connected';
 export class CascadeSession {
   mode: LinkMode | null = null;
   tunnelUrl: string | null = null;
+  /** 本次 connect 收到的 tunnelUrl 形态非法（配对数据损坏）——隧道段据此给出"重新扫码"指引。 */
+  private tunnelUrlInvalid = false;
   private web: WebRtcSession | null = null;
   private stopped = false;
   private tunnelDown = false;
@@ -77,19 +79,17 @@ export class CascadeSession {
   async connect(deskDeviceId: string, knownTunnelUrl: string | null): Promise<void> {
     this.stopped = false;
     this.tunnelDown = false;
-    if (knownTunnelUrl) this.tunnelUrl = knownTunnelUrl;
+    this.tunnelUrlInvalid = false;
+    if (knownTunnelUrl) {
+      // 形态闸门：脏值（截断/乱码）不得入库使用，否则隧道探针会命中 SPA 回退页报出误导性错误。
+      if (isPlausibleTunnelUrl(knownTunnelUrl)) this.tunnelUrl = knownTunnelUrl;
+      else this.tunnelUrlInvalid = true;
+    }
     this.teardownWeb();
 
     const stages: { mode: LinkMode; run: () => Promise<void> }[] = [];
     if (this.opts.forceTunnel) {
-      stages.push({
-        mode: 'tunnel',
-        run: async () => {
-          if (!this.tunnelUrl) throw new Error('no_tunnel_url');
-          this.emit({ state: 'connecting', pairType: null, mode: 'tunnel', stage: 'tunnel' });
-          await this.probeTunnel(CASCADE_TIMEOUT_MS.tunnel);
-        },
-      });
+      stages.push({ mode: 'tunnel', run: () => this.runTunnelStage() });
     } else {
       if (!this.opts.forceTurn) {
         stages.push({
@@ -107,14 +107,7 @@ export class CascadeSession {
           },
         });
       }
-      stages.push({
-        mode: 'tunnel',
-        run: async () => {
-          if (!this.tunnelUrl) throw new Error('no_tunnel_url');
-          this.emit({ state: 'connecting', pairType: null, mode: 'tunnel', stage: 'tunnel' });
-          await this.probeTunnel(CASCADE_TIMEOUT_MS.tunnel);
-        },
-      });
+      stages.push({ mode: 'tunnel', run: () => this.runTunnelStage() });
       stages.push({
         mode: 'turn',
         run: async () => {
@@ -126,23 +119,28 @@ export class CascadeSession {
       });
     }
 
+    const stageErrs: string[] = [];
     for (const st of stages) {
       if (this.stopped) throw new Error('stopped');
       try {
         await st.run();
         this.mode = st.mode;
-        this.emit({ state: 'connected', pairType: st.mode === 'p2p' ? 'p2p' : 'relay', mode: st.mode, stage: 'done' });
+        // pairType 只对 WebRTC 段有意义（getStats 真值会在心跳里覆盖它）；tunnel 段没有 ICE 对，
+        // 谎报 'relay' 会让状态条把「隧道」显示成「中继」（2026-09-22 真机实锤）。
+        this.emit({ state: 'connected', pairType: st.mode === 'p2p' ? 'p2p' : st.mode === 'turn' ? 'relay' : null, mode: st.mode, stage: 'done' });
         return;
       } catch (e) {
         if (this.stopped) throw new Error('stopped');
         this.teardownWeb();
         this.emit({ state: 'connecting', pairType: null, stage: st.mode });
-        console.log(`[cascade] ${st.mode} 段失败：${e instanceof Error ? e.message : e}`);
+        const em = e instanceof Error ? e.message : String(e);
+        stageErrs.push(`${st.mode}=${em}`);
+        console.log(`[cascade] ${st.mode} 段失败：${em}`);
       }
     }
     this.mode = null;
     this.emit({ state: 'failed', pairType: null });
-    throw new Error('所有通道均不可达（桌面不在线或网络受限）');
+    throw new Error(`所有通道均不可达（${stageErrs.join('；')}）`);
   }
 
   /** 用户主动断开：置 stopped，onStatus off；后续 connect() 复位。 */
@@ -198,6 +196,15 @@ export class CascadeSession {
     return policy === 'relay' ? 'turn' : 'p2p';
   }
 
+  /** 隧道段（forceTunnel 与常规级联共用）：无网关/脏网关给出可操作的差异化错误。 */
+  private async runTunnelStage(): Promise<void> {
+    if (!this.tunnelUrl) {
+      throw new Error(this.tunnelUrlInvalid ? 'tunnel_url_invalid（配对数据损坏，请重新扫码配对）' : 'no_tunnel_url');
+    }
+    this.emit({ state: 'connecting', pairType: null, mode: 'tunnel', stage: 'tunnel' });
+    await this.probeTunnel(CASCADE_TIMEOUT_MS.tunnel);
+  }
+
   // ---- tunnel 段：网关 HTTP 探活（发现端点；失败再试工作台 /health 形态的根路径） ----
   private async probeTunnel(timeoutMs: number): Promise<void> {
     const gw = this.tunnelUrl!.replace(/\/+$/, '');
@@ -210,6 +217,10 @@ export class CascadeSession {
         // 内容校验：Caddy try_files 会把 /s/* 回退成 SPA index.html（200 假阳性）——
         // 必须确认是 daemon 发现载荷（JSON 且含 services 数组）才算隧道活着
         const text = await res.text();
+        if (text.trimStart().startsWith('<')) {
+          lastErr = new Error('tunnel_probe_got_html（命中 SPA 回退而非隧道网关：tunnelUrl 路径错或 relay 未挂 /tunnel 路由）');
+          continue;
+        }
         const j = JSON.parse(text) as { services?: unknown };
         if (Array.isArray(j.services)) { this.tunnelDown = false; return; }
         lastErr = new Error('tunnel_probe_not_services_json');

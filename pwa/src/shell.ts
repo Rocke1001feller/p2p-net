@@ -421,10 +421,15 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
   const iceOverride = Q.get('ice');
   const devOpts: { p2pIceServers?: RTCIceServer[]; forceTurn?: boolean; p2pFullIce?: boolean; forceTunnel?: boolean } = {};
   if (iceOverride) { try { devOpts.p2pIceServers = JSON.parse(iceOverride) as RTCIceServer[]; } catch { /* 忽略 */ } }
-  if (Q.get('transport') === 'relay') devOpts.forceTurn = true;
+  if (Q.get('transport') === 'relay') {
+    devOpts.forceTurn = true;
+    log('[exp] 强制 TURN 中继模式（只跑 TURN 段）');
+    toast('exp: 强制 TURN 中继');
+  }
   if (Q.get('tunnel') === '1' || Q.get('notunnel') === '1') {
     devOpts.forceTunnel = true;
     log('[exp] 强制隧道模式（跳过 WebRTC）');
+    toast('exp: 强制隧道');
   }
   const p2pIce = Q.get('p2pice');
   if (p2pIce === 'full' || p2pIce === 'stun') {
