@@ -38,6 +38,14 @@ function assertOrder(calls: string[], expected: string[]): void {
   }
 }
 
+async function waitFor(cond: () => boolean, what: string, ms = 3000): Promise<void> {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > ms) throw new Error(`waitFor 超时：${what}`);
+    await new Promise((r) => setTimeout(r, 2));
+  }
+}
+
 async function flush(): Promise<void> {
   for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
 }
@@ -48,6 +56,12 @@ interface MakeOpts {
   /** ensureFreshToken 的返回（默认 FRESH；传 AUTH 表示未变更）。 */
   freshToken?: AuthState;
   ensureError?: Error;
+  /** 逐次调用定制 ensureFreshToken 行为（callIndex 从 1 起）；设置后覆盖 freshToken/ensureError。 */
+  ensureImpl?: (callIndex: number) => AuthState | Promise<AuthState>;
+  /** 周期续期间隔（注入小值驱动测试；缺省走生产 10min，测试期间不会触发）。 */
+  tokenRefreshIntervalMs?: number;
+  /** 装配中途失败注入：startDiscovery 抛该错误。 */
+  throwAtDiscovery?: Error;
   cfg?: AppConfig;
 }
 
@@ -71,6 +85,7 @@ function makeDeps(overrides: MakeOpts = {}) {
   let savedConfig: AppConfig | undefined;
   let controlGetStatus: (() => unknown) | undefined;
   let discoveryArgs: { getServices(): ServiceInfo[]; deviceId(): string } | undefined;
+  let ensureCalls = 0;
   const tunnelUrls: string[] = [];
 
   const scanner: Scanner = {
@@ -111,6 +126,8 @@ function makeDeps(overrides: MakeOpts = {}) {
     },
     ensureFreshTokenFn: async () => {
       calls.push('ensureFreshToken');
+      const n = ++ensureCalls;
+      if (overrides.ensureImpl) return overrides.ensureImpl(n);
       if (overrides.ensureError) throw overrides.ensureError;
       return overrides.freshToken ?? FRESH;
     },
@@ -129,6 +146,7 @@ function makeDeps(overrides: MakeOpts = {}) {
     }) as typeof startControlPlane,
     startDiscoveryFn: ((o: { getServices(): ServiceInfo[]; deviceId(): string }) => {
       calls.push('discovery');
+      if (overrides.throwAtDiscovery) throw overrides.throwAtDiscovery;
       discoveryArgs = o;
       return fakeServer('discovery');
     }) as typeof startDiscovery,
@@ -158,6 +176,7 @@ function makeDeps(overrides: MakeOpts = {}) {
       return { ticketId: 't-1' };
     },
     pollTicketStatusFn: async () => 'pending',
+    tokenRefreshIntervalMs: overrides.tokenRefreshIntervalMs,
   };
   return {
     deps,
@@ -173,6 +192,7 @@ function makeDeps(overrides: MakeOpts = {}) {
     },
     savedAuth: () => savedAuth,
     savedConfig: () => savedConfig,
+    ensureCallCount: () => ensureCalls,
     controlStatus: () => {
       assert.ok(controlGetStatus);
       return controlGetStatus();
@@ -314,4 +334,71 @@ test('start：token 未变不重存 auth；config 已有 deviceId 时复用（�
   } finally {
     await handle.stop();
   }
+});
+
+const NEWER: AuthState = { ...AUTH, accessToken: 'at-newer' };
+
+test('运行期 token 周期续期：闭包读到新令牌 + saveAuth 重存 + stop 后不再续期', async () => {
+  const ctx = makeDeps({
+    tokenRefreshIntervalMs: 5,
+    ensureImpl: (n) => (n === 1 ? FRESH : NEWER),
+  });
+  const handle = await runStart({}, ctx.deps);
+  try {
+    assert.equal(ctx.hostOpts().accessToken!(), 'at-fresh', '启动时闭包读到初始续期令牌');
+    await waitFor(() => ctx.hostOpts().accessToken!() === 'at-newer', 'HostAgent accessToken 闭包应读到周期续期后的新令牌');
+    await waitFor(() => ctx.calls.filter((c) => c === 'saveAuth').length >= 2, '周期续期令牌变更必须重存 auth.json');
+    assert.deepEqual(ctx.savedAuth(), NEWER);
+    // 令牌本身绝不进日志
+    assert.ok(!JSON.stringify(ctx.logLines).includes('at-newer'), '日志不得含新令牌');
+  } finally {
+    await handle.stop();
+  }
+  // stop 后静默：不再发起任何续期
+  const ensureCallsAtStop = ctx.ensureCallCount();
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(ctx.ensureCallCount(), ensureCallsAtStop, 'stop 后不得再发起续期');
+});
+
+test('周期续期 AuthError：人话日志 + auth_refresh_failed 事件，进程保活', async () => {
+  const ctx = makeDeps({
+    tokenRefreshIntervalMs: 5,
+    ensureImpl: (n) => {
+      if (n === 1) return FRESH;
+      throw new AuthError('token 续期失败：Invalid Refresh Token。登录态已失效，请重新运行 p2p-net login');
+    },
+  });
+  const handle = await runStart({}, ctx.deps);
+  try {
+    await waitFor(() => ctx.logLines.some((l) => l.event === 'auth_refresh_failed'), '缺 auth_refresh_failed 事件');
+    const errLine = ctx.logLines.find((l) => l.level === 'error' && l.layer === 'auth');
+    assert.ok(errLine, `缺 auth 层 error 日志: ${JSON.stringify(ctx.logLines)}`);
+    assert.match(String(errLine.msg), /p2p-net login/, '错误文案应含 login 指引');
+    assert.ok(!JSON.stringify(ctx.logLines).includes('rt-1'), '日志不得含 refreshToken');
+    // 进程保活：没有任何组件被收尾，HostAgent/配对环仍在跑
+    assert.deepEqual(ctx.stops, [], `续期失败不得停组件: ${ctx.stops.join()}`);
+  } finally {
+    await handle.stop();
+  }
+});
+
+test('装配中途失败：已启动组件反向回退，原始错误原样传播', async () => {
+  const boom = new Error('19728 被占用：可能已有一个 p2p-net 实例，运行 `p2p-net status` 确认');
+  const ctx = makeDeps({ throwAtDiscovery: boom });
+  await assert.rejects(runStart({}, ctx.deps), (e: unknown) => {
+    assert.equal(e, boom, '原始错误必须原样传播（不得重包装）');
+    return true;
+  });
+  // discovery 之前已起 scanner + control：两者都必须被收尾
+  assert.ok(ctx.stops.includes('scanner.stop'), `scanner 未回退: ${ctx.stops.join()}`);
+  assert.ok(ctx.stops.includes('control.close'), `control 未回退: ${ctx.stops.join()}`);
+  // 后起的先收（反向回退）
+  assert.ok(
+    ctx.stops.indexOf('control.close') < ctx.stops.indexOf('scanner.stop'),
+    `回退顺序应为先 control 后 scanner: ${ctx.stops.join()}`,
+  );
+  // discovery 之后的组件不应起来
+  assert.ok(!ctx.calls.includes('hostAgent.new'), 'HostAgent 不应装配');
+  assert.ok(!ctx.calls.includes('tunnel.connect'), '隧道不应连接');
+  assert.ok(!ctx.calls.includes('issueTicket'), '配对不应出票');
 });
