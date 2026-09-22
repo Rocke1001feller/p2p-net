@@ -73,7 +73,10 @@ export function setStatus(s: CascadeStatus, deviceName: string): void {
   const rtt = $('connRtt');
   if (s.state === 'connected') {
     if (s.mode) lastMode = s.mode;
-    const mode = s.mode ?? lastMode ?? 'p2p';
+    // 落点诚实的最高优先级是 getStats 的 pairType：p2p 段也可能选中对端 relay 候选
+    // （桌面常备 TURN 候选），此时 stage 报 p2p 但流量实际在走中继（2026-09-22 蜂窝真机实锤）。
+    const byPair = s.pairType === 'relay' ? 'turn' : s.pairType === 'p2p' ? 'p2p' : null;
+    const mode = byPair ?? s.mode ?? lastMode ?? 'p2p';
     dot.style.background = mode === 'p2p' ? 'var(--p2p)' : 'var(--relay)';
     dot.className = 'dot breath';
     title.innerHTML = ''; // 用 DOM 组装，避免 innerHTML 注入面

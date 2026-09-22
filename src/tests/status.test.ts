@@ -54,6 +54,15 @@ test('未知候选类型（prflx 等）→ null', () => {
   assert.equal(pairTypeFromStats(rows), null);
 });
 
+test('local=srflx + remote=relay → relay（任一端 relay 即过 TURN，蜂窝真机口径）', () => {
+  const rows: StatsRow[] = [
+    { type: 'candidate-pair', state: 'succeeded', localCandidateId: 'L', remoteCandidateId: 'R' },
+    { id: 'L', type: 'local-candidate', candidateType: 'srflx', address: '8.8.8.8', port: 61000 },
+    { id: 'R', type: 'remote-candidate', candidateType: 'relay', address: '39.106.59.183', port: 50018 },
+  ];
+  assert.equal(pairTypeFromStats(rows), 'relay');
+});
+
 test('rttFromStats：非数值/缺字段 → undefined', () => {
   assert.equal(rttFromStats([{ type: 'candidate-pair', state: 'succeeded' }]), undefined);
   assert.equal(rttFromStats([]), undefined);

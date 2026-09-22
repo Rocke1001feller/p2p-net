@@ -18,8 +18,10 @@ export function pairTypeFromStats(rows: StatsRow[]): 'p2p' | 'relay' | null {
   if (!pair) return null;
   const local = rows.find((r) => r.id === pair.localCandidateId);
   const remote = rows.find((r) => r.id === pair.remoteCandidateId);
+  // 任一端是 relay 候选，流量就必然过 TURN——本地优先的取法会漏报对端 relay
+  // （2026-09-22 蜂窝真机实锤：手机 local=srflx / 桌面 local=relay，同一对两侧判定相反）。
+  if (local?.candidateType === 'relay' || remote?.candidateType === 'relay') return 'relay';
   const t = local?.candidateType ?? remote?.candidateType;
-  if (t === 'relay') return 'relay';
   if (t === 'host' || t === 'srflx') return 'p2p';
   return null;
 }
