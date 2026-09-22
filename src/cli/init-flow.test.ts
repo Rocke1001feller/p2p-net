@@ -4,12 +4,13 @@
  *
  *  秘密纪律断言策略：turnSecret/tunnelSecret 由实现随机生成，测试无法预知字面值，
  *  改从它们"越界"的位置截获（mgmt.setSecrets 载荷 / 远端 exec 命令串），再断言
- *  该值不出现在任何本地落盘文件、stdout 与日志里。
+ *  该值不出现在 stdout 与日志里。plan 裁决：tunnelSecret 是 start 运行时凭证，
+ *  必须落 0600 config.json（且仅此处）；turnSecret/token/密码类任何本地 artifact 绝不含。
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,9 +20,10 @@ import { SshError, type VpsCreds } from './init/ssh.js';
 import type { SshRunnerLike } from './init/vps.js';
 import type { SupabaseMgmt } from './init/mgmt.js';
 import type { Logger } from '../log/logger.js';
-import { loadConfig } from '../server/store.js';
+import { loadConfig, saveConfig } from '../server/store.js';
 
 const TOKEN = 'mgmt-token-secret';
+const TOKEN2 = 'mgmt-token-resume-secret';
 const EMAIL = 'a@b.c';
 const ADMIN_PW = 'admin-pw-secret';
 const PW1 = 'vps-one-pw 含空格';
@@ -198,11 +200,12 @@ test('init 编排顺序：supabase 引导 → 逐台 VPS → 落 config → 打�
   // token/密码类提问全部走 secret 模式（VPS 三行 + token + 管理员密码 = 5）
   assert.equal(calls.filter((c) => c === 'prompt:secret').length, 5);
 
-  // config.json 落盘：只含公开字段，relays 完整
+  // config.json 落盘：supabaseUrl/publishableKey/relays 完整 + tunnelSecret（0600，plan 裁决的运行时凭证）
   const cfg = loadConfig(dir);
   assert.equal(cfg.supabaseUrl, 'https://newref.supabase.co');
   assert.equal(cfg.publishableKey, 'anon-jwt');
   assert.deepEqual(cfg.relays, [{ ip: '1.1.1.1' }, { ip: '2.2.2.2' }]);
+  assert.match(cfg.tunnelSecret, /^[0-9a-f]{64}$/);
   assert.equal(statSync(join(dir, 'config.json')).mode & 0o777, 0o600);
 
   // 落 config 先于打印清单：清单出现时 config.json 已是终态
@@ -226,18 +229,30 @@ test('init 编排顺序：supabase 引导 → 逐台 VPS → 落 config → 打�
   const tunnelSecret = /TUNNEL_SECRET='([^']+)'/.exec(initCmd ?? '')?.[1];
   assert.ok(tunnelSecret && /^[0-9a-f]{64}$/.test(tunnelSecret), `tunnelSecret 未注入远端命令: ${initCmd}`);
 
-  const diskText = readFileSync(join(dir, 'config.json'), 'utf8') + readFileSync(join(dir, 'init-state.json'), 'utf8');
+  const configText = readFileSync(join(dir, 'config.json'), 'utf8');
+  const stateText = readFileSync(join(dir, 'init-state.json'), 'utf8');
   const logText = JSON.stringify(lines);
-  for (const s of [TOKEN, ADMIN_PW, PW1, PW2, SERVICE_ROLE, turnSecret, tunnelSecret]) {
-    assert.ok(!diskText.includes(s), `本地落盘泄漏秘密: ${s}`);
+  // state 只记阶段 + projectRef，无秘密
+  assert.deepEqual(JSON.parse(stateText), { supabaseDone: true, projectRef: 'newref', vpsDone: ['1.1.1.1', '2.2.2.2'] });
+  // tunnelSecret：必须落 config.json（0600），且只落此处——stdout/日志/init-state 绝不含
+  assert.ok(configText.includes(tunnelSecret), 'config.json 缺 tunnelSecret（plan 裁决的运行时凭证）');
+  for (const s of [tunnelSecret]) {
+    assert.ok(!stateText.includes(s), `init-state 泄漏 tunnelSecret`);
+    assert.ok(!outText.includes(s), `stdout 泄漏 tunnelSecret`);
+    assert.ok(!logText.includes(s), `日志泄漏 tunnelSecret`);
+  }
+  // turnSecret / token / service_role / 管理员密码 / VPS 密码：任何本地落盘、stdout、日志绝不含
+  for (const s of [TOKEN, ADMIN_PW, PW1, PW2, SERVICE_ROLE, turnSecret]) {
+    assert.ok(!configText.includes(s), `config.json 泄漏秘密: ${s}`);
+    assert.ok(!stateText.includes(s), `init-state 泄漏秘密: ${s}`);
     assert.ok(!outText.includes(s), `stdout 泄漏秘密: ${s}`);
     assert.ok(!logText.includes(s), `日志泄漏秘密: ${s}`);
   }
 });
 
-test('单台 VPS 失败即停，提示安全组复核，已完成阶段可续跑', async () => {
+test('单台 VPS 失败即停，提示安全组复核；续跑重推 secrets 并幂等重开全部 VPS', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'p2p-net-init-'));
-  const { log } = fakeLogger();
+  const { log, lines } = fakeLogger();
 
   // 第一次跑：vps2 SSH 拒连 → 失败即停
   const calls1: string[] = [];
@@ -272,33 +287,104 @@ test('单台 VPS 失败即停，提示安全组复核，已完成阶段可续跑
   // 失败即停：vps2 失败后流程终止（vps1 已收尾、vps2 只 connect 过一次）
   assertOrder(calls1, ['bootstrap:probeTurn', 'vps:1.1.1.1', 'vps:end:1.1.1.1', 'vps:2.2.2.2']);
   assert.equal(calls1.filter((c) => c === 'vps:2.2.2.2').length, 1);
+  const turn1 = h1.captured.secrets?.TURN_STATIC_AUTH_SECRET;
+  assert.ok(turn1, '首轮应已写入 TURN secrets');
 
-  // state 文件记录完成阶段（且不含任何秘密）
+  // state 文件记录完成阶段 + projectRef（续跑重推 secrets 所需），不含任何秘密
   const stateText = readFileSync(join(dir, 'init-state.json'), 'utf8');
-  assert.deepEqual(JSON.parse(stateText), { supabaseDone: true, vpsDone: ['1.1.1.1'] });
-  for (const s of [PW1, PW2, TOKEN, ADMIN_PW, SERVICE_ROLE]) assert.ok(!stateText.includes(s));
+  assert.deepEqual(JSON.parse(stateText), { supabaseDone: true, projectRef: 'newref', vpsDone: ['1.1.1.1'] });
+  for (const s of [PW1, PW2, TOKEN, ADMIN_PW, SERVICE_ROLE, turn1]) assert.ok(!stateText.includes(s));
 
-  // 第二次跑（续跑）：只问 VPS 列表；supabase 不重复引导；已完成 VPS 跳过
+  // 第二次跑（续跑）：只问 VPS 列表 + token；不重复 bootstrap，仅重推 secrets；全部 VPS 幂等重开
   const calls2: string[] = [];
-  const answers2 = [...VPS_ANSWERS];
+  const answers2 = [...VPS_ANSWERS, TOKEN2];
   const h2 = fakeMgmt(calls2);
+  const { factory: factory2, execCommands: execCommands2 } = fakeRunnerFactory(calls2);
   const out2: string[] = [];
   await runInit({
     configDir: dir,
     promptFn: scriptedPrompt(answers2, calls2),
     mgmt: h2.mgmt,
     fetchImpl: makeFetch(calls2),
-    runnerFactory: fakeRunnerFactory(calls2).factory,
+    runnerFactory: factory2,
     certDaysLeftProbe: async () => 30,
     tunnelStatusProbe: async () => 401,
     pwaDistDir: '/tmp/pwa-dist-fake',
     log,
     out: (l) => out2.push(l),
   });
-  assert.ok(!calls2.some((c) => c.startsWith('bootstrap:')), `续跑不应重复 supabase 引导: ${calls2.join(' → ')}`);
-  assert.ok(!calls2.includes('vps:1.1.1.1'), `已完成 VPS 应跳过: ${calls2.join(' → ')}`);
-  assert.ok(calls2.includes('vps:2.2.2.2'), `未完成 VPS 应补跑: ${calls2.join(' → ')}`);
-  assert.equal(answers2.length, 0, '续跑不应再提 token/邮箱/密码');
-  assert.deepEqual(loadConfig(dir).relays, [{ ip: '1.1.1.1' }, { ip: '2.2.2.2' }]);
+
+  // bootstrap 不重复执行；只重推 setSecrets（新 turnSecret + 全量 TURN_HOSTS）
+  assert.deepEqual(
+    calls2.filter((c) => c.startsWith('bootstrap:')),
+    ['bootstrap:setSecrets'],
+    `续跑应只重推 secrets: ${calls2.join(' → ')}`,
+  );
+  const turn2 = h2.captured.secrets?.TURN_STATIC_AUTH_SECRET;
+  assert.ok(turn2 && /^[0-9a-f]{64}$/.test(turn2) && turn2 !== turn1, '续跑必须重新生成 turnSecret 并重推');
+  assert.deepEqual(JSON.parse(h2.captured.secrets?.TURN_HOSTS ?? ''), ['1.1.1.1', '2.2.2.2']);
+
+  // 全部 VPS 幂等重开（不按 vpsDone 跳过——plan 裁决：新密钥必须送达每台 VPS）
+  assert.ok(calls2.includes('vps:1.1.1.1') && calls2.includes('vps:2.2.2.2'), `续跑应重开全部 VPS: ${calls2.join(' → ')}`);
+  assert.equal(answers2.length, 0, '续跑不应再提 projectRef/邮箱/密码');
+
+  // config.json 重写为本轮新 tunnelSecret（≠ 首轮）
+  const initCmd2 = execCommands2.find((c) => c.includes('TUNNEL_SECRET='));
+  const tunnel2 = /TUNNEL_SECRET='([^']+)'/.exec(initCmd2 ?? '')?.[1];
+  const cfg = loadConfig(dir);
+  assert.equal(cfg.tunnelSecret, tunnel2);
+  assert.deepEqual(cfg.relays, [{ ip: '1.1.1.1' }, { ip: '2.2.2.2' }]);
   assert.ok(out2.join('\n').includes('service install'));
+
+  // 续跑秘密纪律：两轮 turnSecret、续跑 token 绝不落任何本地 artifact/stdout/日志
+  const diskText2 = readFileSync(join(dir, 'init-state.json'), 'utf8');
+  const logText = JSON.stringify(lines);
+  for (const s of [TOKEN2, turn1, turn2]) {
+    assert.ok(!diskText2.includes(s), `init-state 泄漏秘密: ${s}`);
+    assert.ok(!out2.join('\n').includes(s), `stdout 泄漏秘密: ${s}`);
+    assert.ok(!logText.includes(s), `日志泄漏秘密: ${s}`);
+  }
+});
+
+test('旧 state 缺 projectRef → 回退完整 bootstrap 引导（幂等）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'p2p-net-init-'));
+  const { log } = fakeLogger();
+  // 预置旧版 state（无 projectRef）+ 旧 config（含旧 tunnelSecret）
+  saveConfig(dir, {
+    supabaseUrl: 'https://legacy.supabase.co',
+    publishableKey: 'anon-old',
+    tunnelSecret: 'old-tunnel-secret',
+    relays: [{ ip: '1.1.1.1' }],
+  });
+  writeFileSync(join(dir, 'init-state.json'), JSON.stringify({ supabaseDone: true, vpsDone: ['1.1.1.1'] }));
+
+  const calls: string[] = [];
+  const answers = [...VPS_ANSWERS, ...SUPABASE_ANSWERS];
+  const h = fakeMgmt(calls);
+  await runInit({
+    configDir: dir,
+    promptFn: scriptedPrompt(answers, calls),
+    mgmt: h.mgmt,
+    fetchImpl: makeFetch(calls),
+    runnerFactory: fakeRunnerFactory(calls).factory,
+    certDaysLeftProbe: async () => 30,
+    tunnelStatusProbe: async () => 401,
+    pwaDistDir: '/tmp/pwa-dist-fake',
+    log,
+    out: () => {},
+  });
+
+  // 完整 bootstrap 重跑（幂等：createProject 因 projectRef 留空而走自动新建）
+  assertOrder(calls, ['bootstrap:waitHealthy', 'bootstrap:setSecrets', 'bootstrap:probeTurn', 'vps:1.1.1.1', 'vps:2.2.2.2']);
+  assert.equal(answers.length, 0, '回退路径应收齐 token/projectRef/region/邮箱/密码');
+  // config 被重写为新 supabaseUrl + 新 tunnelSecret；state 补上 projectRef
+  const cfg = loadConfig(dir);
+  assert.equal(cfg.supabaseUrl, 'https://newref.supabase.co');
+  assert.notEqual(cfg.tunnelSecret, 'old-tunnel-secret');
+  assert.match(cfg.tunnelSecret, /^[0-9a-f]{64}$/);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'init-state.json'), 'utf8')), {
+    supabaseDone: true,
+    projectRef: 'newref',
+    vpsDone: ['1.1.1.1', '2.2.2.2'],
+  });
 });

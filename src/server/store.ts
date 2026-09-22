@@ -2,9 +2,9 @@
  *  原子写统一走 writeFileSync(tmp) → chmod 0600 → renameSync：
  *  tmp 先建后 chmod 再改名，任何时刻读者看到的要么是旧文件要么是新文件，绝无半截内容；
  *  0600 显式 chmod 不依赖 umask。
- *  config.json 只含公开字段（supabaseUrl/publishableKey/relays）；auth.json 由 Task 14 写入
- *  （含 accessToken/refreshToken，0600 是硬要求）。两者都绝不含 Supabase Access Token /
- *  service_role / VPS 密码 / turnSecret / tunnelSecret。
+ *  config.json 含 tunnelSecret（plan 裁决：它是 start 运行时拼隧道 token 的凭证，必须随
+ *  0600 配置持久化）；auth.json 由 Task 14 写入（含 accessToken/refreshToken，0600 是硬要求）。
+ *  Supabase Access Token / service_role / VPS 密码 / turnSecret 绝不落本地盘。
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -13,6 +13,8 @@ import { dirname, join } from 'node:path';
 export interface AppConfig {
   supabaseUrl: string;
   publishableKey: string;
+  /** 隧道共享密钥（start 运行时 HMAC(tunnelSecret, deviceId) 拼隧道 token）。0600 落盘，不进日志/stdout。 */
+  tunnelSecret: string;
   relays: { ip: string }[];
   deviceId?: string;
 }
@@ -42,9 +44,10 @@ export function loadConfig(dir: string): AppConfig {
     typeof o !== 'object' || o === null ||
     typeof o.supabaseUrl !== 'string' || o.supabaseUrl === '' ||
     typeof o.publishableKey !== 'string' || o.publishableKey === '' ||
+    typeof o.tunnelSecret !== 'string' || o.tunnelSecret === '' ||
     !Array.isArray(o.relays) || o.relays.some((r) => typeof (r as { ip?: unknown })?.ip !== 'string')
   ) {
-    throw new ConfigError(`配置 ${p} 字段缺失或畸形（需要 supabaseUrl/publishableKey/relays），请重跑 p2p-net init 重建`);
+    throw new ConfigError(`配置 ${p} 字段缺失或畸形（需要 supabaseUrl/publishableKey/tunnelSecret/relays），请重跑 p2p-net init 重建`);
   }
   return o as AppConfig;
 }

@@ -2,13 +2,17 @@
  *  凭据 → bootstrapSupabase → 逐台 provisionVps（串行，失败即停）→ saveConfig → 打印安全组
  *  清单 + `p2p-net service install` 建议。
  *
- *  断点续跑：init-state.json 只记录完成阶段（{supabaseDone, vpsDone}），绝不含任何秘密。
- *  已完成阶段自动跳过；Supabase 阶段完成后 supabaseUrl/publishableKey 从 config.json 读回。
+ *  断点续跑（plan 裁决语义：重生成 → 重推 → 幂等重开，不做跳过）：
+ *  - init-state.json 记录 {supabaseDone, projectRef, vpsDone}（projectRef 非秘密，0600），绝无密钥；
+ *  - 续跑时密钥全部重新生成，凭 state.projectRef 仅重收 Access Token 重推 setSecrets(turnSecret)
+ *    （project 不再新建）；state 缺 projectRef（旧版/残缺）则回退完整 bootstrapSupabase（幂等）；
+ *  - 随后幂等重开列表内全部 VPS（init-node.sh 重渲配置并重启），并重写 config.json（含新 tunnelSecret）——
+ *    保证 Supabase、每台 VPS、本地 config 三处的 turnSecret/tunnelSecret 永远同属一轮。
  *
  *  秘密纪律（与 supabase.ts/vps.ts/ssh.ts 同一标准）：
- *  - turnSecret/tunnelSecret 每次运行 randomBytes 现生成，只存内存，经编排器写入 VPS/Supabase，
- *    绝不落本地盘、不进日志/stdout/错误消息（续跑没有旧密钥可用，只能重新生成——见报告说明）；
- *  - Supabase Access Token / 管理员密码 / VPS 密码只进 prompt 答案与对应编排器入参；
+ *  - turnSecret 每次运行 randomBytes 现生成，只存内存并写入 Supabase/VPS，绝不落本地盘、不进日志/stdout；
+ *  - tunnelSecret 写入 VPS 隧道与本地 0600 config.json（plan 裁决的 start 运行时凭证），不进日志/stdout；
+ *  - Supabase Access Token / 管理员密码 / VPS 密码只进 prompt 答案与对应编排器入参，绝不落盘；
  *  - VPS 失败重包装前对错误文本按全部在册秘密脱敏，防御下游漏脱敏。
  *
  *  全注入可测：mgmt/runnerFactory/promptFn/log + fetchImpl/验证探针/configDir/pwaDistDir/out
@@ -25,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { PORTS } from '../contracts.js';
 import { createLogger, type Logger } from '../log/logger.js';
 import { loadConfig, saveConfig } from '../server/store.js';
-import type { SupabaseMgmt } from './init/mgmt.js';
+import { SupabaseMgmt } from './init/mgmt.js';
 import { prompt } from './init/prompt.js';
 import { parseVpsSpec, SshRunner, type VpsCreds } from './init/ssh.js';
 import { bootstrapSupabase, InitError } from './init/supabase.js';
@@ -54,10 +58,11 @@ export interface RunInitDeps {
   out?: (line: string) => void;
 }
 
-/** init-state.json 的形状：只记录完成阶段，绝无秘密。 */
+/** init-state.json 的形状：完成阶段 + projectRef（非秘密，续跑重推 secrets 所需），绝无密钥。 */
 interface InitState {
   supabaseDone: boolean;
   vpsDone: string[];
+  projectRef?: string;
 }
 
 const STATE_FILE = 'init-state.json';
@@ -89,14 +94,34 @@ export async function runInit(deps: RunInitDeps = {}): Promise<void> {
 
     const state = readState(dir);
 
-    // 2) 生成全部署统一密钥：只存内存，交编排器写入 VPS/Supabase，不落本地盘
+    // 2) 生成全部署统一密钥（每轮重新生成；重推+幂等重开保证三处同轮，无漂移）
     const turnSecret = randomBytes(32).toString('hex');
     const tunnelSecret = randomBytes(32).toString('hex');
 
-    // 3)+4) Supabase 引导（已完成则跳过，从 config.json 读回公开字段）
+    // 3)+4) Supabase 阶段：全新 → 完整 bootstrap；续跑有 projectRef → 仅重收 token 重推 secrets；
+    //       state 缺 projectRef（旧版/残缺）→ 回退完整 bootstrap（幂等）
+    const runBootstrap = async (): Promise<{ supabaseUrl: string; publishableKey: string }> => {
+      const token = await ask('Supabase Access Token（supabase.com → Account → Access Tokens）: ', { secret: true });
+      const projectRef = (await ask('Supabase projectRef（留空自动新建）: ')).trim() || undefined;
+      const region = (await ask('新建 project 的 region（留空默认 ap-southeast-1）: ')).trim() || undefined;
+      const adminEmail = (await ask('首个账号邮箱: ')).trim();
+      const adminPassword = await ask('首个账号密码: ', { secret: true });
+      const r = await bootstrapSupabase(
+        { token, projectRef, region, adminEmail, adminPassword, turnSecret, turnHosts: ips, log },
+        { mgmt: deps.mgmt, fetchImpl: deps.fetchImpl },
+      );
+      state.supabaseDone = true;
+      state.projectRef = r.projectRef;
+      writeState(dir, state);
+      // 尽早落 config（relays 先记已完成的）：Supabase 成功后、VPS 失败也能凭 state+config 续跑
+      saveConfig(dir, { supabaseUrl: r.supabaseUrl, publishableKey: r.publishableKey, tunnelSecret, relays: state.vpsDone.map((ip) => ({ ip })) });
+      return { supabaseUrl: r.supabaseUrl, publishableKey: r.publishableKey };
+    };
     let supabaseUrl: string;
     let publishableKey: string;
-    if (state.supabaseDone) {
+    if (!state.supabaseDone) {
+      ({ supabaseUrl, publishableKey } = await runBootstrap());
+    } else if (state.projectRef) {
       if (!existsSync(join(dir, 'config.json'))) {
         throw new InitError(
           'resume',
@@ -107,31 +132,35 @@ export async function runInit(deps: RunInitDeps = {}): Promise<void> {
       const cfg = loadConfig(dir);
       supabaseUrl = cfg.supabaseUrl;
       publishableKey = cfg.publishableKey;
-      log.info('supabase', '断点续跑：跳过 Supabase 引导', { supabaseUrl });
+      // 新 turnSecret 必须送达 Supabase：重收 token（不落盘）重推 secrets；project 不新建
+      const token = await ask('Supabase Access Token（续跑需重推 TURN secrets，不落盘）: ', { secret: true });
+      const mgmt = deps.mgmt ?? new SupabaseMgmt(token);
+      try {
+        log.info('supabase', '断点续跑：重推 TURN secrets（本轮新 turnSecret）', {
+          projectRef: state.projectRef,
+          turnHostCount: ips.length,
+        });
+        await mgmt.setSecrets(state.projectRef, {
+          TURN_STATIC_AUTH_SECRET: turnSecret,
+          TURN_HOSTS: JSON.stringify(ips),
+        });
+      } catch (e) {
+        const why = scrub(e instanceof Error ? e.message : String(e), [token, turnSecret]);
+        throw new InitError(
+          'setSecrets',
+          `secrets 重推失败，请到控制台 Edge Functions → Secrets 手动设置 TURN_STATIC_AUTH_SECRET 与 TURN_HOSTS 后重跑 init（原因：${why}）`,
+          e,
+        );
+      }
+      // 立即用本轮 tunnelSecret 重写 config，缩小密钥漂移窗口
+      saveConfig(dir, { supabaseUrl, publishableKey, tunnelSecret, relays: state.vpsDone.map((ip) => ({ ip })) });
     } else {
-      const token = await ask('Supabase Access Token（supabase.com → Account → Access Tokens）: ', { secret: true });
-      const projectRef = (await ask('Supabase projectRef（留空自动新建）: ')).trim() || undefined;
-      const region = (await ask('新建 project 的 region（留空默认 ap-southeast-1）: ')).trim() || undefined;
-      const adminEmail = (await ask('首个账号邮箱: ')).trim();
-      const adminPassword = await ask('首个账号密码: ', { secret: true });
-      const r = await bootstrapSupabase(
-        { token, projectRef, region, adminEmail, adminPassword, turnSecret, turnHosts: ips, log },
-        { mgmt: deps.mgmt, fetchImpl: deps.fetchImpl },
-      );
-      supabaseUrl = r.supabaseUrl;
-      publishableKey = r.publishableKey;
-      state.supabaseDone = true;
-      writeState(dir, state);
-      // 尽早落 config（relays 先记已完成的）：Supabase 成功后、VPS 失败也能凭 state+config 续跑
-      saveConfig(dir, { supabaseUrl, publishableKey, relays: state.vpsDone.map((ip) => ({ ip })) });
+      log.warn('supabase', 'init-state 缺 projectRef，回退完整 Supabase 引导（幂等）');
+      ({ supabaseUrl, publishableKey } = await runBootstrap());
     }
 
-    // 5) 逐台 provisionVps（串行；失败即停并重包装带安全组清单）
+    // 5) 逐台 provisionVps（串行；幂等重开全部 VPS——新密钥必须送达每台；失败即停并重包装带安全组清单）
     for (const creds of vpsList) {
-      if (state.vpsDone.includes(creds.host)) {
-        log.info('vps', '断点续跑：跳过已完成 VPS', { ip: creds.host });
-        continue;
-      }
       try {
         await provisionVps(
           creds,
@@ -154,14 +183,14 @@ export async function runInit(deps: RunInitDeps = {}): Promise<void> {
         const why = scrub(e instanceof Error ? e.message : String(e), [creds.password, turnSecret, tunnelSecret]);
         throw new InitError(
           `vps:${creds.host}`,
-          `VPS ${creds.host} 初始化失败，已停止后续 VPS（已完成的阶段重跑时会自动跳过）。\n` +
+          `VPS ${creds.host} 初始化失败，已停止后续 VPS（重跑 p2p-net init 即可续跑：secrets 会重新生成并全量重推，VPS 幂等重开）。\n` +
             `请按下方清单复核该 VPS 的云厂商安全组/防火墙后重跑 p2p-net init：\n${securityChecklist()}\n（原因：${why}）`,
           e,
         );
       }
-      state.vpsDone.push(creds.host);
+      if (!state.vpsDone.includes(creds.host)) state.vpsDone.push(creds.host);
       writeState(dir, state);
-      saveConfig(dir, { supabaseUrl, publishableKey, relays: state.vpsDone.map((ip) => ({ ip })) });
+      saveConfig(dir, { supabaseUrl, publishableKey, tunnelSecret, relays: state.vpsDone.map((ip) => ({ ip })) });
     }
 
     // 6) 收尾输出：结果 + 安全组清单 + 下一步建议
@@ -199,6 +228,7 @@ function readState(dir: string): InitState {
     return {
       supabaseDone: o.supabaseDone === true,
       vpsDone: Array.isArray(o.vpsDone) ? o.vpsDone.filter((x): x is string => typeof x === 'string') : [],
+      ...(typeof o.projectRef === 'string' && o.projectRef ? { projectRef: o.projectRef } : {}),
     };
   } catch {
     // 损坏的 state 按"全部未完成"处理：各阶段幂等，重做安全
