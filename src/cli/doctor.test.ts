@@ -1,10 +1,13 @@
-/** p2p-net doctor（Task 20）单测：全部外部面（store/auth/fetch/signaling/verifyVps/tcpConnect/
+/** p2p-net doctor（Task 20）单测：全部外部面（store/auth/fetch/signaling/verifyVps/stunProbe/
  *  scanner/serviceStatus）经 deps 注入，零真实网络/文件系统/服务管理器；
- *  节奏参数（signalPollMs/signalTimeoutMs/scannerWaitMs/tcpTimeoutMs）注入小值保持测试快。
+ *  节奏参数（signalPollMs/signalTimeoutMs/scannerWaitMs/stunTimeoutMs）注入小值保持测试快。
+ *  例外：默认 STUN 探针（defaultStunProbe）打本地 UDP 回环——手工协议帧必须真发真收才算数。
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import dgram from 'node:dgram';
+import type { AddressInfo } from 'node:net';
 
 import { AuthError, type AuthState } from '../server/auth.js';
 import { SCANNER_ENUM_FAILED_CODE } from '../server/scanner.js';
@@ -13,7 +16,7 @@ import type { Layer } from '../log/logger.js';
 import type { SigMessage } from '../signaling/protocol.js';
 import type { VpsVerifyResult } from './init/vps.js';
 import { ServiceError } from './service.js';
-import { runDoctor, runDoctorCli, type DoctorCheck, type DoctorDeps, type SignalingLike } from './doctor.js';
+import { defaultStunProbe, runDoctor, runDoctorCli, type DoctorCheck, type DoctorDeps, type SignalingLike } from './doctor.js';
 
 const CFG: AppConfig = {
   supabaseUrl: 'https://sb.example.test',
@@ -31,7 +34,7 @@ const AUTH: AuthState = {
 };
 
 interface Rec {
-  tcp: string[];
+  stun: string[];
   purges: number;
   scannerStops: number;
   sentRoom?: string;
@@ -40,7 +43,7 @@ interface Rec {
 }
 
 function makeRec(): Rec {
-  return { tcp: [], purges: 0, scannerStops: 0 };
+  return { stun: [], purges: 0, scannerStops: 0 };
 }
 
 function okFetch(): typeof fetch {
@@ -81,8 +84,8 @@ function happyDeps(rec: Rec, over: Partial<DoctorDeps> = {}): DoctorDeps {
     ensureFreshTokenFn: async () => AUTH,
     signalingFactory: fakeSignaling(rec),
     verifyVpsFn: async (): Promise<VpsVerifyResult> => ({ httpsOk: true, certDaysLeft: 30, tunnelAlive: true }),
-    tcpConnect: async (host) => {
-      rec.tcp.push(host);
+    stunProbe: async (host) => {
+      rec.stun.push(host);
     },
     scannerFactory: () => ({
       list: () => [{ port: 5173, name: 'Vite' }],
@@ -96,7 +99,7 @@ function happyDeps(rec: Rec, over: Partial<DoctorDeps> = {}): DoctorDeps {
     signalPollMs: 10,
     signalTimeoutMs: 150,
     scannerWaitMs: 50,
-    tcpTimeoutMs: 50,
+    stunTimeoutMs: 50,
     requestTimeoutMs: 1000,
     ...over,
   };
@@ -117,8 +120,8 @@ test('全绿：七层按级联顺序全过（vps 每 relay 一条），输出不
   assert.ok(rec.sentTtl !== undefined && rec.sentTtl <= 60, `TTL 应短（实测 ${rec.sentTtl}）`);
   assert.ok(rec.purges >= 1, 'purgeExpired 应被尽力调用');
   assert.match(byLayer(checks, 'signaling')[0].detail, /往返 \d+ms/);
-  // TURN：edge fn 通过 + 每台 relay 3478 TCP 探活
-  assert.deepEqual(rec.tcp, ['1.2.3.4', '5.6.7.8']);
+  // TURN：edge fn 通过 + 每台 relay 3478 STUN/UDP 探活
+  assert.deepEqual(rec.stun, ['1.2.3.4', '5.6.7.8']);
   // 扫描器必须收尾（无悬挂 handle）
   assert.equal(rec.scannerStops, 1);
   // 凭据纪律：序列化报告绝不含 token/secret（uid/email/ip 可以）
@@ -236,7 +239,7 @@ test('signaling 写入/读回抛错 → layer=signaling，fix 含 RLS', async ()
   }
 });
 
-test('turn-credentials 500 / 空 iceServers → layer=ice，fix 含 TURN_HOSTS；edge fn 失败时不再探 relay TCP', async () => {
+test('turn-credentials 500 / 空 iceServers → layer=ice，fix 含 TURN_HOSTS；edge fn 失败时不再探 relay STUN', async () => {
   const variants: [string, typeof fetch][] = [
     ['500', (async (u: unknown) =>
       String(u).includes('turn-credentials')
@@ -253,24 +256,39 @@ test('turn-credentials 500 / 空 iceServers → layer=ice，fix 含 TURN_HOSTS�
     const c = byLayer(checks, 'ice')[0];
     assert.equal(c.ok, false, label);
     assert.match(c.fix ?? '', /TURN_HOSTS/, label);
-    assert.equal(rec.tcp.length, 0, 'edge fn 失败时 relay TCP 无意义，不应发起');
+    assert.equal(rec.stun.length, 0, 'edge fn 失败时 relay STUN 探活无意义，不应发起');
   }
 });
 
-test('edge fn 正常但一台 relay 3478 拒连 → layer=ice 部分失败，detail 点名故障 relay', async () => {
+test('edge fn 正常但一台 relay STUN 探活超时 → layer=ice 部分失败，detail 点名故障 relay', async () => {
   const rec = makeRec();
   const checks = await runDoctor({ dir: '/tmp/x', fetchImpl: okFetch() }, happyDeps(rec, {
-    tcpConnect: async (host) => {
-      rec.tcp.push(host);
-      if (host === '5.6.7.8') throw new Error('connect ECONNREFUSED');
+    stunProbe: async (host) => {
+      rec.stun.push(host);
+      if (host === '5.6.7.8') throw new Error('STUN 5.6.7.8:3478/udp 50ms 无响应');
     },
   }));
   const c = byLayer(checks, 'ice')[0];
   assert.equal(c.ok, false);
   assert.match(c.detail, /5\.6\.7\.8/);
-  assert.ok(!/1\.2\.3\.4 不通/.test(c.detail), '健康 relay 不得被点名');
+  assert.match(c.detail, /STUN/);
+  assert.ok(!c.detail.includes('1.2.3.4'), '健康 relay 不得被点名');
   assert.match(c.fix ?? '', /coturn/);
   assert.match(c.fix ?? '', /安全组|3478/);
+});
+
+test('中间盒 SYN 代答场景：STUN 探针全部超时 → ice 判负（6c 实锤：旧裸 TCP connect 探活在此假绿）', async () => {
+  // 真机事故：coturn 已停、3478 无监听，但腾讯云 DDoS SYN 代理代答握手，nc -vz 全「通」。
+  // 判活必须发真实 STUN 协议帧收 Binding Response——本测试钉死「探针失败即判负」的语义。
+  const checks = await runDoctor({ dir: '/tmp/x', fetchImpl: okFetch() }, happyDeps(makeRec(), {
+    stunProbe: async () => {
+      throw new Error('STUN 无响应');
+    },
+  }));
+  const c = byLayer(checks, 'ice')[0];
+  assert.equal(c.ok, false);
+  assert.match(c.detail, /STUN 探活失败：1\.2\.3\.4、5\.6\.7\.8/);
+  assert.match(c.fix ?? '', /coturn/);
 });
 
 test('vps https/隧道不通 → layer=vps，fix 含 安全组 与端口清单；其余层不受影响', async () => {
@@ -397,4 +415,58 @@ test('单个探针抛异常被归因到该层，不中断后续层、不崩整�
   assert.ok(vps.every((c) => !c.ok));
   assert.ok(byLayer(checks, 'scanner')[0].ok);
   assert.ok(byLayer(checks, 'service')[0].ok);
+});
+
+// ---------- 默认 STUN 探针（真实 UDP 回环，不打桩） ----------
+
+type StunServerBehavior = 'respond' | 'wrongTxn' | 'silent';
+
+/** 本地 UDP 回环：按 behavior 回 Binding Response / 回坏 txn / 沉默。 */
+function stunServer(behavior: StunServerBehavior): Promise<{ port: number; close: () => void }> {
+  return new Promise((resolve, reject) => {
+    const socket = dgram.createSocket('udp4');
+    socket.once('error', reject);
+    socket.on('message', (msg, rinfo) => {
+      if (behavior === 'silent' || msg.length < 20) return;
+      const res = Buffer.alloc(20);
+      msg.copy(res, 0, 0, 20); // 拷请求头（magic cookie + transaction ID 原样带回）
+      res.writeUInt16BE(0x0101, 0); // Binding Success Response
+      res.writeUInt16BE(0, 2);
+      if (behavior === 'wrongTxn') res.writeUInt8(res.readUInt8(8) ^ 0xff, 8); // 破坏 transaction ID
+      socket.send(res, rinfo.port, rinfo.address, () => {});
+    });
+    socket.bind(0, '127.0.0.1', () => {
+      const addr = socket.address() as AddressInfo;
+      resolve({ port: addr.port, close: () => socket.close() });
+    });
+  });
+}
+
+test('默认 STUN 探针：收到 transaction ID 匹配的 Binding Response → 判活', async () => {
+  const srv = await stunServer('respond');
+  try {
+    await defaultStunProbe('127.0.0.1', srv.port, 1000);
+  } finally {
+    srv.close();
+  }
+});
+
+test('默认 STUN 探针：对端沉默 → 按超时判死（及时返回不悬挂）', async () => {
+  const srv = await stunServer('silent');
+  try {
+    const t0 = Date.now();
+    await assert.rejects(defaultStunProbe('127.0.0.1', srv.port, 200), /无响应/);
+    assert.ok(Date.now() - t0 < 2_000, `应在超时附近返回（实测 ${Date.now() - t0}ms）`);
+  } finally {
+    srv.close();
+  }
+});
+
+test('默认 STUN 探针：transaction ID 不匹配的响应被忽略 → 超时判死', async () => {
+  const srv = await stunServer('wrongTxn');
+  try {
+    await assert.rejects(defaultStunProbe('127.0.0.1', srv.port, 200), /无响应/);
+  } finally {
+    srv.close();
+  }
 });

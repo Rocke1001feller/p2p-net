@@ -11,11 +11,13 @@
  *    p2p-net login），绝不循环重试；refresh rotation 成功时持久化新凭据（同 start.ts）；
  *  - 凭据纪律：detail/fix 绝不含 accessToken/refreshToken/tunnelSecret（uid/email/ip 可以）；
  *  - 全注入可测：loadConfig/loadAuth/saveAuth/ensureFreshToken/fetch/signalingFactory/
- *    verifyVps/tcpConnect/scannerFactory/serviceStatus 全经 deps，测试零真实网络/OS。
+ *    verifyVps/stunProbe/scannerFactory/serviceStatus 全经 deps，测试零真实网络/OS；
+ *    例外：默认 STUN 探针本身打本地 UDP 回环单测（手工协议帧必须真发真收）。
  */
 
+import { randomBytes } from 'node:crypto';
+import dgram from 'node:dgram';
 import { existsSync } from 'node:fs';
-import net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -60,8 +62,9 @@ export interface DoctorDeps {
   verifyVpsFn?: (ip: string) => Promise<VpsVerifyResult>;
   certDaysLeftProbe?: (host: string, timeoutMs: number) => Promise<number>;
   tunnelStatusProbe?: (host: string, timeoutMs: number) => Promise<number>;
-  /** TURN 3478 TCP 探活（默认 node:net 实测，成功即 destroy 不留句柄）。 */
-  tcpConnect?: (host: string, port: number, timeoutMs: number) => Promise<void>;
+  /** TURN 3478 STUN/UDP 探活（默认 node:dgram 发 Binding Request 收 Binding Response；
+   *  不用裸 TCP connect——云厂商 DDoS SYN 代理/运营商中间盒会代答握手，coturn 停了也「通」（6c 实锤）。 */
+  stunProbe?: (host: string, port: number, timeoutMs: number) => Promise<void>;
   scannerFactory?: (opts: { log: Logger }) => Scanner;
   serviceStatusFn?: (opts: { configDir: string }) => Promise<ServiceStatus>;
   /** 探针节奏（测试注入小值；生产默认见各常量）。 */
@@ -69,7 +72,7 @@ export interface DoctorDeps {
   signalPollMs?: number;
   signalTimeoutMs?: number;
   scannerWaitMs?: number;
-  tcpTimeoutMs?: number;
+  stunTimeoutMs?: number;
 }
 
 export interface RunDoctorOpts {
@@ -87,7 +90,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const SIGNAL_POLL_MS = 800;
 const SIGNAL_TIMEOUT_MS = 5_000;
 const SCANNER_WAIT_MS = 12_000; // 盖过首轮最坏耗时：枚举工具超时 8s（ENUM_TIMEOUT_MS）+ 探测批次（并发 8、单探 1.2s）
-const TCP_TIMEOUT_MS = 3_000;
+const STUN_TIMEOUT_MS = 3_000;
 
 const RLS_FIX =
   '信令表读写异常：多半是 signaling_messages 的 RLS 策略或表结构问题——重跑 p2p-net init 可幂等重建（含 RLS 策略），或到 Supabase 控制台检查该表策略';
@@ -270,12 +273,13 @@ async function checkTurn(cfg: AppConfig, auth: AuthState, fetchImpl: typeof fetc
   if (cfg.relays.length === 0) {
     return { layer: 'ice', ok: true, detail: `TURN 凭据签发正常（iceServers ${iceServers.length} 条）；无 relays 可探` };
   }
-  // edge fn 正常 → 逐 relay TCP 3478 探活；部分失败 = ok:false + per-relay 明细
-  const tcp = deps.tcpConnect ?? defaultTcpConnect;
+  // edge fn 正常 → 逐 relay STUN/UDP 3478 探活（真实协议帧，中间盒 SYN 代答骗不过）；
+  // 部分失败 = ok:false + per-relay 明细
+  const stun = deps.stunProbe ?? defaultStunProbe;
   const failed: string[] = [];
   for (const relay of cfg.relays) {
     try {
-      await tcp(relay.ip, TURN_PORT, deps.tcpTimeoutMs ?? TCP_TIMEOUT_MS);
+      await stun(relay.ip, TURN_PORT, deps.stunTimeoutMs ?? STUN_TIMEOUT_MS);
     } catch {
       failed.push(relay.ip);
     }
@@ -284,11 +288,11 @@ async function checkTurn(cfg: AppConfig, auth: AuthState, fetchImpl: typeof fetc
     return {
       layer: 'ice',
       ok: false,
-      detail: `TURN 凭据签发正常（iceServers ${iceServers.length} 条），但 3478/tcp 不可达：${failed.join('、')}`,
+      detail: `TURN 凭据签发正常（iceServers ${iceServers.length} 条），但 3478/udp STUN 探活失败：${failed.join('、')}`,
       fix: `请登录 ${failed.join('、')} 确认 coturn 在运行（systemctl status coturn），并确认云厂商安全组放行 3478 tcp+udp 与 50000-50019/udp`,
     };
   }
-  return { layer: 'ice', ok: true, detail: `TURN 凭据签发正常（iceServers ${iceServers.length} 条），3478/tcp 全部 relay 可达` };
+  return { layer: 'ice', ok: true, detail: `TURN 凭据签发正常（iceServers ${iceServers.length} 条），3478/udp STUN 探活全部 relay 通过` };
 }
 
 /** verifyVps 生产实现从不抛错（部分失败体现在返回值）；注入实现抛错由外层 guard 归因。 */
@@ -407,17 +411,53 @@ async function checkService(dir: string, deps: DoctorDeps): Promise<DoctorCheck>
   return { layer: 'service', ok: true, detail: '常驻服务运行中' };
 }
 
-/** 默认 TCP 探活：连接成功即 destroy（纯活性探测，不留句柄）；超时/拒连 reject。 */
-function defaultTcpConnect(host: string, port: number, timeoutMs: number): Promise<void> {
+// ---------- STUN 探针（RFC 5389 Binding Request/Response 最小帧） ----------
+
+const STUN_BINDING_REQUEST = 0x0001;
+const STUN_BINDING_RESPONSE = 0x0101;
+const STUN_MAGIC_COOKIE = 0x2112a442;
+const STUN_HEADER_LEN = 20;
+
+/**
+ * 默认 STUN 探活：向 host:port/udp 发 Binding Request，timeoutMs 内收到
+ * transaction ID 匹配的 Binding Response 才算活。判活用真实协议帧而非裸 TCP
+ * connect——后者会被云厂商 DDoS SYN 代理/运营商中间盒代答（coturn 停了也「通」，
+ * 6c 真机实锤假绿）。UDP 单包丢失兜底半程重传一次；成功/超时/出错都 close，不留句柄。
+ */
+export function defaultStunProbe(host: string, port: number, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const socket = net.connect({ host, port }, () => {
-      socket.destroy();
-      resolve();
+    const txnId = randomBytes(12);
+    const req = Buffer.alloc(STUN_HEADER_LEN);
+    req.writeUInt16BE(STUN_BINDING_REQUEST, 0);
+    req.writeUInt16BE(0, 2); // message length：无属性
+    req.writeUInt32BE(STUN_MAGIC_COOKIE, 4);
+    txnId.copy(req, 8);
+
+    const socket = dgram.createSocket('udp4');
+    let settled = false;
+    let retransmit: NodeJS.Timeout | undefined;
+    const done = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (retransmit !== undefined) clearTimeout(retransmit);
+      socket.close();
+      if (err) reject(err);
+      else resolve();
+    };
+    const timer = setTimeout(() => done(new Error(`STUN ${host}:${port}/udp ${timeoutMs}ms 无响应`)), timeoutMs);
+    socket.once('error', (e) => done(e instanceof Error ? e : new Error(String(e))));
+    socket.on('message', (msg) => {
+      // 严格校验：Binding Response + magic cookie + transaction ID 全匹配才算活，其余包忽略
+      if (msg.length < STUN_HEADER_LEN) return;
+      if (msg.readUInt16BE(0) !== STUN_BINDING_RESPONSE) return;
+      if (msg.readUInt32BE(4) !== STUN_MAGIC_COOKIE) return;
+      if (!msg.subarray(8, STUN_HEADER_LEN).equals(txnId)) return;
+      done();
     });
-    socket.setTimeout(timeoutMs, () => socket.destroy(new Error(`TCP ${host}:${port} ${timeoutMs}ms 超时`)));
-    socket.once('error', (e) => {
-      socket.destroy();
-      reject(e);
+    retransmit = setTimeout(() => socket.send(req, port, host, () => {}), Math.max(50, Math.floor(timeoutMs / 2)));
+    socket.send(req, port, host, (err) => {
+      if (err) done(err instanceof Error ? err : new Error(String(err)));
     });
   });
 }

@@ -121,8 +121,9 @@ p2p-net start        # 前台常驻；本手册期间保持这个终端开着
 - [ ] VPS 上 `systemctl stop coturn`
 - [ ] 手机刷新 PWA：打洞/relay 均不可用时应级联到 tunnel（状态灯落 `tunnel`，iframe 仍可用——反向隧道兜底；
       若运营商 NAT 意外打穿 p2p 也算过，判据是 iframe 可用 + 状态灯明确落其一）
-- [ ] 桌面跑 `p2p-net doctor`：**`ice` 层必败**（detail：`3478/tcp 不可达：<ip>`，fix 提示
+- [ ] 桌面跑 `p2p-net doctor`：**`ice` 层必败**（detail：`3478/udp STUN 探活失败：<ip>`，fix 提示
       `systemctl status coturn` 并复查安全组 3478 tcp+udp 与 50000-50019/udp）；
+      探针发真实 STUN Binding Request 收 Response——不用裸 TCP connect（云厂商 SYN 代理会代答握手假绿）；
       注意 `vps` 层此时应仍是绿的——vps 探针查的是 caddy 证书与隧道服务，不查 coturn，绿≠误报
 - [ ] **退出码 = 失败层数**（`echo $?`，此时 ≥ 1）
 - [ ] 恢复：VPS 上 `systemctl start coturn`，重跑 `p2p-net doctor` 应全绿（退出码 0）
@@ -131,18 +132,18 @@ p2p-net start        # 前台常驻；本手册期间保持这个终端开着
 
 | 项 | 实测值 |
 |---|---|
-| 日期 / 执行人 | |
-| 手机型号 / 运营商 / 网络（4G/5G） | |
-| 桌面平台（macOS/Linux + 版本） | |
-| VPS 厂商 / 地域 | |
-| 级联落点（p2p / relay / tunnel） | |
-| 配对到 connected 耗时（秒） | |
-| 5173 首屏加载耗时（秒） | |
-| `p2p-net status` 平均 RTT（ms） | |
-| events.jsonl 事件链完整（start→choice→end） | ☐ |
-| 6b 自愈通过 | ☐ |
-| 6c doctor 归因正确（ice 层失败 + fix 指向 coturn/安全组） | ☐ |
-| 结论（PASS / FAIL + 备注） | |
+| 日期 / 执行人 | 2026-09-22/23 / Kimi Code（用户协同真机操作） |
+| 手机型号 / 运营商 / 网络（4G/5G） | Redmi 2409BRN2CC / Android 16 / 蜂窝 4G（WiFi 关） |
+| 桌面平台（macOS/Linux + 版本） | macOS Intel（x86_64），Node 24 |
+| VPS 厂商 / 地域 | 腾讯云 / 49.233.155.13 |
+| 级联落点（p2p / relay / tunnel） | relay（中继 49.233.155.13:50006）与 tunnel 均实证：Supabase 信令健康时落 relay；信令轮询抖动窗口级联兜到 tunnel |
+| 配对到 connected 耗时（秒） | ~2-5s（优于 POC 基线 8-12s） |
+| 5173 首屏加载耗时（秒） | 截图秒开（未精确计时；bundle 已瘦身后远优于基线 10-20s） |
+| `p2p-net status` 平均 RTT（ms） | 78（relay 落点实测） |
+| events.jsonl 事件链完整（start→choice→end） | ☑ |
+| 6b 自愈通过 | ☑ |
+| 6c doctor 归因正确（ice 层失败 + fix 指向 coturn/安全组） | ☑（暴露并修复 doctor 假绿：裸 TCP 探活被 SYN 代理代答，改 STUN/UDP 探针后 coturn 停→红 exit 2、起→绿，已真机复核） |
+| 结论（PASS / FAIL + 备注） | **PASS**。forceTurn 单段未真机跑（原生浏览器 intent 热启动不交 URL 给前台 tab，工装受限）——relay 数据面已被普通级联覆盖，记 deferred |
 
 > 参考基线（POC 2026-09-17，蜂窝 relay）：connect 8-12s、入口 HTML ~0.7s、2.7MB bundle 10-20s。
 > 显著劣于基线（如 connect > 30s）请附 `~/.p2p-net/logs/current.jsonl` 相关时段开 issue。
