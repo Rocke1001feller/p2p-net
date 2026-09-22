@@ -202,7 +202,7 @@ export async function runInit(deps: RunInitDeps = {}): Promise<void> {
     out('请确认每台 VPS 的云厂商安全组/防火墙已按清单放行：');
     out(securityChecklist());
     out('');
-    out('下一步：运行 p2p-net service install 安装常驻服务，然后 p2p-net login 登录。');
+    out('下一步：先 p2p-net login 登录，再 p2p-net start 前台验证跑通；确认好用后 p2p-net service install 安装常驻服务（缺登录态的服务会启动即退、反复重启）。');
     log.info('vps', 'init 全部完成', { relays: state.vpsDone });
   } finally {
     rl?.close();

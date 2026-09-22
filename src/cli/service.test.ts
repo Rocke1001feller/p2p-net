@@ -68,6 +68,19 @@ function fakeExec(handler?: (cmd: string, args: string[]) => ExecResult): { exec
 
 const DEPS_BASE = { nodePath: '/usr/local/bin/node', uid: 501, out: () => {}, err: () => {} };
 
+/** install 预检（I2）要求的 config.json + auth.json 落盘——真预检在所有 install 用例里保持激活，不走注入绕过。 */
+function writeFakeConfig(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'config.json'),
+    JSON.stringify({ supabaseUrl: 'https://x.supabase.co', publishableKey: 'pk', tunnelSecret: 'ts', relays: [{ ip: '1.1.1.1' }] }),
+  );
+  writeFileSync(
+    join(dir, 'auth.json'),
+    JSON.stringify({ accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, uid: 'u', email: 'a@b.c' }),
+  );
+}
+
 test('darwin install：写 LaunchAgents plist，bootout（容忍失败）后 bootstrap，幂等可重跑', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'p2p-net-svc-'));
   const home = mkdtempSync(join(tmpdir(), 'p2p-net-home-'));
@@ -77,6 +90,7 @@ test('darwin install：写 LaunchAgents plist，bootout（容忍失败）后 boo
   });
   const opts = { configDir: dir };
   const deps = { ...DEPS_BASE, platform: 'darwin' as const, homeDir: home, exec };
+  writeFakeConfig(dir);
 
   const r1 = await installService(opts, deps);
   const unitPath = join(home, 'Library', 'LaunchAgents', 'net.p2p-net.server.plist');
@@ -106,6 +120,7 @@ test('darwin install：nvm 路径打印警告但不阻断', async () => {
   const home = mkdtempSync(join(tmpdir(), 'p2p-net-home-'));
   const { exec } = fakeExec();
   const out: string[] = [];
+  writeFakeConfig(dir);
   await installService(
     { configDir: dir },
     { ...DEPS_BASE, nodePath: '/Users/u/.nvm/versions/node/v22.1.0/bin/node', platform: 'darwin', homeDir: home, exec, out: (l) => out.push(l) },
@@ -118,6 +133,7 @@ test('linux install：写 systemd user unit，daemon-reload + enable --now，提
   const home = mkdtempSync(join(tmpdir(), 'p2p-net-home-'));
   const { exec, calls } = fakeExec();
   const out: string[] = [];
+  writeFakeConfig(dir);
   const r = await installService(
     { configDir: dir },
     { ...DEPS_BASE, platform: 'linux', homeDir: home, exec, out: (l) => out.push(l) },
@@ -150,12 +166,64 @@ test('不支持的平台（win32）报人话错误：暂不支持，Phase 2 规�
   assert.equal(calls.length, 0, '不支持的平台不得发起任何进程调用');
 });
 
+// ---------- install 预检（I2：缺 config/auth 装上即 crash-loop，必须挡在安装这一刻） ----------
+
+test('install 预检：缺 config.json → 人话引导 init，不写 unit、零进程调用', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'p2p-net-svc-'));
+  const home = mkdtempSync(join(tmpdir(), 'p2p-net-home-'));
+  const { exec, calls } = fakeExec();
+  await assert.rejects(
+    installService({ configDir: dir }, { ...DEPS_BASE, platform: 'darwin', homeDir: home, exec }),
+    /无法安装常驻服务[\s\S]*p2p-net init/,
+  );
+  assert.equal(calls.length, 0, '预检失败不得发起任何进程调用');
+  assert.ok(!existsSync(join(home, 'Library', 'LaunchAgents', 'net.p2p-net.server.plist')), '预检失败不得写 unit');
+});
+
+test('install 预检：缺 auth.json → 人话引导 login + start 前台验证，不写 unit、零进程调用', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'p2p-net-svc-'));
+  const home = mkdtempSync(join(tmpdir(), 'p2p-net-home-'));
+  const { exec, calls } = fakeExec();
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'config.json'),
+    JSON.stringify({ supabaseUrl: 'https://x.supabase.co', publishableKey: 'pk', tunnelSecret: 'ts', relays: [{ ip: '1.1.1.1' }] }),
+  );
+  await assert.rejects(
+    installService({ configDir: dir }, { ...DEPS_BASE, platform: 'darwin', homeDir: home, exec }),
+    (e: unknown) => {
+      assert.ok(e instanceof Error);
+      assert.match(e.message, /无法安装常驻服务/);
+      assert.match(e.message, /p2p-net login/);
+      assert.match(e.message, /p2p-net start 前台验证/, '文案必须给出前台验证这一步（I2 onboarding 顺序）');
+      return true;
+    },
+  );
+  assert.equal(calls.length, 0);
+  assert.ok(!existsSync(join(home, 'Library', 'LaunchAgents', 'net.p2p-net.server.plist')), '预检失败不得写 unit');
+});
+
+test('install 预检：auth.json 坏 JSON → 人话引导重登，不写 unit、零进程调用', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'p2p-net-svc-'));
+  const home = mkdtempSync(join(tmpdir(), 'p2p-net-home-'));
+  const { exec, calls } = fakeExec();
+  writeFakeConfig(dir);
+  writeFileSync(join(dir, 'auth.json'), '{broken');
+  await assert.rejects(
+    installService({ configDir: dir }, { ...DEPS_BASE, platform: 'linux', homeDir: home, exec }),
+    /无法安装常驻服务[\s\S]*p2p-net login/,
+  );
+  assert.equal(calls.length, 0);
+  assert.ok(!existsSync(join(home, '.config', 'systemd', 'user', 'p2p-net.service')), '预检失败不得写 unit');
+});
+
 test('bootstrap 失败：人话错误上抛（含 stderr 与下一步指引）', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'p2p-net-svc-'));
   const home = mkdtempSync(join(tmpdir(), 'p2p-net-home-'));
   const { exec } = fakeExec((cmd, args) =>
     args[0] === 'bootstrap' ? { code: 5, stdout: '', stderr: 'Input/output error' } : { code: 0, stdout: '', stderr: '' },
   );
+  writeFakeConfig(dir);
   await assert.rejects(
     installService({ configDir: dir }, { ...DEPS_BASE, platform: 'darwin', homeDir: home, exec }),
     /launchctl bootstrap 失败[\s\S]*Input\/output error[\s\S]*service uninstall/,
@@ -169,6 +237,7 @@ test('darwin uninstall：bootout（未加载也容忍）+ 删 plist，幂等', a
     args[0] === 'bootout' ? { code: 1, stdout: '', stderr: 'Could not find service' } : { code: 0, stdout: '', stderr: '' },
   );
   const deps = { ...DEPS_BASE, platform: 'darwin' as const, homeDir: home, exec };
+  writeFakeConfig(dir);
   await installService({ configDir: dir }, deps);
   const unitPath = join(home, 'Library', 'LaunchAgents', 'net.p2p-net.server.plist');
   calls.length = 0;
@@ -185,6 +254,7 @@ test('linux uninstall：disable --now + daemon-reload + 删 unit', async () => {
   const home = mkdtempSync(join(tmpdir(), 'p2p-net-home-'));
   const { exec, calls } = fakeExec();
   const deps = { ...DEPS_BASE, platform: 'linux' as const, homeDir: home, exec };
+  writeFakeConfig(dir);
   await installService({ configDir: dir }, deps);
   calls.length = 0;
 
@@ -216,6 +286,7 @@ test('status：已安装且 launchctl print 成功 → running；日志尾行随
     args[0] === 'print' ? { code: 0, stdout: 'gui/501/net.p2p-net.server = {...}', stderr: '' } : { code: 0, stdout: '', stderr: '' },
   );
   const deps = { ...DEPS_BASE, platform: 'darwin' as const, homeDir: home, exec };
+  writeFakeConfig(dir);
   await installService({ configDir: dir }, deps);
 
   mkdirSync(join(dir, 'logs'), { recursive: true });
@@ -237,6 +308,7 @@ test('status：launchctl print 未找到服务 → running=false 而非抛错', 
     args[0] === 'print' ? { code: 113, stdout: '', stderr: 'Could not find service' } : { code: 0, stdout: '', stderr: '' },
   );
   const deps = { ...DEPS_BASE, platform: 'darwin' as const, homeDir: home, exec };
+  writeFakeConfig(dir);
   await installService({ configDir: dir }, deps);
   const s = await serviceStatus({ configDir: dir }, deps);
   assert.equal(s.installed, true);
@@ -250,6 +322,7 @@ test('status：linux 以 is-active 判定 running（active → true，其他 →
     args.includes('is-active') ? { code: 0, stdout: 'active\n', stderr: '' } : { code: 0, stdout: '', stderr: '' },
   );
   const deps = { ...DEPS_BASE, platform: 'linux' as const, homeDir: home, exec };
+  writeFakeConfig(dir);
   await installService({ configDir: dir }, deps);
   calls.length = 0;
 

@@ -219,6 +219,10 @@ test('init 编排顺序：supabase 引导 → 逐台 VPS → 落 config → 打�
     assert.ok(outText.includes(p), `stdout 缺端口 ${p}:\n${outText}`);
   }
   assert.ok(outText.includes('service install'), `stdout 缺 service install 建议:\n${outText}`);
+  // I2 onboarding 顺序：login 引导必须先于 service install（缺登录态装常驻 = crash-loop）
+  const loginIdx = outText.indexOf('p2p-net login');
+  assert.ok(loginIdx !== -1, `stdout 缺 login 引导:\n${outText}`);
+  assert.ok(loginIdx < outText.indexOf('service install'), 'login 引导必须先于 service install 建议');
   assert.ok(outText.includes('https://1.1.1.1') && outText.includes('https://2.2.2.2'));
 
   // 秘密纪律：截获部署级 turnSecret（写进了 Supabase secrets）与 tunnelSecret（进了远端命令串）

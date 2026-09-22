@@ -24,6 +24,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
+import { ConfigError, loadAuth, loadConfig } from '../server/store.js';
+
 // ---------- 类型与注入面 ----------
 
 export interface ExecResult {
@@ -118,6 +120,34 @@ export function warnIfVolatileNodePath(nodePath: string): string | null {
   return `警告：node 路径来自版本管理器（nvm/fnm/volta 等易变路径）${nodePath}——切换默认版本后常驻服务会因路径失效而无法启动，届时请重跑 p2p-net service install`;
 }
 
+/**
+ * 安装预检（I2 onboarding 顺序修复）：常驻单元跑的是 start --foreground，缺 config.json 或
+ * auth.json 即启动即退，launchd KeepAlive / systemd Restart=always 会把它拉成 crash-loop——
+ * 用户看到的只是「装完不好用」。把失败提前到安装这一刻：config/auth 必须齐备且可解析。
+ */
+function assertRunnableConfig(configDir: string): void {
+  try {
+    loadConfig(configDir);
+  } catch (e) {
+    if (e instanceof ConfigError) {
+      throw new ServiceError(`无法安装常驻服务：${e.message}（服务以 start --foreground 运行，配置必须先就绪）`);
+    }
+    throw e;
+  }
+  let auth: unknown;
+  try {
+    auth = loadAuth(configDir);
+  } catch (e) {
+    if (e instanceof ConfigError) {
+      throw new ServiceError(`无法安装常驻服务：${e.message}（凭据损坏会让服务启动即退、反复重启）`);
+    }
+    throw e;
+  }
+  if (!auth) {
+    throw new ServiceError(`无法安装常驻服务：未登录（缺 ${join(configDir, 'auth.json')}）——请先运行 p2p-net login，并用 p2p-net start 前台验证可用后再安装常驻服务`);
+  }
+}
+
 // ---------- 平台路径与默认实现 ----------
 
 function resolveCtx(deps: ServiceDeps): { platform: NodeJS.Platform; homeDir: string; uid: number; exec: ExecFn; out: (l: string) => void } {
@@ -168,6 +198,7 @@ const defaultTail = (logPath: string, follow: boolean): Promise<number> =>
 export async function installService(opts: { configDir: string }, deps: ServiceDeps = {}): Promise<{ unitPath: string }> {
   const { platform, homeDir, uid, exec, out } = resolveCtx(deps);
   const { unitDir, unitPath } = unitPathFor(platform, homeDir);
+  assertRunnableConfig(opts.configDir);
   const nodePath = deps.nodePath ?? process.execPath;
   const rendered =
     platform === 'darwin'
