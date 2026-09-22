@@ -116,8 +116,39 @@ install_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y coturn curl ca-certificates xz-utils || die "apt 安装基础组件失败"
-  # caddy 先走 apt：拿到官方 unit、caddy 用户与 /etc/caddy 目录；二进制随后替换为钉版
-  apt-get install -y caddy || die "apt 安装 caddy 失败（Ubuntu 请确认 universe 源已启用）"
+  # caddy 先走 apt：拿到官方 unit、caddy 用户与 /etc/caddy 目录；二进制随后替换为钉版。
+  # Ubuntu 22.04 发行版源（含腾讯云镜像）没有 caddy 包 → 回退手工等价物（user+dirs+unit），
+  # 二进制同样由 install_caddy_binary 钉版，两条路径殊途同归。
+  if ! apt-get install -y caddy; then
+    log "发行版源无 caddy 包（如 Ubuntu 22.04），改用手工 bootstrap（user+dirs+unit）"
+    getent group caddy >/dev/null || groupadd --system caddy || die "创建 caddy 组失败"
+    getent passwd caddy >/dev/null || useradd --system --gid caddy --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy || die "创建 caddy 用户失败"
+    mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
+    chown caddy:caddy /var/lib/caddy /var/log/caddy
+    cat > /etc/systemd/system/caddy.service <<'UNIT'
+[Unit]
+Description=Caddy
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+  fi
 }
 
 install_node() {
