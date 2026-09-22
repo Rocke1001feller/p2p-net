@@ -1,6 +1,7 @@
 /** 本地控制面与发现端点（Task 16 产出，Task 17 start 编排消费；PWA 侧机器经 /services 拉服务清单）。
  *  两个 node:http 平面都只绑 127.0.0.1（安全：仅本机可达，绝不绑 0.0.0.0）：
- *  - 控制面 CONTROL_PORT：GET /status 透传 getStatus()（{uptime,sessions,mode} 形态由 Task 18 填充）。
+ *  - 控制面 CONTROL_PORT：GET /status 透传 getStatus()（{uptime,deviceId,sessions,services,mode}
+ *    真聚合形态由 Task 19 在 start.ts 填充；本文件只做原样透传，不理解字段）。
  *  - 发现端点 DISCOVERY_PORT：GET /services → { console, services, self }；
  *    console 一期为空数组占位（字段保留），services 由 Task 15 scanner 清单映射为 { name, url: '/s/<port>/' }。
  *  端口占用必须同步抛人话：node:http 的 EADDRINUSE 只经异步 'error' 事件送达，listen+on('error')

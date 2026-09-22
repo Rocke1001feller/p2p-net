@@ -87,6 +87,8 @@ function makeDeps(overrides: MakeOpts = {}) {
   let discoveryArgs: { getServices(): ServiceInfo[]; deviceId(): string } | undefined;
   let ensureCalls = 0;
   const tunnelUrls: string[] = [];
+  /** 逐条隧道捕获 onReconnect 回调（测试手动触发隧道重连事件）。 */
+  const reconnectCbs: Array<() => void> = [];
 
   const scanner: Scanner = {
     list: () => [{ port: 5173, name: 'Vite' }],
@@ -154,7 +156,6 @@ function makeDeps(overrides: MakeOpts = {}) {
       calls.push('hostAgent.new');
       hostOpts = o;
       return {
-        sessionCount: 0,
         start: () => calls.push('host.start'),
         stop: () => stops.push('host.stop'),
       };
@@ -167,7 +168,9 @@ function makeDeps(overrides: MakeOpts = {}) {
           tunnelUrls.push(url);
         },
         onFrame: () => {},
-        onReconnect: () => {},
+        onReconnect: (cb) => {
+          reconnectCbs.push(cb);
+        },
         close: () => stops.push('tunnel.close'),
       };
     },
@@ -186,6 +189,7 @@ function makeDeps(overrides: MakeOpts = {}) {
     logLines,
     stops,
     tunnelUrls,
+    reconnectCbs,
     hostOpts: (): HostAgentOptions => {
       assert.ok(hostOpts, 'HostAgent 未被装配');
       return hostOpts;
@@ -240,11 +244,15 @@ test('start 编排：装配顺序 + HostAgent 白名单/令牌闭包 + 每 relay
     assert.equal(allow(PORTS.TUNNEL_RELAY_PORT), false, '隧道 relay 端口属 NEVER 集合，不放行');
     assert.equal(allow(9999), false, '未知端口不放行');
 
-    // onStatus → 事件流（ruling #5 最小映射）
-    ho.onStatus?.({ state: 'connected', pairType: 'host', deviceId: DEVICE_ID } as HostStatus);
+    // onStatus → 会话事件流（Task 19 ruling #2）：connected → session_start + cascade_choice
+    ho.onStatus?.({ state: 'connected', pairType: 'p2p', rttMs: 42, deviceId: DEVICE_ID, clientKey: 'phone-1' } as HostStatus);
     assert.ok(
-      ctx.logLines.some((l) => l.event === 'host_status' && l.state === 'connected' && l.deviceId === DEVICE_ID),
-      `缺 host_status 事件: ${JSON.stringify(ctx.logLines)}`,
+      ctx.logLines.some((l) => l.event === 'session_start' && l.sid === 'phone-1'),
+      `缺 session_start 事件: ${JSON.stringify(ctx.logLines)}`,
+    );
+    assert.ok(
+      ctx.logLines.some((l) => l.event === 'cascade_choice' && l.sid === 'phone-1' && l.mode === 'p2p' && l.rttMs === 42),
+      `缺 cascade_choice 事件: ${JSON.stringify(ctx.logLines)}`,
     );
 
     // 每 relay 一条隧道：URL 形态 + HMAC(tunnelSecret, deviceId) token
@@ -253,10 +261,12 @@ test('start 编排：装配顺序 + HostAgent 白名单/令牌闭包 + 每 relay
     assert.equal(ctx.tunnelUrls[0], `wss://1.1.1.1/tunnel/desktop?sid=${DEVICE_ID}&token=${expectToken}`);
     assert.equal(ctx.tunnelUrls[1], `wss://2.2.2.2/tunnel/desktop?sid=${DEVICE_ID}&token=${expectToken}`);
 
-    // 控制面 getStatus（ruling #4 最小形态）/ 发现端点
-    const st = ctx.controlStatus() as { uptime: unknown; sessions: unknown; mode: unknown };
+    // 控制面 getStatus（Task 19 ruling #8 真聚合形态）/ 发现端点
+    const st = ctx.controlStatus() as { uptime: unknown; deviceId: unknown; sessions: unknown; services: unknown; mode: unknown };
     assert.equal(typeof st.uptime, 'number');
-    assert.equal(st.sessions, 0);
+    assert.equal(st.deviceId, DEVICE_ID);
+    assert.deepEqual(st.sessions, { active: 1, byMode: { p2p: 1 }, avgRttMs: 42 }, 'sessions 应为事件环形缓冲的实时聚合');
+    assert.equal(st.services, 1, 'services 为 scanner.list().length');
     assert.equal(st.mode, 'foreground');
     assert.deepEqual(ctx.discoveryServices(), [{ port: 5173, name: 'Vite' }]);
     assert.equal(ctx.discoveryDeviceId(), DEVICE_ID);
@@ -401,4 +411,100 @@ test('装配中途失败：已启动组件反向回退，原始错误原样传�
   assert.ok(!ctx.calls.includes('hostAgent.new'), 'HostAgent 不应装配');
   assert.ok(!ctx.calls.includes('tunnel.connect'), '隧道不应连接');
   assert.ok(!ctx.calls.includes('issueTicket'), '配对不应出票');
+});
+
+
+test('会话事件映射：onStatus 序列 → 环形缓冲 → getStatus 聚合（ruling #2/#7）', async () => {
+  const ctx = makeDeps();
+  const handle = await runStart({}, ctx.deps);
+  try {
+    const ho = ctx.hostOpts();
+    const emit = (s: { state: HostStatus['state']; clientKey: string; pairType?: HostStatus['pairType']; rttMs?: number }) =>
+      ho.onStatus?.({ pairType: null, deviceId: DEVICE_ID, ...s } as HostStatus);
+    const sessionsAgg = () => (ctx.controlStatus() as { sessions: unknown }).sessions;
+
+    // connecting：无会话事件（自愈/中间态不进会话流）
+    emit({ state: 'connecting', clientKey: 'p1' });
+    assert.ok(!ctx.logLines.some((l) => l.event === 'session_start'), 'connecting 不得发 session_start');
+
+    // connected → session_start + cascade_choice（sid = clientKey，ruling #1/#2）
+    emit({ state: 'connected', clientKey: 'p1', pairType: 'relay', rttMs: 100 });
+    assert.ok(ctx.logLines.some((l) => l.event === 'session_start' && l.sid === 'p1'));
+    assert.ok(ctx.logLines.some((l) => l.event === 'cascade_choice' && l.sid === 'p1' && l.mode === 'relay' && l.rttMs === 100));
+    assert.deepEqual(sessionsAgg(), { active: 1, byMode: { relay: 1 }, avgRttMs: 100 });
+
+    // 重复完全相同的状态 → 零新事件（Peer 每 5s stats 重发，不得刷屏 events.jsonl）
+    const n = ctx.logLines.length;
+    emit({ state: 'connected', clientKey: 'p1', pairType: 'relay', rttMs: 100 });
+    emit({ state: 'connected', clientKey: 'p1', pairType: 'relay', rttMs: 100 });
+    assert.equal(ctx.logLines.length, n, '重复相同状态不得再发事件');
+    assert.equal(ctx.logLines.filter((l) => l.event === 'session_start' && l.sid === 'p1').length, 1, '同 sid 无 end 不得重复 session_start');
+
+    // rtt 变化（状态不再相同）→ 补一条 cascade_choice；session_start 仍只一条
+    emit({ state: 'connected', clientKey: 'p1', pairType: 'relay', rttMs: 120 });
+    assert.equal(ctx.logLines.filter((l) => l.event === 'session_start' && l.sid === 'p1').length, 1);
+    assert.equal(ctx.logLines.filter((l) => l.event === 'cascade_choice' && l.sid === 'p1').length, 2);
+    assert.deepEqual(sessionsAgg(), { active: 1, byMode: { relay: 1 }, avgRttMs: 120 }, '聚合取最新 cascade_choice');
+
+    // 第二台手机并发：pairType null → mode 回落 'p2p'；clientKey 区分两台设备
+    emit({ state: 'connected', clientKey: 'p2', pairType: null, rttMs: 20 });
+    assert.deepEqual(sessionsAgg(), { active: 2, byMode: { relay: 1, p2p: 1 }, avgRttMs: 70 });
+
+    // disconnected：ICE 可自愈瞬时态（peer.ts 2026-09-12 修复注释），不得终结会话
+    emit({ state: 'disconnected', clientKey: 'p1' });
+    assert.ok(!ctx.logLines.some((l) => l.event === 'session_end' && l.sid === 'p1'), 'disconnected 不得发 session_end');
+    assert.deepEqual(sessionsAgg(), { active: 2, byMode: { relay: 1, p2p: 1 }, avgRttMs: 70 });
+
+    // closed → session_end(reason=closed)
+    emit({ state: 'closed', clientKey: 'p1' });
+    assert.ok(ctx.logLines.some((l) => l.event === 'session_end' && l.sid === 'p1' && l.reason === 'closed'));
+    assert.deepEqual(sessionsAgg(), { active: 1, byMode: { p2p: 1 }, avgRttMs: 20 });
+
+    // failed → session_end(reason=failed)
+    emit({ state: 'failed', clientKey: 'p2' });
+    assert.ok(ctx.logLines.some((l) => l.event === 'session_end' && l.sid === 'p2' && l.reason === 'failed'));
+    assert.deepEqual(sessionsAgg(), { active: 0, byMode: {}, avgRttMs: null });
+
+    // 已结束的 sid 再收 closed → 不重复 session_end（无 start 的 end 是噪声）
+    const ends = ctx.logLines.filter((l) => l.event === 'session_end' && l.sid === 'p2').length;
+    emit({ state: 'closed', clientKey: 'p2' });
+    assert.equal(ctx.logLines.filter((l) => l.event === 'session_end' && l.sid === 'p2').length, ends, 'end 不得重发');
+
+    // 隧道重连 → tunnel_reconnect（sid = relay ip）
+    assert.equal(ctx.reconnectCbs.length, 2, '每 relay 应注册一个 onReconnect');
+    ctx.reconnectCbs[0]!();
+    assert.ok(ctx.logLines.some((l) => l.event === 'tunnel_reconnect' && l.sid === '1.1.1.1'));
+
+    // 事件纪律：SessionEvent 只带 sid/mode/rtt/reason，token/secret 绝不进事件流
+    const ev = JSON.stringify(ctx.logLines.filter((l) => l.event));
+    for (const s of ['tun-secret-hex', 'at-old', 'at-fresh', 'rt-1']) {
+      assert.ok(!ev.includes(s), `事件泄漏秘密: ${s}`);
+    }
+  } finally {
+    await handle.stop();
+  }
+});
+
+test('会话事件环形缓冲：容量 2000 FIFO 丢最旧；events.jsonl 写透不受缓冲影响', async () => {
+  const ctx = makeDeps();
+  const handle = await runStart({}, ctx.deps);
+  try {
+    const ho = ctx.hostOpts();
+    const emit = (clientKey: string) =>
+      ho.onStatus?.({ state: 'connected', pairType: 'p2p', rttMs: 10, deviceId: DEVICE_ID, clientKey } as HostStatus);
+    // 2100 个不同 sid 各一条 connected（每条产生 session_start + cascade_choice 两个事件 → 4200 条）
+    for (let i = 0; i < 2100; i++) emit(`s-${i}`);
+    // 写透：events.jsonl 流拿到全部 2100 条 session_start（环形缓冲只影响内存聚合视图）
+    assert.equal(ctx.logLines.filter((l) => l.event === 'session_start').length, 2100, 'log 写透不得丢事件');
+    // 环形缓冲只留最新 2000 条事件 = 最近 1000 个 sid 的 (start, cascade)
+    const agg = (ctx.controlStatus() as { sessions: { active: number; byMode: Record<string, number>; avgRttMs: number | null } }).sessions;
+    assert.equal(agg.active, 1000, '环形缓冲应按 FIFO 丢掉最旧事件');
+    assert.deepEqual(agg.byMode, { p2p: 1000 });
+    assert.equal(agg.avgRttMs, 10);
+    // 最早被挤出缓冲的 sid 再收 end：聚合层垃圾容忍，不抛不错乱
+    ho.onStatus?.({ state: 'closed', pairType: null, deviceId: DEVICE_ID, clientKey: 's-0' } as HostStatus);
+    assert.ok(ctx.logLines.some((l) => l.event === 'session_end' && l.sid === 's-0'));
+  } finally {
+    await handle.stop();
+  }
 });

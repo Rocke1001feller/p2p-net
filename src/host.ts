@@ -34,7 +34,11 @@ export interface SignalingClientLike {
   purgeExpired(room: string): Promise<void>;
 }
 
-export type HostStatus = LinkStatus & { deviceId: string };
+export type HostStatus = LinkStatus & {
+  deviceId: string;
+  /** 会话归属的客户端 deviceId（SigMessage.from）——事件流 sid 的事实来源（Task 19 ruling #1）。 */
+  clientKey: string;
+};
 
 export interface HostAgentOptions {
   supabaseUrl: string;
@@ -291,7 +295,7 @@ export class HostAgent {
           if (verdict === 'keep') session.clearGrace();
           else if (verdict === 'drop') this.dropSession(clientKey, session);
           else session.startGrace(SESSION_GRACE_MS, () => this.dropSession(clientKey, session));
-          this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId });
+          this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId, clientKey });
         },
       });
       const local = session.peer.localDescription;

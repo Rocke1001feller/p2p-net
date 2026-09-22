@@ -144,10 +144,11 @@ test('HostAgent 集成：werift↔werift offer→DC→req→res→ctrl ping/pong
     const rtt = Date.now() - t0;
     assert.ok(Number.isFinite(rtt) && rtt >= 0);
 
-    // status 事件至少一次 connected（含 deviceId）
+    // status 事件至少一次 connected（含 deviceId 与 clientKey——T19 ruling #1：事件流 sid 依赖它）
     await until(() => statuses.some((s) => s.state === 'connected'), 20000, 'status connected');
     const st = statuses.find((s) => s.state === 'connected')!;
     assert.equal(st.deviceId, HOST_DEV);
+    assert.equal(st.clientKey, PHONE_DEV);
   } finally {
     pump.unref && clearInterval(pump);
     agent.stop();

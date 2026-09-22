@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-/** p2p-net CLI 入口：util.parseArgs 分发 init|login|start|service|doctor|status。
- *  init/login/start/service 已可用（Task 13/17/18）；doctor/status 为「后续阶段提供」的明确占位。
+/** p2p-net CLI 入口：util.parseArgs 分发 init|login|start|service|status|doctor。
+ *  init/login/start/service/status 已可用（Task 13/17/18/19）；doctor 为「后续阶段提供」的明确占位。
  *  无参/--help → 帮助（exit 0）；未知命令 → stderr 提示 + 帮助（exit 1）。
  *  strict: false：子命令各自的选项归各命令自行解析（如 start --foreground），入口不抢先拒绝。
  *
@@ -15,6 +15,7 @@ import { runInit } from './init.js';
 import { runLogin } from './login.js';
 import { runService } from './service.js';
 import { runStart } from './start.js';
+import { runStatus } from './status.js';
 
 const HELP = `p2p-net — Self-hosted WebRTC remote-access data plane
 
@@ -25,14 +26,14 @@ const HELP = `p2p-net — Self-hosted WebRTC remote-access data plane
   login     登录并保存凭据（auth.json，0600）
   start     前台启动桌面端代理（--foreground 由常驻服务调用，抑制提示横幅）
   service   常驻服务管理 install|uninstall|status|logs（崩溃自愈 + 开机自启）
+  status    查看运行状态（设备/活跃会话/链路模式/平均 RTT/服务数）
   doctor    分层诊断（后续阶段提供 / coming in a later phase）
-  status    查看运行状态（后续阶段提供 / coming in a later phase）
 
 选项：
   -h, --help  显示本帮助
 `;
 
-const COMING_SOON = new Set(['doctor', 'status']);
+const COMING_SOON = new Set(['doctor']);
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -95,6 +96,11 @@ async function main(argv: string[]): Promise<number> {
       console.error(e instanceof Error ? e.message : String(e));
       return 1;
     }
+  }
+
+  if (cmd === 'status') {
+    // runStatus 内部已把不可达/非 2xx/畸形响应全部折成人话 + exit 1，不会抛堆栈
+    return await runStatus();
   }
 
   if (COMING_SOON.has(cmd)) {

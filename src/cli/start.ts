@@ -28,6 +28,7 @@ import { HostAgent, type HostAgentOptions, type HostStatus } from '../host.js';
 import { createLogger, type Logger } from '../log/logger.js';
 import { ensureFreshToken, type AuthState } from '../server/auth.js';
 import { startControlPlane, startDiscovery } from '../server/control.js';
+import { aggregateSessions, recordSessionEvent, type SessionEvent } from '../server/events.js';
 import { bindDeviceAuth, fetchTurnCredentials, startPairingLoop, type PairingHandle, type TicketStatus } from '../server/pairing.js';
 import { createScanner, DEFAULT_WHITELIST, NEVER_PORTS, type Scanner, type ServiceInfo } from '../server/scanner.js';
 import { loadAuth, loadConfig, saveAuth, saveConfig, type AppConfig } from '../server/store.js';
@@ -38,11 +39,10 @@ export interface ServerLike {
   close(cb?: (err?: Error) => void): void;
 }
 
-/** HostAgent 的最小装配面（测试注入假 agent 断言参数；sessionCount 供 getStatus 尽力统计）。 */
+/** HostAgent 的最小装配面（测试注入假 agent 断言参数）。 */
 export interface HostAgentLike {
   start(): void;
   stop(): void;
-  readonly sessionCount?: number;
 }
 
 /** TunnelClient 的最小装配面。 */
@@ -89,6 +89,9 @@ export interface StartHandle {
 
 /** 运行期 token 续期默认周期：10min（GoTrue JWT 默认 1h TTL，留足重试余量）。 */
 const TOKEN_REFRESH_INTERVAL_MS = 10 * 60_000;
+
+/** 会话事件环形缓冲容量（Task 19 ruling #3）：FIFO 丢最旧；events.jsonl 写透不受其影响。 */
+const EVENT_RING_CAPACITY = 2000;
 
 export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = {}): Promise<StartHandle> {
   const dir = deps.configDir ?? join(homedir(), '.p2p-net');
@@ -164,11 +167,55 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
       return scanner.list().some((s) => s.port === port);
     };
 
-    // 6) 本地控制面 + 发现端点（只绑 127.0.0.1；getStatus 为 ruling #4 最小形态，T19 换真聚合）
+    // 6) 本地控制面 + 发现端点（只绑 127.0.0.1；getStatus 为 Task 19 真聚合形态）
+    //
+    // 会话事件流（Task 19，plan 裁决 #2——映射语义勿改）：
+    //   connected    → session_start(sid=clientKey) + cascade_choice(mode=pairType ?? 'p2p', rttMs)
+    //   closed       → session_end(reason='closed')；failed → session_end(reason='failed')
+    //   connecting/disconnected → 无会话事件（disconnected 是 ICE 可自愈瞬时态，
+    //     见 peer.ts 2026-09-12 修复注释——绝不能因抖动终结会话）
+    // Dedupe：Peer 每 5s 经 stats 定时器重发状态（peer.ts scheduleStats），逐 sid 记最后签名
+    //   (state|pairType|rttMs)，完全相同的状态零事件；openSids 保证同 sid 无 end 不重发
+    //   session_start，session_end 也只对有 start 的 sid 发一次。
+    // record 单调用点（ruling #3）：写透 log.event（events.jsonl，轮转归 logger）+ 入环形缓冲
+    //   喂 getStatus().sessions 实时聚合。事件只带 sid/mode/rtt/reason，token/secret 绝不进。
+    const eventRing: SessionEvent[] = [];
+    const openSids = new Set<string>();
+    const lastSig = new Map<string, string>();
+    const record = (e: SessionEvent): void => {
+      recordSessionEvent(log, e);
+      if (eventRing.length >= EVENT_RING_CAPACITY) eventRing.shift(); // FIFO 丢最旧
+      eventRing.push(e);
+    };
+    const onHostStatus = (s: HostStatus): void => {
+      const sid = s.clientKey;
+      if (!sid) return;
+      const sig = `${s.state}|${s.pairType}|${s.rttMs ?? ''}`;
+      if (lastSig.get(sid) === sig) return; // 重复相同状态：零事件（stats 轮询不刷屏）
+      lastSig.set(sid, sig);
+      if (s.state === 'connected') {
+        if (!openSids.has(sid)) {
+          openSids.add(sid);
+          record({ name: 'session_start', sid });
+        }
+        record({ name: 'cascade_choice', sid, mode: s.pairType ?? 'p2p', ...(s.rttMs !== undefined ? { rttMs: s.rttMs } : {}) });
+      } else if (s.state === 'closed' || s.state === 'failed') {
+        if (openSids.delete(sid)) {
+          lastSig.delete(sid);
+          record({ name: 'session_end', sid, reason: s.state });
+        }
+      }
+    };
     const startControlFn = deps.startControlPlaneFn ?? startControlPlane;
     control = startControlFn({
       log,
-      getStatus: () => ({ uptime: process.uptime(), sessions: host.sessionCount ?? 0, mode: 'foreground' }),
+      getStatus: () => ({
+        uptime: process.uptime(),
+        deviceId: deviceId!,
+        sessions: aggregateSessions(eventRing),
+        services: scanner.list().length,
+        mode: 'foreground',
+      }),
     });
     teardowns.push(() => closeServer(control));
     const startDiscoveryFn = deps.startDiscoveryFn ?? startDiscovery;
@@ -185,7 +232,7 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
       uid: auth.uid,
       turnFetcher: () => fetchTurnCredentials(cfg, auth.accessToken, fetchImpl),
       isPortAllowed,
-      onStatus: (s: HostStatus) => log.event('host_status', { state: s.state, pairType: s.pairType, deviceId: s.deviceId }),
+      onStatus: onHostStatus, // host_status 事件已折叠进会话事件流（session_start/cascade_choice/session_end）
     });
     host.start();
     teardowns.push(() => host.stop());
@@ -195,7 +242,10 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
     const tunnelToken = createHmac('sha256', cfg.tunnelSecret).update(deviceId).digest('hex');
     for (const relay of cfg.relays) {
       const t = tunnelFactory();
-      t.onReconnect(() => log.info('tunnel', '隧道断线重连成功', { ip: relay.ip }));
+      t.onReconnect(() => {
+        log.info('tunnel', '隧道断线重连成功', { ip: relay.ip });
+        record({ name: 'tunnel_reconnect', sid: relay.ip }); // ruling #2：sid = relay ip
+      });
       // URL 含 token，绝不进日志/stdout
       t.connect(`wss://${relay.ip}/tunnel/desktop?sid=${deviceId}&token=${tunnelToken}`);
       tunnels.push(t);
