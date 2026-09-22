@@ -21,8 +21,13 @@ export interface ServiceInfo {
 export interface Scanner {
   list(): ServiceInfo[];
   start(): void;
+  /** 首轮 reconcile 落定即 resolve（cycle 内部全兜，绝不 reject）；doctor 等它而非盲等/轮询。 */
+  ready(): Promise<void>;
   stop(): void;
 }
+
+/** 枚举失败的结构化告警码：scanner warn 的 ctx.code 携带，doctor 据此归因（不依赖文案匹配）。 */
+export const SCANNER_ENUM_FAILED_CODE = 'ENUM_FAILED';
 
 /** 常见 dev server 端口 Top10：即使监听枚举漏报（权限/平台限制）也逐轮探测。 */
 export const DEFAULT_WHITELIST: number[] = [3000, 3001, 4200, 5000, 5173, 8000, 8080, 8081, 8888, 9000];
@@ -148,14 +153,15 @@ async function readPrefix(res: Response, cap: number): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-/** execFile 的 promise 化（argv 数组、无 shell）。返回 null = 工具不可用/被杀（本轮放弃）；
- *  退出码非 0 但 stdout 为空（如 lsof 无匹配时退出码 1）按合法空结果处理。 */
-function runEnumTool(cmd: string, args: string[]): Promise<string | null> {
+/** execFile 的 promise 化（argv 数组、无 shell）。返回 null = 工具不可用/被杀/非预期退出（本轮放弃）；
+ *  仅 noMatchCode 声明了「无匹配」语义的退出码（lsof 无匹配 exit 1）+ 空 stdout 才按合法空结果处理；
+ *  ss 无此语义（无匹配也 exit 0 打表头），传 null——ss 的任何非零退出都是真失败。 */
+function runEnumTool(cmd: string, args: string[], noMatchCode: number | null): Promise<string | null> {
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout: ENUM_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
       if (!err) return resolve(stdout);
       const code = (err as { code?: string | number }).code;
-      if (typeof code === 'number' && stdout.trim() === '') return resolve('');
+      if (noMatchCode !== null && code === noMatchCode && stdout.trim() === '') return resolve('');
       return resolve(null);
     });
   });
@@ -171,23 +177,28 @@ export function createScanner(opts: { extraWhitelist?: number[]; log: Logger }):
   const strikes = new Map<number, number>(); // port -> 连续非 website 轮次（website 命中即清零）
   let timer: ReturnType<typeof setInterval> | null = null;
   let cycleRunning = false;
+  /** 首轮 reconcile 的 promise（doctor 的 ready() 语义来源）；cycle 内部全兜，绝不 reject。 */
+  let firstCycle: Promise<void> | null = null;
 
   /** 枚举本机监听端口；返回 null = 枚举工具本轮不可用（保留现状、跳过本轮，避免误判全员消失）。 */
   async function enumerateListeners(): Promise<number[] | null> {
     let cmd: string;
     let args: string[];
     let parse: (out: string) => number[];
+    // lsof 无匹配时 exit 1 且 stdout 为空 = 合法空结果；ss 无此语义（无匹配也 exit 0 打表头），
+    // 其任何非零退出都是真失败——两工具的「空结果」语义不同，必须分别声明。
+    let noMatchCode: number | null;
     if (process.platform === 'darwin') {
-      cmd = 'lsof'; args = ['-nP', '-iTCP', '-sTCP:LISTEN']; parse = parseLsofOutput;
+      cmd = 'lsof'; args = ['-nP', '-iTCP', '-sTCP:LISTEN']; parse = parseLsofOutput; noMatchCode = 1;
     } else if (process.platform === 'linux') {
-      cmd = 'ss'; args = ['-ltn']; parse = parseSsOutput;
+      cmd = 'ss'; args = ['-ltn']; parse = parseSsOutput; noMatchCode = null;
     } else {
       log.debug('scanner', '当前平台无监听枚举工具，仅探测白名单端口', { platform: process.platform });
       return [];
     }
-    const out = await runEnumTool(cmd, args);
+    const out = await runEnumTool(cmd, args, noMatchCode);
     if (out === null) {
-      log.warn('scanner', '监听端口枚举失败，本轮跳过', { cmd });
+      log.warn('scanner', '监听端口枚举失败，本轮跳过', { cmd, code: SCANNER_ENUM_FAILED_CODE });
       return null;
     }
     return parse(out);
@@ -266,10 +277,11 @@ export function createScanner(opts: { extraWhitelist?: number[]; log: Logger }):
     list: () => [...services.values()].sort((a, b) => a.port - b.port),
     start: () => {
       if (timer) return; // 幂等：重复 start 不叠加定时器
-      void cycle();
+      firstCycle ??= cycle();
       timer = setInterval(() => { void cycle(); }, RECONCILE_INTERVAL_MS);
       timer.unref();
     },
+    ready: () => firstCycle ?? Promise.resolve(),
     stop: () => {
       if (timer) {
         clearInterval(timer);

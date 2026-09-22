@@ -23,7 +23,7 @@ import { parseArgs } from 'node:util';
 import { PORTS } from '../contracts.js';
 import type { Layer, Logger } from '../log/logger.js';
 import { ensureFreshToken, type AuthState } from '../server/auth.js';
-import { createScanner, type Scanner } from '../server/scanner.js';
+import { createScanner, SCANNER_ENUM_FAILED_CODE, type Scanner } from '../server/scanner.js';
 import { loadAuth, loadConfig, saveAuth, type AppConfig } from '../server/store.js';
 import { SignalingClient, type PollResult, type SignalingClientOptions } from '../signaling/client.js';
 import { roomFor, type SigMessage } from '../signaling/protocol.js';
@@ -86,7 +86,7 @@ const SIGNAL_TTL_SECONDS = 30;
 const REQUEST_TIMEOUT_MS = 10_000;
 const SIGNAL_POLL_MS = 800;
 const SIGNAL_TIMEOUT_MS = 5_000;
-const SCANNER_WAIT_MS = 3_000;
+const SCANNER_WAIT_MS = 12_000; // 盖过首轮最坏耗时：枚举工具超时 8s（ENUM_TIMEOUT_MS）+ 探测批次（并发 8、单探 1.2s）
 const TCP_TIMEOUT_MS = 3_000;
 
 const RLS_FIX =
@@ -339,16 +339,14 @@ async function checkScanner(deps: DoctorDeps): Promise<DoctorCheck> {
     return { layer: 'scanner', ok: false, detail: `扫描器创建失败：${errMsg(e)}`, fix: scannerEnumFix(null) };
   }
   try {
-    // start() 立即跑首轮 reconcile（scanner.ts）：轮询 list() 等首轮落地，封顶 scannerWaitMs；
-    // 非空即提前结束（全绿路径不白等 3s），空则等到封顶再读（覆盖『确实没有 dev server』）
+    // start() 立即跑首轮 reconcile（scanner.ts）：等 scanner.ready() 落定（首轮完成的精确信号），
+    // 封顶 scannerWaitMs 兜底。旧实现轮询 list() 且关窗 3s < 枚举超时 8s——枚举慢/失败时
+    // 会在首轮落地前误判「未发现本地服务」。
     scanner.start();
-    const deadline = Date.now() + (deps.scannerWaitMs ?? SCANNER_WAIT_MS);
-    let services = scanner.list();
-    while (services.length === 0 && Date.now() < deadline) {
-      await sleep(100);
-      services = scanner.list();
-    }
-    const enumFail = records.find((r) => r.level === 'warn' && r.msg.includes('枚举失败'));
+    await Promise.race([scanner.ready(), sleep(deps.scannerWaitMs ?? SCANNER_WAIT_MS)]);
+    const services = scanner.list();
+    // 结构化归因（M1）：枚举失败读 warn 的 ctx.code，不抄文案（文案改动不再破坏 doctor 检测）
+    const enumFail = records.find((r) => r.level === 'warn' && r.ctx?.code === SCANNER_ENUM_FAILED_CODE);
     if (enumFail) {
       const cmd = typeof enumFail.ctx?.cmd === 'string' ? enumFail.ctx.cmd : null;
       return { layer: 'scanner', ok: false, detail: '无法枚举本机监听端口', fix: scannerEnumFix(cmd) };

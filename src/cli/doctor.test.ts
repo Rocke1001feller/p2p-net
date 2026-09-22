@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { AuthError, type AuthState } from '../server/auth.js';
+import { SCANNER_ENUM_FAILED_CODE } from '../server/scanner.js';
 import { ConfigError, type AppConfig } from '../server/store.js';
 import type { Layer } from '../log/logger.js';
 import type { SigMessage } from '../signaling/protocol.js';
@@ -86,6 +87,7 @@ function happyDeps(rec: Rec, over: Partial<DoctorDeps> = {}): DoctorDeps {
     scannerFactory: () => ({
       list: () => [{ port: 5173, name: 'Vite' }],
       start() {},
+      ready: () => Promise.resolve(),
       stop() {
         rec.scannerStops += 1;
       },
@@ -312,6 +314,7 @@ test('scanner：空清单 → ok 人话；枚举失败 → ok=false 且 fix 点�
     scannerFactory: () => ({
       list: () => [],
       start() {},
+      ready: () => Promise.resolve(),
       stop() {
         rec1.scannerStops += 1;
       },
@@ -327,8 +330,10 @@ test('scanner：空清单 → ok 人话；枚举失败 → ok=false 且 fix 点�
     scannerFactory: ({ log }) => ({
       list: () => [],
       start() {
-        log.warn('scanner', '监听端口枚举失败，本轮跳过', { cmd: 'lsof' });
+        // 结构化归因（M1）：枚举失败由 ctx.code 标识，doctor 不依赖文案匹配
+        log.warn('scanner', '监听端口枚举失败，本轮跳过', { cmd: 'lsof', code: SCANNER_ENUM_FAILED_CODE });
       },
+      ready: () => Promise.resolve(),
       stop() {
         rec2.scannerStops += 1;
       },
@@ -338,6 +343,22 @@ test('scanner：空清单 → ok 人话；枚举失败 → ok=false 且 fix 点�
   assert.equal(c2.ok, false);
   assert.match(c2.fix ?? '', /lsof/);
   assert.equal(rec2.scannerStops, 1);
+});
+
+test('scanner：warn 有「枚举失败」文案但无结构化 code → 不误判枚举失败（文案不再是检测依据）', async () => {
+  const checks = await runDoctor({ dir: '/tmp/x', fetchImpl: okFetch() }, happyDeps(makeRec(), {
+    scannerFactory: ({ log }) => ({
+      list: () => [],
+      start() {
+        log.warn('scanner', '监听端口枚举失败，本轮跳过', { cmd: 'lsof' }); // 无 code：不得触发枚举归因
+      },
+      ready: () => Promise.resolve(),
+      stop() {},
+    }),
+  }));
+  const c = byLayer(checks, 'scanner')[0];
+  assert.equal(c.ok, true, '无结构化 code 的 warn 不得判枚举失败');
+  assert.match(c.detail, /未发现本地服务/);
 });
 
 test('service：未安装/装了没跑/node 路径失效 → ok=false 且 fix 含 p2p-net service install；不支持平台 → ok 跳过', async () => {
