@@ -62,6 +62,9 @@ EOF
 }
 
 render_caddyfile() {
+  # handle 块互斥且按序匹配（v2 生产同款模式）：/tunnel/* 进隧道反代（保留完整路径），
+  # 其余走 SPA——try_files 把 /connect 等前端路由回退到 index.html（E2E 实测缺它则
+  # 扫码直达 /connect 404，MIUI 浏览器报 ERR_HTTP_RESPONSE_CODE_FAILURE）
   cat <<EOF
 {
     default_sni ${PUBLIC_IP}
@@ -69,8 +72,13 @@ render_caddyfile() {
 
 https://${PUBLIC_IP} {
     root * ${PWA_DIR}
-    file_server
-    reverse_proxy /tunnel/* 127.0.0.1:19700
+    handle /tunnel/* {
+        reverse_proxy 127.0.0.1:19700
+    }
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
     tls {
         issuer acme {
             profile shortlived

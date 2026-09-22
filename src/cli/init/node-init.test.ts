@@ -26,14 +26,16 @@ test('dryrun 渲染 turnserver.conf：含 use-auth-secret 与 external-ip（Revi
   assert.match(out, /listening-port=3478/);
 });
 
-test('dryrun 渲染 Caddyfile：default_sni + 短证书 profile + /tunnel 反代 + pwa root', () => {
+test('dryrun 渲染 Caddyfile：default_sni + 短证书 profile + /tunnel 反代 + SPA 回退 + pwa root', () => {
   const out = execFileSync('bash', [SH], {
     env: { ...DRYRUN_ENV, TURN_SECRET: 'x', TUNNEL_SECRET: 'y' },
     encoding: 'utf8',
   });
   assert.match(out, /default_sni 9\.9\.9\.9/);
   assert.match(out, /profile shortlived/);
-  assert.match(out, /reverse_proxy \/tunnel\/\* 127\.0\.0\.1:19700/);
+  // /tunnel/* 由 handle 块反代且保完整路径；其余路由 try_files 回退 index.html（SPA /connect 直达依赖）
+  assert.match(out, /handle \/tunnel\/\* \{\s+reverse_proxy 127\.0\.0\.1:19700\s+\}/);
+  assert.match(out, /handle \{\s+try_files \{path\} \/index\.html\s+file_server\s+\}/);
   assert.match(out, /root \* \/opt\/p2p-net\/pwa/);
 });
 
