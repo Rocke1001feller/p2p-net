@@ -105,7 +105,7 @@ async function main(argv: string[]): Promise<number> {
 
   if (COMING_SOON.has(cmd)) {
     console.log(`「p2p-net ${cmd}」尚未实现，将在后续阶段提供（coming in a later phase）。`);
-    console.log('当前可用命令：p2p-net init / login / start / service');
+    console.log('当前可用命令：p2p-net init / login / start / service / status');
     return 0;
   }
 

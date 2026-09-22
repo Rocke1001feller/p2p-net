@@ -440,7 +440,7 @@ test('会话事件映射：onStatus 序列 → 环形缓冲 → getStatus 聚合
     assert.equal(ctx.logLines.length, n, '重复相同状态不得再发事件');
     assert.equal(ctx.logLines.filter((l) => l.event === 'session_start' && l.sid === 'p1').length, 1, '同 sid 无 end 不得重复 session_start');
 
-    // rtt 变化（状态不再相同）→ 补一条 cascade_choice；session_start 仍只一条
+    // rtt 跨越阈值（100→120，|Δ|=20 ≥ 15ms）→ 补一条 cascade_choice；session_start 仍只一条
     emit({ state: 'connected', clientKey: 'p1', pairType: 'relay', rttMs: 120 });
     assert.equal(ctx.logLines.filter((l) => l.event === 'session_start' && l.sid === 'p1').length, 1);
     assert.equal(ctx.logLines.filter((l) => l.event === 'cascade_choice' && l.sid === 'p1').length, 2);
@@ -504,6 +504,46 @@ test('会话事件环形缓冲：容量 2000 FIFO 丢最旧；events.jsonl 写�
     // 最早被挤出缓冲的 sid 再收 end：聚合层垃圾容忍，不抛不错乱
     ho.onStatus?.({ state: 'closed', pairType: null, deviceId: DEVICE_ID, clientKey: 's-0' } as HostStatus);
     assert.ok(ctx.logLines.some((l) => l.event === 'session_end' && l.sid === 's-0'));
+  } finally {
+    await handle.stop();
+  }
+});
+
+
+test('cascade_choice 节流：|Δrtt|<15ms 抖动零事件；pairType 变化或阈值穿越才发（基线=上次已发）', async () => {
+  const ctx = makeDeps();
+  const handle = await runStart({}, ctx.deps);
+  try {
+    const ho = ctx.hostOpts();
+    const emit = (pairType: HostStatus['pairType'], rttMs: number) =>
+      ho.onStatus?.({ state: 'connected', pairType, rttMs, deviceId: DEVICE_ID, clientKey: 'p1' } as HostStatus);
+    const cascades = () => ctx.logLines.filter((l) => l.event === 'cascade_choice' && l.sid === 'p1');
+
+    // 首次 connected 必发（建立基线 100ms）
+    emit('relay', 100);
+    assert.equal(cascades().length, 1, '首次 connected 必发 cascade_choice');
+
+    // 阈值下抖动（评审修复点：Peer 每 ~5s stats 重发，真实 RTT 整数毫秒几乎每次都变）：
+    // 105(Δ5)、112(Δ12)、114(Δ14) 一律不发——基线是「上次已发」的 100，而非上次观测
+    for (const rtt of [105, 112, 114]) emit('relay', rtt);
+    assert.equal(cascades().length, 1, '|Δrtt|<15ms 的抖动不得发 cascade_choice（否则环形缓冲将被刷穿）');
+
+    // 116：vs 已发基线 100 的 |Δ|=16 ≥ 15 → 发，基线随之更新为 116
+    emit('relay', 116);
+    assert.equal(cascades().length, 2, '阈值穿越（vs 上次已发基线）必须发');
+    assert.equal(cascades().at(-1)!.rttMs, 116);
+
+    // 120：vs 新基线 116 的 Δ=4 → 不发（验证基线随发射更新，未锚死首个值）
+    emit('relay', 120);
+    assert.equal(cascades().length, 2);
+
+    // pairType 翻转：rtt 不变也必发（链路模式切换是关键观测点）
+    emit('p2p', 120);
+    assert.equal(cascades().length, 3, 'pairType 变化必发 cascade_choice');
+    assert.equal(cascades().at(-1)!.mode, 'p2p');
+
+    // 聚合视图始终取最新已发 cascade
+    assert.deepEqual((ctx.controlStatus() as { sessions: unknown }).sessions, { active: 1, byMode: { p2p: 1 }, avgRttMs: 120 });
   } finally {
     await handle.stop();
   }

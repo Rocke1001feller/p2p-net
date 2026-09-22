@@ -93,6 +93,9 @@ const TOKEN_REFRESH_INTERVAL_MS = 10 * 60_000;
 /** 会话事件环形缓冲容量（Task 19 ruling #3）：FIFO 丢最旧；events.jsonl 写透不受其影响。 */
 const EVENT_RING_CAPACITY = 2000;
 
+/** cascade_choice 的 RTT 节流阈值（ms）：|Δrtt| ≥ 此值（vs 上次已发基线）才补发事件。 */
+const RTT_EMIT_THRESHOLD_MS = 15;
+
 export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = {}): Promise<StartHandle> {
   const dir = deps.configDir ?? join(homedir(), '.p2p-net');
   const log = deps.log ?? createLogger({ dir: join(dir, 'logs'), comp: 'cli-start' });
@@ -174,14 +177,23 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
     //   closed       → session_end(reason='closed')；failed → session_end(reason='failed')
     //   connecting/disconnected → 无会话事件（disconnected 是 ICE 可自愈瞬时态，
     //     见 peer.ts 2026-09-12 修复注释——绝不能因抖动终结会话）
-    // Dedupe：Peer 每 5s 经 stats 定时器重发状态（peer.ts scheduleStats），逐 sid 记最后签名
-    //   (state|pairType|rttMs)，完全相同的状态零事件；openSids 保证同 sid 无 end 不重发
-    //   session_start，session_end 也只对有 start 的 sid 发一次。
+    // cascade_choice 节流（2026-09-22 评审修复）：Peer 每 ~5s 经 stats 定时器重发状态
+    //   （peer.ts scheduleStats），真实网络 RTT 在整数毫秒粒度几乎每轮都变——若按原始
+    //   (state|pairType|rttMs) 签名去重，稳态每会话 ~720 事件/h，~2.8h 就把该会话的
+    //   session_start 挤出 2000 容量环形缓冲，aggregateSessions 因找不到 start 忽略其
+    //   cascade → status 对健康会话谎报活跃 0。故只在 (a) pairType 变化，或
+    //   (b) |ΔrttMs| ≥ RTT_EMIT_THRESHOLD_MS（vs 该 sid **上次已发**的 rtt，而非上次观测
+    //   ——基线随发射更新，慢速爬升累计越阈也会发一次；rtt 从无到有视为建立基线发一次）
+    //   时才发 cascade_choice。session_start/session_end 语义不变（openSids：同 sid 无
+    //   end 不重发 start，end 只发一次）。
+    //   残余风险（已知并接受）：即便节流 10-100x，多周长驻 daemon 仍可能把 start 挤出环
+    //   ——MVP 接受，已记控制器台账。
     // record 单调用点（ruling #3）：写透 log.event（events.jsonl，轮转归 logger）+ 入环形缓冲
     //   喂 getStatus().sessions 实时聚合。事件只带 sid/mode/rtt/reason，token/secret 绝不进。
     const eventRing: SessionEvent[] = [];
     const openSids = new Set<string>();
-    const lastSig = new Map<string, string>();
+    /** 逐 sid 的「上次已发」cascade 基线（仅发射时更新——节流判据，非上次观测值）。 */
+    const lastCascade = new Map<string, { mode: 'p2p' | 'relay'; rttMs?: number }>();
     const record = (e: SessionEvent): void => {
       recordSessionEvent(log, e);
       if (eventRing.length >= EVENT_RING_CAPACITY) eventRing.shift(); // FIFO 丢最旧
@@ -190,18 +202,27 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
     const onHostStatus = (s: HostStatus): void => {
       const sid = s.clientKey;
       if (!sid) return;
-      const sig = `${s.state}|${s.pairType}|${s.rttMs ?? ''}`;
-      if (lastSig.get(sid) === sig) return; // 重复相同状态：零事件（stats 轮询不刷屏）
-      lastSig.set(sid, sig);
       if (s.state === 'connected') {
+        const mode = s.pairType ?? 'p2p';
+        const emitCascade = () => {
+          record({ name: 'cascade_choice', sid, mode, ...(s.rttMs !== undefined ? { rttMs: s.rttMs } : {}) });
+          lastCascade.set(sid, { mode, ...(s.rttMs !== undefined ? { rttMs: s.rttMs } : {}) });
+        };
         if (!openSids.has(sid)) {
           openSids.add(sid);
           record({ name: 'session_start', sid });
+          emitCascade(); // 首开必发：建立节流基线
+          return;
         }
-        record({ name: 'cascade_choice', sid, mode: s.pairType ?? 'p2p', ...(s.rttMs !== undefined ? { rttMs: s.rttMs } : {}) });
+        const prev = lastCascade.get(sid);
+        const modeChanged = prev?.mode !== mode; // prev 缺失（防御）按已变处理
+        const rttChanged =
+          s.rttMs !== undefined &&
+          (prev?.rttMs === undefined || Math.abs(s.rttMs - prev.rttMs) >= RTT_EMIT_THRESHOLD_MS);
+        if (modeChanged || rttChanged) emitCascade();
       } else if (s.state === 'closed' || s.state === 'failed') {
         if (openSids.delete(sid)) {
-          lastSig.delete(sid);
+          lastCascade.delete(sid);
           record({ name: 'session_end', sid, reason: s.state });
         }
       }
