@@ -31,7 +31,7 @@ import {
 } from './constants.js';
 import { discoveryCandidates, pickDiscoveryPort } from './discovery.js';
 import {
-  HEALTH_CHECK_DELAYS_MS, bootGateDecision, healthDecision, looksBooted,
+  HEALTH_CHECK_DELAYS_MS, bootGateDecision, dataPlaneAlive, healthDecision, looksBooted,
 } from './workbenchRecovery.js';
 import { CascadeSession, type LinkMode } from './session.js';
 import {
@@ -635,11 +635,11 @@ async function openService(port: number): Promise<void> {
 const bootDefer = new Map<number, number>();
 const BOOT_PROBE_TIMEOUT_MS = 4_000;
 
-/** 数据面探活：小请求 200 = 回帧路径确实活着（此刻才值得烧首屏资源）。 */
+/** 数据面探活：拿到上游真实应答（含 404）即证明回帧路径活着（此刻才值得烧首屏资源）。 */
 async function dataPlaneReady(port: number, timeoutMs = BOOT_PROBE_TIMEOUT_MS): Promise<boolean> {
   try {
     const res = await fetchVia(port, '/api/auth/status', timeoutMs);
-    return res.status === 200;
+    return dataPlaneAlive(res.status);
   } catch {
     return false;
   }

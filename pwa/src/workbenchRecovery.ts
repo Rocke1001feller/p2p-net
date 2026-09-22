@@ -18,6 +18,14 @@
 export type BootGateDecision = 'boot' | 'defer' | 'giveup';
 export type HealthDecision = 'ok' | 'reload' | 'giveup';
 
+/** 数据面探活判定：拿到上游真实应答（含 404/405）即证明回帧路径活着；
+ *  只有合成失败（隧道网关 502 / SW 链路快败 503 / 超时 504）才算死。
+ *  （2026-09-22 蜂窝真机实锤：探针打 /api/auth/status 是控制台私有语义，
+ *   普通静态服务恒 404 → 开窗闸门永远 defer → 工作台空白。） */
+export function dataPlaneAlive(status: number): boolean {
+  return status !== 502 && status !== 503 && status !== 504;
+}
+
 /** 开窗闸门：探活成功→开窗；失败→延后（等数据面重连），延后次数超限→交给用户手动重试。 */
 export function bootGateDecision({
   dataPlaneReady,

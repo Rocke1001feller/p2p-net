@@ -64,13 +64,16 @@ export function log(msg: string): void {
 // ---- 状态条（工作台 tab 顶部 44px 感知条，Q1） ----
 const MODE_LABEL: Record<string, string> = { p2p: '直连', tunnel: '隧道', turn: '中继' };
 const MODE_BADGE: Record<string, string> = { p2p: 'p2p', tunnel: 'relay', turn: 'relay' };
+/** 心跳 pong 的状态帧不带 mode——记住最后一次真实落点，别把中继谎报成"直连"。 */
+let lastMode: string | null = null;
 
 export function setStatus(s: CascadeStatus, deviceName: string): void {
   const dot = $('connDot');
   const title = $('connTitle');
   const rtt = $('connRtt');
   if (s.state === 'connected') {
-    const mode = s.mode ?? 'p2p';
+    if (s.mode) lastMode = s.mode;
+    const mode = s.mode ?? lastMode ?? 'p2p';
     dot.style.background = mode === 'p2p' ? 'var(--p2p)' : 'var(--relay)';
     dot.className = 'dot breath';
     title.innerHTML = ''; // 用 DOM 组装，避免 innerHTML 注入面
@@ -87,6 +90,7 @@ export function setStatus(s: CascadeStatus, deviceName: string): void {
     rtt.textContent = '';
     $('btnDisconnect').classList.add('hidden');
   } else {
+    lastMode = null;
     dot.style.background = 'var(--off)';
     dot.className = 'dot';
     title.textContent = s.state === 'failed' ? '连接失败' : '未连接';
