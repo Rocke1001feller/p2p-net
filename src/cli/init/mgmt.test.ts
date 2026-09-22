@@ -143,6 +143,6 @@ test('deployFunctions 纯 API：不存在 POST 创建，已存在 PATCH 更新�
   assert.equal(patch?.body?.verify_jwt, true);
   const post = calls.find((c) => c.method === 'POST');
   assert.equal(post?.body?.slug, 'redeem-pairing-ticket', '新函数走 POST 创建');
-  assert.match(post?.body?.body, /generateLink/);
+  assert.match(post?.body?.body, /generate_link/);
   assert.equal(post?.body?.verify_jwt, false, 'redeem 是登录前置端点，verify_jwt=false');
 });

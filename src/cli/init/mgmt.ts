@@ -3,6 +3,8 @@
  *  /v1/projects/{ref}/functions[/slug] 的 application/json 内联源码通道（官方 OpenAPI
  *  spec 明列；两个 edge function 均为单文件 index.ts，无需 eszip 本地打包），
  *  init/运行期均不引入 supabase CLI / npx（spec §12 零外部工具链约束无需例外）。
+ *  该通道的硬约束（同日真机实锤）：不解析远程 import（jsr:/https:/npm: 一律 BOOT_ERROR），
+ *  函数源码必须零远程依赖（node: 内置模块可用）；守卫见 functions.test.ts。
  *  所有请求强制 User-Agent: p2p-net/0.1.0 —— WAF 1010 拦截无 UA 请求的事故教训，load-bearing。
  *  token 只进 Authorization 头，任何日志/错误消息不得带 token。
  */
