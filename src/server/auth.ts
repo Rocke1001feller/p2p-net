@@ -31,8 +31,11 @@ export interface AuthDeps {
   fetchImpl?: typeof fetch;
 }
 
-/** 临期余量：剩余有效期不足 60s 即续期（与 v2 transport.js 同值）。 */
-const EXPIRY_MARGIN_MS = 60_000;
+/** 临期余量：剩余有效期不足 11min 即续期。
+ *  必须大于 start.ts 的运行期续期间隔 TOKEN_REFRESH_INTERVAL_MS（10min）——否则令牌在两次
+ *  续期tick之间到期时，信令轮询会 401 致聋最长一整个间隔（2026-09-22 E2E 实锤：60s 余量下
+ *  boot 判定"新鲜"未续，12:29 到期后桌面端 401 致聋约 4 分钟，手机 offer 全部无人应答）。 */
+const EXPIRY_MARGIN_MS = 11 * 60_000;
 /** 失败退避：续期失败后 60s 冷却，冷却期内不再打令牌端点。 */
 const REFRESH_COOLDOWN_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 10_000;

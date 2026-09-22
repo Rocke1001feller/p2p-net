@@ -97,7 +97,7 @@ export interface StartHandle {
 }
 
 /** 运行期 token 续期默认周期：10min（GoTrue JWT 默认 1h TTL，留足重试余量）。 */
-const TOKEN_REFRESH_INTERVAL_MS = 10 * 60_000;
+const TOKEN_REFRESH_INTERVAL_MS = 10 * 60_000; // 必须小于 auth.ts 的 EXPIRY_MARGIN_MS（11min），否则出现令牌到期致聋窗口
 
 /** 会话事件环形缓冲容量（Task 19 ruling #3）：FIFO 丢最旧；events.jsonl 写透不受其影响。 */
 const EVENT_RING_CAPACITY = 2000;
