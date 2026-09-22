@@ -58,6 +58,7 @@ https://<VPS-IP>/connect?t=<ticketId>&d=<deviceId>&u=<接入地址>
 - p2p-net 会把**本机 localhost 端口**暴露给「你账号下的手机」：默认白名单 Top10（3000/3001/4200/5000/5173/8000/8080/8081/8888/9000）+ 自动发现判为 website 的监听端口会上架到手机服务清单；NEVER 集合（3003/4173/18080/18088）与本包控制端口（19700/19727/19728/19729）**永不上架**。
 - 扫码 URL 含一次性配对票据，120 秒过期；`~/.p2p-net/auth.json`、`config.json`、`init-state.json` 均 0600 保存。
 - Supabase Access Token、VPS 密码、TURN/隧道密钥绝不落本地盘（tunnelSecret 例外：写入 0600 的 config.json，是 start 的运行时凭证）。
+- 隧道公网入口 `https://<relay>/tunnel/s/<deviceId>` 以 deviceId（uuid，扫码载荷可见）为持链能力凭证，入口本身无额外鉴权；桌面侧白名单是最终闸门——非白名单端口的隧道请求一律 fail-closed 拒绝（HTTP 403 / WS open-err）。
 
 ## 部署通道声明
 
@@ -70,7 +71,7 @@ init 全程使用 **Supabase Management API 纯 HTTPS 调用**，不依赖 supab
 ## 状态与诊断
 
 ```bash
-npx p2p-net status      # 运行状态：设备 ID / 活跃会话数 / 链路模式（p2p·relay·tunnel）/ 平均 RTT / 服务数
+npx p2p-net status      # 运行状态：设备 ID / 活跃会话数 / 链路模式（p2p·relay）/ 平均 RTT / 服务数
 npx p2p-net doctor      # 七层归因诊断：auth → supabase → signaling → ice → vps → scanner → service
 npx p2p-net doctor --json   # 机器可读输出；退出码 = 失败层数
 ```

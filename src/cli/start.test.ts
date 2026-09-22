@@ -7,6 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
+import { WebSocketServer } from 'ws';
 
 import { PORTS } from '../contracts.js';
 import type { HostAgentOptions, HostStatus } from '../host.js';
@@ -62,6 +66,8 @@ interface MakeOpts {
   tokenRefreshIntervalMs?: number;
   /** 装配中途失败注入：startDiscovery 抛该错误。 */
   throwAtDiscovery?: Error;
+  /** scanner 上报的服务清单（默认一个 5173；隧道数据面测试注入真监听端口）。 */
+  services?: ServiceInfo[];
   cfg?: AppConfig;
 }
 
@@ -89,10 +95,15 @@ function makeDeps(overrides: MakeOpts = {}) {
   const tunnelUrls: string[] = [];
   /** 逐条隧道捕获 onReconnect 回调（测试手动触发隧道重连事件）。 */
   const reconnectCbs: Array<() => void> = [];
+  /** 逐条隧道捕获 onFrame 回调（隧道数据面测试手动驱动 relay 下发帧）。 */
+  const frameCbs: Array<(frame: unknown) => void> = [];
+  /** 隧道出站帧（桥经 dc shim → TunnelClient.send 的回帧；JSON 对象形态）。 */
+  const sentFrames: Record<string, unknown>[] = [];
 
   const scanner: Scanner = {
-    list: () => [{ port: 5173, name: 'Vite' }],
+    list: () => overrides.services ?? [{ port: 5173, name: 'Vite' }],
     start: () => calls.push('scanner.start'),
+    ready: () => Promise.resolve(),
     stop: () => stops.push('scanner.stop'),
   };
   const fakeServer = (name: string) => ({
@@ -167,7 +178,13 @@ function makeDeps(overrides: MakeOpts = {}) {
           calls.push('tunnel.connect');
           tunnelUrls.push(url);
         },
-        onFrame: () => {},
+        send: (obj) => {
+          sentFrames.push(obj as Record<string, unknown>);
+        },
+        isOpen: true,
+        onFrame: (cb) => {
+          frameCbs.push(cb);
+        },
         onReconnect: (cb) => {
           reconnectCbs.push(cb);
         },
@@ -190,6 +207,8 @@ function makeDeps(overrides: MakeOpts = {}) {
     stops,
     tunnelUrls,
     reconnectCbs,
+    frameCbs,
+    sentFrames,
     hostOpts: (): HostAgentOptions => {
       assert.ok(hostOpts, 'HostAgent 未被装配');
       return hostOpts;
@@ -546,5 +565,97 @@ test('cascade_choice 节流：|Δrtt|<15ms 抖动零事件；pairType 变化或�
     assert.deepEqual((ctx.controlStatus() as { sessions: unknown }).sessions, { active: 1, byMode: { p2p: 1 }, avgRttMs: 120 });
   } finally {
     await handle.stop();
+  }
+});
+
+test('隧道数据面接线：req/ws 帧派发到本地桥；白名单外端口 fail-closed；坏帧不杀进程', async () => {
+  // 真本地服务（随机端口），经 scanner 上报进入白名单
+  const httpServer = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(`hello:${req.url}`);
+  });
+  await new Promise<void>((r) => httpServer.listen(0, r));
+  const httpPort = (httpServer.address() as AddressInfo).port;
+  const wss = new WebSocketServer({ port: 0 });
+  await new Promise<void>((r) => wss.on('listening', r));
+  const wsPort = (wss.address() as AddressInfo).port;
+  wss.on('connection', (ws) => ws.on('message', (d) => ws.send(`echo:${d}`)));
+
+  const ctx = makeDeps({ services: [{ port: httpPort, name: 'T' }, { port: wsPort, name: 'W' }] });
+  const handle = await runStart({ foreground: true }, ctx.deps);
+  const framesOf = (pred: (f: Record<string, unknown>) => boolean) => ctx.sentFrames.filter(pred);
+  const resDone = (id: number) => (f: Record<string, unknown>) => f.k === 'res-chunk' && f.id === id && f.done === true;
+  const bodyOf = (id: number) =>
+    framesOf((f) => f.k === 'res-chunk' && f.id === id && typeof f.dataB64 === 'string')
+      .map((f) => Buffer.from(f.dataB64 as string, 'base64').toString('utf8'))
+      .join('');
+  try {
+    // 每条隧道必须注册 onFrame（relay 下发帧的派发入口；未注册 = 数据面断）
+    assert.equal(ctx.frameCbs.length, 2, '每条隧道必须注册 onFrame 回调');
+    const rx = ctx.frameCbs[0]!;
+
+    // req：/s/<port>/<rest> 解析 + 重写 → HttpBridge 触达真本地服务，200/body/done 回帧
+    rx({ k: 'req', id: 1, port: 0, method: 'GET', path: `/s/${httpPort}/hello?q=1`, headers: {}, via: 'tunnel' });
+    await waitFor(() => framesOf(resDone(1)).length > 0, 'req 1 应收齐 done 帧');
+    const head1 = framesOf((f) => f.k === 'res-head' && f.id === 1)[0];
+    assert.equal(head1?.status, 200, `req 1 应 200，实际帧：${JSON.stringify(framesOf((f) => f.id === 1))}`);
+    assert.equal(bodyOf(1), `hello:/hello?q=1`, '路径应剥掉 /s/<port> 前缀且保留 search');
+
+    // 白名单外端口（9999 无监听：若穿透派发会 502；403 证明闸门拦在派发层）→ fail-closed
+    rx({ k: 'req', id: 2, port: 0, method: 'GET', path: '/s/9999/x', headers: {}, via: 'tunnel' });
+    await waitFor(() => framesOf(resDone(2)).length > 0, 'req 2 应收齐 done 帧');
+    assert.equal(framesOf((f) => f.k === 'res-head' && f.id === 2)[0]?.status, 403, '白名单外端口必须 403');
+    assert.match(bodyOf(2), /not allowed/);
+
+    // 畸形路径（无 /s/<port> 前缀）→ 400
+    rx({ k: 'req', id: 3, port: 0, method: 'GET', path: '/nope', headers: {}, via: 'tunnel' });
+    await waitFor(() => framesOf(resDone(3)).length > 0, 'req 3 应收齐 done 帧');
+    assert.equal(framesOf((f) => f.k === 'res-head' && f.id === 3)[0]?.status, 400, '畸形路径必须 400');
+
+    // req-abort：无在途请求时静默吞掉，不回帧不抛错
+    const n0 = ctx.sentFrames.length;
+    rx({ k: 'req-abort', id: 999 });
+    await flush();
+    assert.equal(ctx.sentFrames.length, n0, 'req-abort 无在途请求不得回帧');
+
+    // ws-open 白名单外端口 → ws-open-err（fail-closed）
+    rx({ k: 'ws-open', wid: 1, path: '/s/9999/ws' });
+    await waitFor(() => framesOf((f) => f.k === 'ws-open-err' && f.wid === 1).length > 0, 'wid 1 应回 ws-open-err');
+
+    // ws 全双工：open-ok → 客户端发 text → echo 回帧 → close 透传
+    rx({ k: 'ws-open', wid: 2, path: `/s/${wsPort}/ws` });
+    await waitFor(() => framesOf((f) => f.k === 'ws-open-ok' && f.wid === 2).length > 0, 'wid 2 应回 ws-open-ok');
+    rx({ k: 'ws-msg', wid: 2, text: 'ping' });
+    await waitFor(
+      () => framesOf((f) => f.k === 'ws-msg' && f.wid === 2 && f.text === 'echo:ping').length > 0,
+      'wid 2 应收到 echo 回帧',
+    );
+    rx({ k: 'ws-close', wid: 2, code: 1000 });
+    await waitFor(() => framesOf((f) => f.k === 'ws-close' && f.wid === 2).length > 0, 'wid 2 关闭应透传回帧');
+
+    // 重连清场：在途 ws 被 closeAll 关掉（回 ws-close 帧），本地在途请求被 abortAll
+    rx({ k: 'ws-open', wid: 3, path: `/s/${wsPort}/ws` });
+    await waitFor(() => framesOf((f) => f.k === 'ws-open-ok' && f.wid === 3).length > 0, 'wid 3 应回 ws-open-ok');
+    ctx.reconnectCbs[0]!();
+    await waitFor(() => framesOf((f) => f.k === 'ws-close' && f.wid === 3).length > 0, '重连清场应关掉在途 ws');
+    assert.ok(ctx.logLines.some((l) => l.event === 'tunnel_reconnect'), '重连事件仍应记录');
+
+    // 坏帧隔离：非对象/未知帧静默丢弃，进程与后续帧处理不受影响
+    rx(null);
+    rx(42);
+    rx({ k: 'mystery' });
+    rx({ k: 'req', id: 4, port: 0, method: 'GET', path: `/s/${httpPort}/ok`, headers: {}, via: 'tunnel' });
+    await waitFor(() => framesOf(resDone(4)).length > 0, '坏帧之后正常帧仍应被处理');
+    assert.equal(framesOf((f) => f.k === 'res-head' && f.id === 4)[0]?.status, 200);
+
+    // 出站帧纪律：token/secret 绝不进回帧
+    const out = JSON.stringify(ctx.sentFrames);
+    for (const s of ['tun-secret-hex', 'at-old', 'at-fresh', 'rt-1']) {
+      assert.ok(!out.includes(s), `隧道回帧泄漏秘密: ${s}`);
+    }
+  } finally {
+    await handle.stop();
+    await new Promise<void>((r) => httpServer.close(() => r()));
+    await new Promise<void>((r) => wss.close(() => r()));
   }
 });

@@ -4,8 +4,10 @@
  *  loadConfig → loadAuth（无则引导 p2p-net login）→ ensureFreshToken（变更即重存 auth.json）
  *  → bind_device_auth RPC 取 deviceId（落 config.json 复用；已有 deviceId 直接复用不打 RPC）
  *  → createScanner().start() → startControlPlane/startDiscovery（只绑 127.0.0.1）
- *  → new HostAgent（isPortAllowed 白名单必传，§5.3 安全洞）→ 每 relay 一条 TunnelClient
- *  （token = HMAC(tunnelSecret, deviceId)，secret 从 0600 config.json 读）
+ *  → new HostAgent（isPortAllowed 白名单必传，§5.3 安全洞）
+ *  → 每 relay 一条隧道链路（token = HMAC(tunnelSecret, deviceId)，secret 从 0600 config.json 读）：
+ *    TunnelClient 帧 → 解析 /s/<port>/ 前缀 → 白名单闸门（与 WebRTC 桥同口径，fail-closed）
+ *    → 派发进该链路专属 HttpBridge/WsBridge；重连清场，坏帧逐帧隔离不杀进程。
  *  → 配对环：每台 relay 打 https://<ip>/connect?… URL + qrcode-terminal QR
  *  → 运行期 token 周期续期（默认 10min，远小于 JWT ~1h TTL）。
  *
@@ -23,7 +25,10 @@ import { join } from 'node:path';
 
 import qrcode from 'qrcode-terminal';
 
+import { HttpBridge, dcSend, type DcLike } from '../bridge/http.js';
+import { WsBridge } from '../bridge/ws.js';
 import { PORTS } from '../contracts.js';
+import { isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen } from '../frames.js';
 import { HostAgent, type HostAgentOptions, type HostStatus } from '../host.js';
 import { createLogger, type Logger } from '../log/logger.js';
 import { ensureFreshToken, type AuthState } from '../server/auth.js';
@@ -45,9 +50,13 @@ export interface HostAgentLike {
   stop(): void;
 }
 
-/** TunnelClient 的最小装配面。 */
+/** TunnelClient 的最小装配面（含数据面接线所需的 send/isOpen）。 */
 export interface TunnelClientLike {
   connect(url: string): void;
+  /** 帧出口：桥的回帧（res-head/res-chunk/ws-*）经此发往 relay。 */
+  send(obj: unknown): void;
+  /** 当前连接是否 OPEN（dc shim 的 readyState 语义来源；断开即丢帧，relay 侧 504 兜底）。 */
+  readonly isOpen: boolean;
   onFrame(cb: (frame: unknown) => void): void;
   onReconnect(cb: () => void): void;
   close(): void;
@@ -149,7 +158,8 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
   let stopped = false;
   let host: HostAgentLike;
   let pairing: PairingHandle | null = null;
-  const tunnels: TunnelClientLike[] = [];
+  /** 每条隧道 = 客户端 + 其专属本地桥（桥持有在途请求/代理 socket，必须随隧道同生共死）。 */
+  const tunnels: Array<{ client: TunnelClientLike; httpBridge: HttpBridge; wsBridge: WsBridge }> = [];
   let scanner: Scanner;
   let control: ServerLike;
   let discovery: ServerLike;
@@ -258,22 +268,94 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
     host.start();
     teardowns.push(() => host.stop());
 
-    // 8) 每 relay 一条 TunnelClient（兜底路径；帧路由按 ruling #2 不在本任务，仅接重连日志）
+    // 8) 每 relay 一条隧道链路（兜底数据面）：TunnelClient + 其专属 HttpBridge/WsBridge。
+    //    relay 下发的 req/ws-open 帧 port=0、路径形如 /s/<port>/<rest>：解析端口 → 白名单
+    //    闸门（与 WebRTC 桥同一 isPortAllowed，fail-closed：非法路径 400 / 越权端口 403 /
+    //    ws-open-err）→ 重写 port/path 后派发给本地桥。帧处理是不可信输入边界：逐帧
+    //    try/catch 隔离，坏帧只丢帧记日志，绝不杀死进程（2026-09-12 ws.close(1006) 事故教训）。
+    //    断线重连时清场（abortAll/closeAll），在途请求交由 PWA/浏览器侧重试。
     const tunnelFactory = deps.tunnelFactory ?? (() => new TunnelClient());
     const tunnelToken = createHmac('sha256', cfg.tunnelSecret).update(deviceId).digest('hex');
     for (const relay of cfg.relays) {
       const t = tunnelFactory();
+      const httpBridge = new HttpBridge();
+      const wsBridge = new WsBridge({});
+      // DcLike 适配：桥的出站帧（dcSend 产出的 JSON 串）parse 回对象经 TunnelClient.send 发 relay；
+      // 背压无意义（ws 库自管缓冲，bufferedAmount 恒 0），readyState 跟随隧道连接态。
+      const dc: DcLike = {
+        send: (data) => {
+          try {
+            t.send(typeof data === 'string' ? JSON.parse(data) : data);
+          } catch {
+            // 非法出站帧丢弃（dcSend 只产合法 JSON，此处纯防御）
+          }
+        },
+        bufferedAmount: 0,
+        get readyState() {
+          return t.isOpen ? 'open' : 'closed';
+        },
+      };
+      const replyHttpError = (id: number, status: number, msg: string): void => {
+        void dcSend(dc, { k: 'res-head', id, status, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+        void dcSend(dc, { k: 'res-chunk', id, dataB64: Buffer.from(msg, 'utf8').toString('base64'), done: true });
+      };
+      const dispatch = (frame: unknown): void => {
+        if (isReq(frame)) {
+          const route = parseTunnelPath(frame.path);
+          if (!route) {
+            replyHttpError(frame.id, 400, 'tunnel bridge: bad path（期望 /s/<port>/<rest>）');
+            return;
+          }
+          if (!isPortAllowed(route.port)) {
+            replyHttpError(frame.id, 403, 'tunnel bridge: port not allowed（端口不在白名单）');
+            return;
+          }
+          void httpBridge.handle(dc, { ...frame, port: route.port, path: route.path });
+          return;
+        }
+        if (isReqAbort(frame)) {
+          void httpBridge.handle(dc, frame);
+          return;
+        }
+        if (isWsOpen(frame)) {
+          const route = parseTunnelPath(frame.path);
+          if (!route || !isPortAllowed(route.port)) {
+            void dcSend(dc, { k: 'ws-open-err', wid: frame.wid });
+            return;
+          }
+          void wsBridge.handle(dc, { ...frame, port: route.port, path: route.path });
+          return;
+        }
+        if (isWsMsg(frame) || isWsClose(frame)) {
+          void wsBridge.handle(dc, frame);
+        }
+        // ping/pong/未知帧静默忽略：隧道保活在 ws 协议层，应用层 ping 无需应答
+      };
+      t.onFrame((frame) => {
+        try {
+          dispatch(frame);
+        } catch (e) {
+          log.warn('tunnel', '隧道帧处理异常（已隔离，进程继续）', { ip: relay.ip, err: e instanceof Error ? e.message : String(e) });
+        }
+      });
       t.onReconnect(() => {
+        // 隧道断开期间本地在途 HTTP/WS 已不可达：清场交由客户端重试
+        httpBridge.abortAll();
+        wsBridge.closeAll();
         log.info('tunnel', '隧道断线重连成功', { ip: relay.ip });
         record({ name: 'tunnel_reconnect', sid: relay.ip }); // ruling #2：sid = relay ip
       });
       // URL 含 token，绝不进日志/stdout
       t.connect(`wss://${relay.ip}/tunnel/desktop?sid=${deviceId}&token=${tunnelToken}`);
-      tunnels.push(t);
+      tunnels.push({ client: t, httpBridge, wsBridge });
       log.info('tunnel', '隧道已发起连接', { ip: relay.ip });
     }
     teardowns.push(() => {
-      for (const t of tunnels) t.close();
+      for (const link of tunnels) {
+        link.httpBridge.abortAll();
+        link.wsBridge.closeAll();
+        link.client.close();
+      }
     });
 
     // 9) 配对环：每台 relay 打 URL + QR，过期自动换票重打（环内失败只 warn 不 crash）
@@ -364,4 +446,14 @@ function closeServer(srv: ServerLike): Promise<void> {
       resolve();
     }
   });
+}
+
+/** 隧道帧路径形态：`/s/<port>/<rest>`（relay 把公网 /tunnel/s/<deviceId>/s/<port>/… 剥成此形下发）。 */
+const TUNNEL_PATH_RE = /^\/s\/(\d+)(\/.*)?$/;
+
+/** 解析隧道帧路径 → { port, rest }；rest 缺省回落 '/'。畸形路径返回 null（派发层回 400/open-err）。 */
+function parseTunnelPath(p: string): { port: number; path: string } | null {
+  const m = TUNNEL_PATH_RE.exec(p);
+  if (!m) return null;
+  return { port: Number(m[1]), path: m[2] || '/' };
 }

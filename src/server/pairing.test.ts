@@ -60,10 +60,10 @@ async function waitFor(cond: () => boolean, ms = 3000): Promise<void> {
   }
 }
 
-test('connect URL 形态', () => {
+test('connect URL 形态：u= 直达隧道公网入口 /tunnel/s/<deviceId>（PWA parseScan 原样存 tunnelUrl）', () => {
   assert.equal(
     buildConnectUrl('1.2.3.4', 't-1', 'dev-9'),
-    'https://1.2.3.4/connect?t=t-1&d=dev-9&u=https%3A%2F%2F1.2.3.4',
+    'https://1.2.3.4/connect?t=t-1&d=dev-9&u=https%3A%2F%2F1.2.3.4%2Ftunnel%2Fs%2Fdev-9',
   );
 });
 
@@ -167,7 +167,7 @@ test('配对环：出票 → 逐 relay 打 URL → 轮询 → redeemed 回执 �
     // 每台 relay 各打一张（URL 形态 = PWA 扫码载荷）
     const t1 = printed.filter((p) => p.url.includes('t=t-1&'));
     assert.deepEqual(t1.map((p) => p.ip), ['1.1.1.1', '2.2.2.2']);
-    assert.equal(t1[0].url, 'https://1.1.1.1/connect?t=t-1&d=dev-1&u=https%3A%2F%2F1.1.1.1');
+    assert.equal(t1[0].url, 'https://1.1.1.1/connect?t=t-1&d=dev-1&u=https%3A%2F%2F1.1.1.1%2Ftunnel%2Fs%2Fdev-1');
     // 换票后对新票重打
     await waitFor(() => printed.some((p) => p.url.includes('t=t-2&')));
   } finally {

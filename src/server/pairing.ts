@@ -35,9 +35,11 @@ const BODY_EXCERPT_LEN = 200;
 export const PAIRING_POLL_INTERVAL_MS = 5_000;
 export const PAIRING_TICKET_TTL_MS = 120_000;
 
-/** PWA 扫码载荷形态：<relay>/connect?t=<ticketId>&d=<deskDeviceId>&u=<接入URL>（pwa/src/cloud.ts 解析）。 */
+/** PWA 扫码载荷形态：<relay>/connect?t=<ticketId>&d=<deskDeviceId>&u=<接入URL>（pwa/src/cloud.ts 解析）。
+ *  u= 直指隧道公网入口 /tunnel/s/<deviceId>：PWA 把 u 原样存为 tunnelUrl 并拼 `${u}/s/<port>/…`，
+ *  经 Caddy /tunnel/* 反代落 relay 的桌面隧道会话（缺此前缀则隧道流量 404，只剩 P2P 主路径）。 */
 export function buildConnectUrl(ip: string, ticketId: string, deviceId: string): string {
-  const u = encodeURIComponent(`https://${ip}`);
+  const u = encodeURIComponent(`https://${ip}/tunnel/s/${deviceId}`);
   return `https://${ip}/connect?t=${encodeURIComponent(ticketId)}&d=${encodeURIComponent(deviceId)}&u=${u}`;
 }
 
