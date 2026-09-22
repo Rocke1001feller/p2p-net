@@ -26,10 +26,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PUBLIC_IP=""
 PRIVATE_IP=""
 
+# 多源兜底：单一出口探测站在跨境链路抖动时偶发超时（E2E 实测 ifconfig.me 同一分钟内一成一败）
+detect_public_ip() {
+  local url got
+  for url in https://ifconfig.me https://api.ipify.org https://ip.sb; do
+    got="$(curl -4 -fsSL --max-time 5 "$url" 2>/dev/null || true)"
+    if [ -n "$got" ]; then printf '%s' "$got"; return 0; fi
+  done
+  return 1
+}
+
 detect_ips() {
   # NAT 机型关键：公网 IP 经外网服务探测，内网 IP 取默认路由网卡；两者成对写入 external-ip
   # 强制 -4：全链路（creds.host、PWA URL、LE IP 证书、coturn external-ip）都是 IPv4 语义，双栈机若探到 v6 会全线错配
-  PUBLIC_IP="${P2PNET_PUBLIC_IP:-${P2PNET_TEST_PUBLIC_IP:-$(curl -4 -fsSL --max-time 5 https://ifconfig.me || true)}}"
+  PUBLIC_IP="${P2PNET_PUBLIC_IP:-${P2PNET_TEST_PUBLIC_IP:-$(detect_public_ip || true)}}"
   PRIVATE_IP="${P2PNET_PRIVATE_IP:-${P2PNET_TEST_PRIVATE_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || true)}}"
   [ -n "$PUBLIC_IP" ] || die "无法探测公网 IP，请设 P2PNET_PUBLIC_IP 重跑"
   [ -n "$PRIVATE_IP" ] || die "无法探测内网 IP，请设 P2PNET_PRIVATE_IP 重跑"
