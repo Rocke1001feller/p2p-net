@@ -28,7 +28,8 @@ PRIVATE_IP=""
 
 detect_ips() {
   # NAT 机型关键：公网 IP 经外网服务探测，内网 IP 取默认路由网卡；两者成对写入 external-ip
-  PUBLIC_IP="${P2PNET_PUBLIC_IP:-${P2PNET_TEST_PUBLIC_IP:-$(curl -fsSL --max-time 5 https://ifconfig.me || true)}}"
+  # 强制 -4：全链路（creds.host、PWA URL、LE IP 证书、coturn external-ip）都是 IPv4 语义，双栈机若探到 v6 会全线错配
+  PUBLIC_IP="${P2PNET_PUBLIC_IP:-${P2PNET_TEST_PUBLIC_IP:-$(curl -4 -fsSL --max-time 5 https://ifconfig.me || true)}}"
   PRIVATE_IP="${P2PNET_PRIVATE_IP:-${P2PNET_TEST_PRIVATE_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || true)}}"
   [ -n "$PUBLIC_IP" ] || die "无法探测公网 IP，请设 P2PNET_PUBLIC_IP 重跑"
   [ -n "$PRIVATE_IP" ] || die "无法探测内网 IP，请设 P2PNET_PRIVATE_IP 重跑"

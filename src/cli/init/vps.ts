@@ -103,8 +103,11 @@ export async function provisionVps(
       secrets,
       async () => {
         log.info('vps', '执行 init-node.sh（coturn+caddy+隧道，env 注入密钥）', { ip });
-        // secret 只进命令串（对端进程 env）；本模块与 ssh.ts 都不记录命令内容
-        const cmd = `TURN_SECRET=${shq(opts.turnSecret)} TUNNEL_SECRET=${shq(opts.tunnelSecret)} bash ${REMOTE_INIT_DIR}/init-node.sh`;
+        // secret 只进命令串（对端进程 env）；本模块与 ssh.ts 都不记录命令内容。
+        // P2PNET_VERSION 透传（非密）：默认 latest；发布前验收可用 file:/tmp/xxx.tgz 装本地包，
+        // 顺带钉住「VPS 侧隧道包版本跟随调用方」而非永远漂在 registry latest。
+        const p2pnetVersion = process.env.P2PNET_VERSION ?? 'latest';
+        const cmd = `TURN_SECRET=${shq(opts.turnSecret)} TUNNEL_SECRET=${shq(opts.tunnelSecret)} P2PNET_VERSION=${shq(p2pnetVersion)} bash ${REMOTE_INIT_DIR}/init-node.sh`;
         const r = await runner.exec(cmd);
         if (r.code !== 0) throw new Error(`退出码 ${r.code}：${scrub(r.stderr || r.stdout, secrets)}`);
       },
