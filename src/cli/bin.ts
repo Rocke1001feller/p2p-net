@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 /** p2p-net CLI 入口：util.parseArgs 分发 init|login|start|service|doctor|status。
- *  init/login/start 已可用（Task 13/17）；service/doctor/status 为「后续阶段提供」的明确占位。
+ *  init/login/start/service 已可用（Task 13/17/18）；doctor/status 为「后续阶段提供」的明确占位。
  *  无参/--help → 帮助（exit 0）；未知命令 → stderr 提示 + 帮助（exit 1）。
  *  strict: false：子命令各自的选项归各命令自行解析（如 start --foreground），入口不抢先拒绝。
  *
  *  start 是长驻前台进程：runStart 装配完成后进程靠控制面/发现端点 server handle 存活；
  *  SIGINT/SIGTERM → handle.stop() 干净收尾（配对环/HostAgent/隧道/scanner/server）后退出。
+ *  service install 装的常驻单元正是以 start --foreground 拉起本入口。
  */
 
 import { parseArgs } from 'node:util';
 
 import { runInit } from './init.js';
 import { runLogin } from './login.js';
+import { runService } from './service.js';
 import { runStart } from './start.js';
 
 const HELP = `p2p-net — Self-hosted WebRTC remote-access data plane
@@ -22,7 +24,7 @@ const HELP = `p2p-net — Self-hosted WebRTC remote-access data plane
   init      初始化部署（Supabase 引导 + 逐台 VPS 编排）
   login     登录并保存凭据（auth.json，0600）
   start     前台启动桌面端代理（--foreground 由常驻服务调用，抑制提示横幅）
-  service   常驻服务管理 install|start|stop|status（后续阶段提供 / coming in a later phase）
+  service   常驻服务管理 install|uninstall|status|logs（崩溃自愈 + 开机自启）
   doctor    分层诊断（后续阶段提供 / coming in a later phase）
   status    查看运行状态（后续阶段提供 / coming in a later phase）
 
@@ -30,7 +32,7 @@ const HELP = `p2p-net — Self-hosted WebRTC remote-access data plane
   -h, --help  显示本帮助
 `;
 
-const COMING_SOON = new Set(['service', 'doctor', 'status']);
+const COMING_SOON = new Set(['doctor', 'status']);
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -84,9 +86,20 @@ async function main(argv: string[]): Promise<number> {
     }
   }
 
+  if (cmd === 'service') {
+    try {
+      // 原始 argv 切片透传：logs -f 等子命令选项由 runService 自行解析
+      return await runService(argv.slice(argv.indexOf(cmd) + 1));
+    } catch (e) {
+      // ServiceError 的 message 已是人话（含用法/下一步指引），不甩堆栈
+      console.error(e instanceof Error ? e.message : String(e));
+      return 1;
+    }
+  }
+
   if (COMING_SOON.has(cmd)) {
     console.log(`「p2p-net ${cmd}」尚未实现，将在后续阶段提供（coming in a later phase）。`);
-    console.log('当前可用命令：p2p-net init / login / start');
+    console.log('当前可用命令：p2p-net init / login / start / service');
     return 0;
   }
 

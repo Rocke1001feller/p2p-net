@@ -1,0 +1,17 @@
+# p2p-net systemd --user unit 模板（Task 18）。
+# 占位符约定：双花括号包裹变量名，整体替换；可用变量 NODE_PATH / ENTRY / LOG_PATH。
+# 插值中的 % 已转义为 %%（systemd specifier），含空白的 ExecStart 路径已加双引号。
+[Unit]
+Description=p2p-net desktop agent (self-hosted WebRTC remote access)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart={{NODE_PATH}} {{ENTRY}} start --foreground
+Restart=always
+RestartSec=3
+StandardOutput=append:{{LOG_PATH}}
+StandardError=append:{{LOG_PATH}}
+
+[Install]
+WantedBy=default.target

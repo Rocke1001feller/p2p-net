@@ -11,7 +11,7 @@
     "./browser": { "types": "./dist/browser.d.ts", "default": "./dist/browser.js" },
     "./package.json": "./package.json"
   },
-  "files": ["dist/", "node-init/", "pwa-dist/", "supabase/", "contracts/", "README.md", "LICENSE"],
+  "files": ["dist/", "node-init/", "pwa-dist/", "supabase/", "contracts/", "assets/", "README.md", "LICENSE"],
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
