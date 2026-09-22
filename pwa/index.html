@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#f6f7f5">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>p2p-net 随行</title>
+<style>
+:root{
+  --bg:#F6F7F5; --card:#FFFFFF; --sep:rgba(28,32,28,.10); --ink:#17201B; --ink2:#68746D; --ink3:#A2ACA5;
+  --brand:#0A8A5F; --brand-soft:rgba(10,138,95,.10);
+  --p2p:#0A8A5F; --relay:#7BC96F; --conn:#B26A00; --off:#8E948F; --err:#E5493A;
+  --r-lg:18px; --r-md:12px;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;background:var(--bg);color:var(--ink);overflow:hidden}
+button{font-family:inherit}
+
+/* ---- 屏幕栈 ---- */
+#screens{position:fixed;inset:0;display:flex;flex-direction:column}
+.screen{position:absolute;inset:0;display:none;flex-direction:column;background:var(--bg);overflow-y:auto;
+  padding:calc(env(safe-area-inset-top) + 18px) 18px calc(env(safe-area-inset-bottom) + 96px)}
+.screen.show{display:flex}
+.navrow{display:flex;align-items:center;gap:10px;margin-bottom:6px;min-height:40px}
+.navrow .bk{border:none;background:transparent;color:var(--brand);font-size:15px;font-weight:600;cursor:pointer;padding:6px 4px}
+.h1{font-size:30px;font-weight:800;letter-spacing:.2px;padding:2px 2px 10px}
+.sub{font-size:14px;color:var(--ink2);line-height:1.6;padding:0 2px}
+
+/* ---- 通用组件 ---- */
+.card{background:var(--card);border-radius:var(--r-lg);padding:16px;box-shadow:0 1px 2px rgba(23,32,27,.05);margin-bottom:12px}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:52px;border:none;
+  border-radius:var(--r-md);font-size:16.5px;font-weight:600;cursor:pointer;transition:transform .12s,opacity .2s}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:var(--brand);color:#fff}
+.btn-sub{background:rgba(120,120,128,.12);color:var(--ink)}
+.btn-plain{background:transparent;color:var(--brand)}
+.btn-danger{background:transparent;color:var(--err)}
+.linkish{color:var(--brand);font-weight:600;text-decoration:none;cursor:pointer}
+.dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
+.dot.breath{animation:breath 2.2s ease-in-out infinite}
+@keyframes breath{0%,100%{box-shadow:0 0 0 0 rgba(10,138,95,.35)}50%{box-shadow:0 0 0 6px rgba(10,138,95,0)}}
+.badge{font-size:11px;font-weight:700;border-radius:6px;padding:3px 7px}
+.badge.p2p{background:rgba(10,138,95,.12);color:var(--p2p)}
+.badge.relay{background:rgba(123,201,111,.18);color:#4E8F3E}
+.badge.off{background:rgba(142,148,143,.14);color:var(--off)}
+.toast{position:fixed;top:calc(env(safe-area-inset-top) + 16px);left:50%;transform:translate(-50%,-16px);
+  background:rgba(28,32,28,.94);color:#fff;font-size:13px;font-weight:600;padding:10px 16px;border-radius:999px;
+  opacity:0;transition:.3s;z-index:90;pointer-events:none;max-width:86%;text-align:center}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.field{display:flex;align-items:center;gap:10px;background:rgba(120,120,128,.12);border-radius:var(--r-md);
+  padding:0 14px;height:52px;margin-bottom:12px}
+.field input{flex:1;border:none;background:transparent;font-size:16px;outline:none;color:var(--ink)}
+.field input::placeholder{color:var(--ink3)}
+.hidden{display:none !important}
+
+/* ---- 设备 tab ---- */
+.dev-card{position:relative;background:var(--card);border-radius:var(--r-lg);padding:16px;margin-bottom:12px;
+  box-shadow:0 1px 2px rgba(23,32,27,.05);cursor:pointer;transition:transform .12s}
+.dev-card:active{transform:scale(.98)}
+.dev-card .top{display:flex;align-items:center;gap:12px}
+.dev-ic{width:44px;height:44px;border-radius:12px;background:linear-gradient(145deg,#EAF4EF,#DFEEE6);
+  display:flex;align-items:center;justify-content:center;color:var(--brand);flex:none}
+.dev-card .nm{flex:1;min-width:0}
+.dev-card .nm b{font-size:16.5px;font-weight:700;display:flex;align-items:center;gap:8px}
+.dev-card .nm span{font-size:12.5px;color:var(--ink2);display:block;margin-top:2px;word-break:break-all}
+.add-dev{border:1.6px dashed rgba(23,32,27,.18);border-radius:var(--r-lg);padding:16px;display:flex;gap:12px;
+  align-items:center;color:var(--ink2);font-size:14.5px;font-weight:600;cursor:pointer;background:transparent;width:100%}
+.empty-hint{text-align:center;color:var(--ink3);font-size:13.5px;line-height:1.8;padding:26px 10px}
+
+/* ---- 工作台 tab ---- */
+#screen-workspace{padding:0;display:none;flex-direction:column;overflow:hidden}
+#screen-workspace.show{display:flex}
+#connBar{display:flex;align-items:center;gap:9px;padding:calc(env(safe-area-inset-top) + 12px) 16px 12px;
+  background:var(--card);border-bottom:.5px solid var(--sep);flex:none}
+#connBar b{font-size:14px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#connBar .lat{font-size:12px;color:var(--ink2);font-weight:600}
+#connBar .disc{border:none;background:rgba(229,73,58,.1);color:var(--err);font-size:12.5px;font-weight:700;
+  border-radius:8px;padding:6px 10px;cursor:pointer}
+#appHost{flex:1;position:relative;background:#fff}
+iframe.app{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;background:#fff}
+
+/* ---- 我的 tab ---- */
+.row{display:flex;align-items:center;gap:12px;padding:13px 16px;position:relative;cursor:pointer}
+.row:active{background:rgba(120,120,128,.08)}
+.group{background:var(--card);border-radius:var(--r-lg);overflow:hidden;box-shadow:0 1px 2px rgba(23,32,27,.05)}
+.row .tx{flex:1;min-width:0}
+.row .tx b{display:block;font-size:15.5px;font-weight:600}
+.row .tx span{display:block;font-size:12.5px;color:var(--ink2);margin-top:2px}
+
+/* ---- 连接中 ---- */
+#stages{margin-top:26px;display:flex;flex-direction:column;gap:4px;width:100%}
+.stg{display:flex;align-items:center;gap:12px;padding:11px 6px;opacity:.32;transition:opacity .4s}
+.stg.on{opacity:1}
+.stg .sd{width:22px;height:22px;border-radius:50%;border:2px solid rgba(120,120,128,.3);flex:none;
+  display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px}
+.stg.done .sd{background:var(--p2p);border-color:var(--p2p)}
+.stg.doing .sd{border-color:var(--brand)}
+.stg.doing .sd::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--brand);animation:breath 1.2s infinite}
+.stg.fail .sd{border-color:var(--err)}
+.stg b{font-size:14.5px;font-weight:600;flex:1}
+.stg span{font-size:12px;color:var(--ink2)}
+.ring-wrap{display:flex;flex-direction:column;align-items:center;padding-top:30px;width:100%}
+.ring-wrap .dev{font-size:20px;font-weight:800;margin-top:14px}
+
+/* ---- tab 栏 ---- */
+#tabbar{position:fixed;bottom:0;left:0;right:0;height:calc(78px + env(safe-area-inset-bottom));
+  padding:8px 10px calc(env(safe-area-inset-bottom) + 6px);background:rgba(250,251,249,.9);
+  backdrop-filter:blur(20px);border-top:.5px solid var(--sep);display:flex;z-index:40}
+#tabbar button{flex:1;border:none;background:transparent;display:flex;flex-direction:column;gap:3px;
+  align-items:center;font-size:10.5px;font-weight:600;color:var(--ink3);cursor:pointer;border-radius:12px}
+#tabbar button svg{width:24px;height:24px}
+#tabbar button.on{color:var(--brand)}
+#tabbar button:disabled{opacity:.45}
+
+/* ---- 相机 ---- */
+#screen-camera{padding:0;background:#101410;overflow:hidden}
+#camVideo{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.cam-top{position:absolute;top:calc(env(safe-area-inset-top) + 10px);left:14px;right:14px;display:flex;
+  justify-content:space-between;align-items:center;z-index:5}
+.cam-top button{border:none;background:rgba(255,255,255,.16);color:#fff;font-size:14px;font-weight:600;
+  border-radius:999px;padding:8px 14px;cursor:pointer}
+.cam-hint{position:absolute;left:0;right:0;top:16%;text-align:center;color:#fff;font-size:14.5px;font-weight:600;
+  text-shadow:0 1px 8px rgba(0,0,0,.6);z-index:5}
+.vf{position:absolute;left:50%;top:50%;transform:translate(-50%,-56%);width:246px;height:246px;z-index:5}
+.vf i{position:absolute;width:42px;height:42px;border:3px solid #fff;border-radius:6px}
+.vf i:nth-child(1){top:0;left:0;border-right:none;border-bottom:none}
+.vf i:nth-child(2){top:0;right:0;border-left:none;border-bottom:none}
+.vf i:nth-child(3){bottom:0;left:0;border-right:none;border-top:none}
+.vf i:nth-child(4){bottom:0;right:0;border-left:none;border-top:none}
+#camStatus{position:absolute;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 42px);text-align:center;
+  color:rgba(255,255,255,.85);font-size:12.5px;z-index:5}
+
+/* ---- Sheet/遮罩 ---- */
+#dim{position:fixed;inset:0;background:rgba(0,0,0,.34);opacity:0;pointer-events:none;transition:.3s;z-index:68}
+#dim.show{opacity:1;pointer-events:auto}
+.sheet{position:fixed;left:0;right:0;bottom:0;background:var(--bg);border-radius:24px 24px 0 0;z-index:70;
+  transform:translateY(104%);transition:transform .4s cubic-bezier(.32,.72,.28,1);padding:10px 20px calc(env(safe-area-inset-bottom) + 30px)}
+.sheet.show{transform:none}
+.sheet .grab{width:40px;height:5px;border-radius:3px;background:rgba(120,120,128,.3);margin:2px auto 14px}
+.sheet h3{font-size:20px;font-weight:800;margin-bottom:6px}
+.sheet .lead{font-size:14px;color:var(--ink2);line-height:1.65;margin-bottom:8px;word-break:break-all}
+.sheet .btns{display:flex;flex-direction:column;gap:10px;margin-top:18px}
+#wechatHint{position:fixed;inset:0;background:#F6F7F5;z-index:200;display:none;flex-direction:column;
+  align-items:center;justify-content:center;padding:32px;text-align:center}
+#wechatHint.show{display:flex}
+</style>
+</head>
+<body>
+<div id="screens">
+  <!-- 设备 tab -->
+  <section class="screen" id="screen-devices">
+    <div class="navrow"><div class="h1" style="flex:1">我的设备</div>
+      <button class="btn-plain btn" id="btnGoScan" style="width:auto;height:40px;padding:0 14px;font-size:14px">扫码接入</button></div>
+    <div id="devList"></div>
+    <button class="add-dev" id="btnPastePair">＋ 添加设备（粘贴二维码内容）</button>
+    <div class="empty-hint" id="devEmpty">在电脑旁？在电脑上运行 p2p-net start，<br>用「扫码接入」对准屏幕上的登录二维码即可。</div>
+  </section>
+
+  <!-- 工作台 tab（引擎 iframe 池挂载点 #appHost 必须保留） -->
+  <section class="screen" id="screen-workspace">
+    <div id="connBar">
+      <span class="dot" id="connDot" style="background:var(--off)"></span>
+      <b id="connTitle">未连接</b>
+      <span class="lat" id="connRtt"></span>
+      <button class="disc hidden" id="btnDisconnect">断开</button>
+    </div>
+    <div id="appHost"></div>
+  </section>
+
+  <!-- 我的 tab -->
+  <section class="screen" id="screen-me">
+    <div class="h1">我的</div>
+    <div class="card" style="display:flex;gap:14px;align-items:center">
+      <div style="width:52px;height:52px;border-radius:50%;background:linear-gradient(145deg,#0FA873,#086B49);
+        color:#fff;font-size:20px;font-weight:800;display:flex;align-items:center;justify-content:center" id="meAvatar">D</div>
+      <div style="flex:1;min-width:0"><b style="font-size:16.5px" id="meEmail">未登录</b>
+        <div style="font-size:12.5px;color:var(--ink2);margin-top:2px">p2p-net 账号 · 本机为 phone 设备</div></div>
+    </div>
+    <div class="group" style="margin-top:14px">
+      <div class="row" id="rowDevices"><span class="tx"><b>我的设备</b><span id="meDevCount">—</span></span>
+        <span style="color:var(--ink3)">›</span></div>
+      <div class="row" id="rowDiag"><span class="tx"><b>连接诊断</b><span id="diagInfo">—</span></span>
+        <span style="color:var(--ink3)">›</span></div>
+    </div>
+    <div class="group" style="margin-top:14px">
+      <div class="row" id="rowAbout"><span class="tx"><b>关于 p2p-net</b><span>PWA v0.1 · 数据面 p2p-net</span></span></div>
+    </div>
+    <div style="height:16px"></div>
+    <div class="group"><div class="row" id="btnLogout"><span class="tx"><b style="color:var(--err)">退出登录</b></span></div></div>
+  </section>
+
+  <!-- 扫码引导 -->
+  <section class="screen" id="screen-scan-intro">
+    <div class="navrow"><button class="bk hidden" id="bkScanIntro">← 返回</button></div>
+    <div class="h1" style="font-size:34px;line-height:1.25">此刻，<br>连接<span style="color:var(--brand)">你的电脑</span>。</div>
+    <p class="sub" style="margin-top:10px">会话、项目、文件都在你的电脑上。手机只是一扇窗——<br>扫码即登录，免配置、免安装 App。</p>
+    <div style="margin-top:auto;display:flex;flex-direction:column;gap:12px;padding-bottom:8px">
+      <button class="btn btn-primary" id="btnOpenCamera">打开相机扫码</button>
+      <button class="btn btn-sub" id="btnGotoLogin">不在电脑旁？账号密码登录</button>
+      <button class="btn btn-plain" id="btnPastePair2">粘贴二维码内容</button>
+    </div>
+  </section>
+
+  <!-- 相机扫码 -->
+  <section class="screen" id="screen-camera">
+    <video id="camVideo" autoplay playsinline muted></video>
+    <div class="cam-top"><button id="btnCamClose">← 返回</button><span></span><span style="width:60px"></span></div>
+    <div class="cam-hint">对准电脑屏幕上的「登录二维码」</div>
+    <div class="vf"><i></i><i></i><i></i><i></i></div>
+    <div id="camStatus">正在启动相机…</div>
+  </section>
+
+  <!-- 账号密码登录 -->
+  <section class="screen" id="screen-login">
+    <div class="navrow"><button class="bk" id="bkLogin">← 返回</button></div>
+    <div class="h1">账号登录</div>
+    <p class="sub" style="padding-bottom:18px">人不在电脑旁时，凭账号找到你的机器。会话只属于你。</p>
+    <div class="field"><input id="inEmail" type="email" placeholder="邮箱" autocomplete="username"></div>
+    <div class="field"><input id="inPassword" type="password" placeholder="密码" autocomplete="current-password">
+      <button class="linkish" id="btnEye" style="border:none;background:transparent;font-size:13.5px">显示</button></div>
+    <button class="btn btn-primary" id="btnPasswordLogin" style="margin-top:8px">登录</button>
+    <p class="sub" style="text-align:center;margin-top:16px">
+      没有账号？<span class="linkish" id="lnkClaim">账号是哪来的？</span></p>
+    <div id="loginStatus" class="sub" style="text-align:center;margin-top:10px;min-height:1.4em"></div>
+  </section>
+
+  <!-- 连接中 -->
+  <section class="screen" id="screen-connecting">
+    <div class="navrow"><button class="bk hidden" id="bkConnecting">取消</button></div>
+    <div class="ring-wrap">
+      <span class="dot breath" style="width:16px;height:16px;background:var(--conn)"></span>
+      <div class="dev" id="connDevName">—</div>
+      <div class="sub" id="connStageTxt" style="margin-top:6px">正在建立直连…</div>
+      <div id="stages">
+        <div class="stg" data-stg="p2p"><span class="sd"></span><b>P2P 直连</b><span>NAT 穿越</span></div>
+        <div class="stg" data-stg="tunnel"><span class="sd"></span><b>反向隧道</b><span>接入网关</span></div>
+        <div class="stg" data-stg="turn"><span class="sd"></span><b>TURN 中继</b><span>端到端加密</span></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- tab 栏 -->
+<nav id="tabbar">
+  <button data-tab="devices" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="5" width="16" height="10" rx="1.6"/><path d="M2 18h20"/></svg>设备</button>
+  <button data-tab="workspace" id="tabWorkspace"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3.5" y="3.5" width="7.4" height="7.4" rx="2"/><rect x="13.1" y="3.5" width="7.4" height="7.4" rx="2"/><rect x="3.5" y="13.1" width="7.4" height="7.4" rx="2"/><rect x="13.1" y="13.1" width="7.4" height="7.4" rx="2"/></svg>工作台</button>
+  <button data-tab="me"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20c1.3-3.4 4-5 7-5s5.7 1.6 7 5"/></svg>我的</button>
+</nav>
+
+<!-- 离线 sheet -->
+<div id="dim"></div>
+<div class="sheet" id="offlineSheet">
+  <div class="grab"></div>
+  <h3 id="offlineTitle">设备不在线</h3>
+  <p class="lead" id="offlineLead">可能已休眠或未开机。会话都安全地存在那台电脑上，上线后即可继续。</p>
+  <div class="btns">
+    <button class="btn btn-primary" id="btnRetryConn">重新连接</button>
+    <button class="btn btn-sub" id="btnOfflineClose">稍后再说</button>
+  </div>
+</div>
+
+<!-- 粘贴配对 sheet -->
+<div class="sheet" id="pasteSheet">
+  <div class="grab"></div>
+  <h3>添加设备</h3>
+  <p class="lead">把电脑端二维码的内容（<span style="white-space:nowrap">https://…/connect?t=…</span>）粘贴到这里：</p>
+  <div class="field"><input id="inPastePair" placeholder="粘贴二维码内容" autocomplete="off"></div>
+  <div class="btns"><button class="btn btn-primary" id="btnPasteGo">连接这台设备</button>
+    <button class="btn btn-sub" id="btnPasteCancel">取消</button></div>
+</div>
+
+<!-- 微信环境提示（Q15） -->
+<div id="wechatHint">
+  <div style="font-size:52px">🌿</div>
+  <h3 style="font-size:21px;margin-top:14px">请在浏览器中打开</h3>
+  <p class="sub" style="margin-top:10px">微信内置浏览器不支持本页的安全能力。<br>请点右上角「···」→ 选择「在浏览器打开」（Safari / Chrome）。</p>
+</div>
+
+<div class="toast" id="toast"></div>
+<!-- 引擎挂载点（保留）：调试日志 / 服务发现渲染容器 -->
+<pre id="log" class="hidden"></pre>
+<div id="services" class="hidden"></div>
+
+<script type="module" src="/src/shell.ts"></script>
+</body>
+</html>

@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "tsx --test \"src/**/*.test.ts\"",
-    "build:pwa": "npm --prefix pwa run build",
+    "build:pwa": "npm run build && npm --prefix pwa run build && node -e \"const fs=require('fs');fs.rmSync('pwa-dist',{recursive:true,force:true});fs.cpSync('pwa/dist','pwa-dist',{recursive:true})\"",
     "prepack": "npm run build && npm run build:pwa"
   },
   "license": "MIT",

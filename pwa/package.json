@@ -1,0 +1,23 @@
+{
+  "name": "p2p-net-pwa",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "p2p-net PWA 客户端：SW 代理 + WebRTC DataChannel 隧道（多服务 per-scope）",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "preview": "vite preview --port 4173 --strictPort"
+  },
+  "dependencies": {
+    "p2p-net": "file:..",
+    "@supabase/supabase-js": "^2.111.0",
+    "jsqr": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.6.0",
+    "vite": "^6.3.5"
+  }
+}

@@ -1,0 +1,248 @@
+/**
+ * 浏览器侧 WebRTC 会话（offerer）—— POC poc/webrtc-pwa/pwa/local/index.html:75-184 的产品化平移。
+ * 三条健壮性规则原样平移：① ICE 竞态缓冲（远端描述未设前入队，设后按序排空）；
+ * ② 最新会话优先（新 connect 即拆旧 pc）；③ sid 守卫（answer/ice 只认当前 sid）。
+ *
+ * 信令：p2p 库 SignalingClient（PostgREST 表 signaling_messages，RLS owner-only）。
+ * 房间语义：本端轮询自己房间 roomFor(uid, myDeviceId) 等 answer/ice；offer/ice 发往桌面房间
+ * roomFor(uid, deskDeviceId)，from = 本端 deviceId（host 侧按 from 回写应答房间）。
+ * ctrl 通道：unordered+maxRetransmits 0（POC 踩坑：绝不用 ordered 通道测 RTT）。
+ * 状态灯：原生 getStats → p2p 库 pairTypeFromStats/rttFromStats（werift 无 selected、浏览器有——
+ * 库内两判据都写，此处直接复用）。
+ */
+import { pairTypeFromStats, roomFor, rttFromStats, relayAddrFromStats, SignalingClient } from 'p2p-net/browser';
+
+export interface LightStatus {
+  state: 'off' | 'connecting' | 'connected' | 'failed';
+  pairType: 'p2p' | 'relay' | null;
+  rttMs?: number;
+  relayAddr?: string;
+}
+
+export interface SessionOptions {
+  signaling: SignalingClient;
+  uid: string;
+  myDeviceId: string;
+  iceServers: RTCIceServer[];
+  iceTransportPolicy?: RTCIceTransportPolicy;
+  onStatus: (s: LightStatus) => void;
+  /** proxy 通道上的隧道帧（req 响应帧由 shell 消费；ws-* 转发进对应 tab iframe）。 */
+  onFrame: (frame: any) => void;
+}
+
+const POLL_MS = 800;          // plan Task 4：800ms 增量轮询
+const PURGE_MS = 60_000;
+const STATS_MS = 5_000;
+const PING_MS = 5_000;
+/**
+ * 去活判定窗口（2026-09-12 根因修复）：ctrl 通道心跳连续 3 次（15s）收不到 pong 即判链路已死。
+ * 真机实证：P2P 黑洞时 dc.readyState 仍是 'open'，isOpen 因此撒谎 → 界面显示"直连"、不重连，
+ * 请求只能干等 SW 30s 超时（Android 直连下 Files/Source Control 全 504）。
+ */
+const LIVENESS_MS = 15_000;
+
+export class WebRtcSession {
+  private pc: RTCPeerConnection | null = null;
+  private dc: RTCDataChannel | null = null;
+  private ctrlDc: RTCDataChannel | null = null;
+  private sid: string | null = null;
+  private deskDeviceId: string | null = null;
+  private remoteSet = false;
+  private readonly iceQueue: RTCIceCandidateInit[] = [];
+  private cursor = 0;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private purgeTimer: ReturnType<typeof setInterval> | null = null;
+  private statsTimer: ReturnType<typeof setInterval> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private lastPongAt = 0;
+
+  constructor(private readonly opts: SessionOptions) {}
+
+  get isOpen(): boolean {
+    // 诚实版 isOpen：通道 open **且** 心跳新鲜。否则就是"假直连"，必须让上层走重连/降级。
+    return this.dc?.readyState === 'open' && Date.now() - this.lastPongAt < LIVENESS_MS;
+  }
+
+  /** 建连（可重复调用 = 重连，规则②：拆旧换新）。 */
+  async connect(deskDeviceId: string): Promise<void> {
+    this.teardown();
+    this.deskDeviceId = deskDeviceId;
+    this.sid = Math.random().toString(36).slice(2, 10);
+    this.cursor = 0;
+    this.remoteSet = false;
+    this.iceQueue.length = 0;
+    this.opts.onStatus({ state: 'connecting', pairType: null });
+
+    const pc = this.pc = new RTCPeerConnection({
+      iceServers: this.opts.iceServers,
+      iceTransportPolicy: this.opts.iceTransportPolicy ?? 'all',
+    });
+    pc.onicecandidate = (e) => {
+      if (e.candidate && this.sid && this.deskDeviceId) {
+        void this.opts.signaling.send(
+          roomFor(this.opts.uid, this.deskDeviceId),
+          this.opts.myDeviceId,
+          { type: 'ice', sid: this.sid, cand: e.candidate.toJSON(), from: this.opts.myDeviceId },
+        ).catch((e) => { console.log(`[sig] 发送失败（后续候选/重连补偿）: ${e instanceof Error ? e.message : e}`); });
+      }
+    };
+    pc.onconnectionstatechange = () => void this.emitPcStatus();
+
+    const dc = this.dc = pc.createDataChannel('proxy');
+    dc.onopen = () => {
+      this.lastPongAt = Date.now();
+      this.opts.onStatus({ state: 'connected', pairType: null });
+      void this.refreshStats();
+    };
+    dc.onclose = () => this.opts.onStatus({ state: 'off', pairType: null });
+    dc.onmessage = (ev) => {
+      try {
+        const m = JSON.parse(ev.data);
+        if (m && m.k === 'pong') { this.lastPongAt = Date.now(); return; } // 控制通道降级到 proxy 时也认
+        this.opts.onFrame(m);
+      } catch { /* 非法帧丢弃 */ }
+    };
+
+    // 带外控制通道（unordered + 不重传）：ping/pong 不与批量数据同队排队，RTT 才反映真实链路
+    const ctrl = this.ctrlDc = pc.createDataChannel('ctrl', { ordered: false, maxRetransmits: 0 });
+    ctrl.onmessage = (ev) => {
+      try {
+        const m = JSON.parse(ev.data);
+        if (m.k === 'pong') {
+          this.lastPongAt = Date.now(); // 心跳新鲜度（去活判定唯一依据）
+          this.opts.onStatus({ state: 'connected', pairType: this.lastPairType, rttMs: Date.now() - m.t });
+        }
+      } catch { /* 忽略 */ }
+    };
+
+    await pc.setLocalDescription(await pc.createOffer());
+    await this.opts.signaling.send(
+      roomFor(this.opts.uid, deskDeviceId),
+      this.opts.myDeviceId,
+      { type: 'offer', sid: this.sid, sdp: { type: pc.localDescription!.type, sdp: pc.localDescription!.sdp }, from: this.opts.myDeviceId },
+    );
+
+    this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
+    this.purgeTimer = setInterval(() => {
+      void this.opts.signaling.purgeExpired(roomFor(this.opts.uid, this.opts.myDeviceId)).catch(() => {});
+    }, PURGE_MS);
+    this.statsTimer = setInterval(() => { if (this.isOpen) void this.refreshStats(); }, STATS_MS);
+    this.pingTimer = setInterval(() => {
+      // 优先 ctrl；对端无 ctrl 时回退 proxy（POC 兼容语义）
+      const ch = (this.ctrlDc && this.ctrlDc.readyState === 'open') ? this.ctrlDc
+        : (this.dc && this.dc.readyState === 'open' ? this.dc : null);
+      if (ch) { try { ch.send(JSON.stringify({ k: 'ping', t: Date.now() })); } catch { /* 忽略 */ } }
+    }, PING_MS);
+    // 看门狗：心跳断供即判死 → 通知上层（CascadeSession 会转发 off，shell 走重连/降级）
+    this.watchdogTimer = setInterval(() => {
+      if (this.dc?.readyState !== 'open') return;
+      if (Date.now() - this.lastPongAt < LIVENESS_MS) return;
+      this.opts.onStatus({ state: 'off', pairType: null });
+      this.teardown();
+    }, 2_000);
+  }
+
+  private lastPairType: 'p2p' | 'relay' | null = null;
+  private lastRelayAddr?: string;
+
+  private async emitPcStatus(): Promise<void> {
+    const st = this.pc?.connectionState;
+    if (st === 'connected') {
+      await this.refreshStats();
+    } else if (st === 'failed') {
+      this.opts.onStatus({ state: 'failed', pairType: null });
+    } else if (st === 'connecting' || st === 'new' || st === 'disconnected') {
+      // disconnected 是瞬时态：显式回落到"连接中"语义，别让界面继续假装已连接
+      this.opts.onStatus({ state: 'connecting', pairType: this.lastPairType });
+    }
+  }
+
+  private statsToRows(report: RTCStatsReport): Record<string, any>[] {
+    const rows: Record<string, any>[] = [];
+    report.forEach((v: any) => rows.push(v));   // 兼容 forEach-only 形态（POC 同款）
+    return rows;
+  }
+
+  private async refreshStats(): Promise<void> {
+    if (!this.pc) return;
+    try {
+      const rows = this.statsToRows(await this.pc.getStats());
+      this.lastPairType = pairTypeFromStats(rows);
+      const rtt = rttFromStats(rows);
+      const relayAddr = relayAddrFromStats(rows);
+      if (relayAddr) this.lastRelayAddr = relayAddr;
+      this.opts.onStatus({
+        state: this.isOpen ? 'connected' : 'connecting',
+        pairType: this.lastPairType,
+        ...(rtt !== undefined ? { rttMs: rtt } : {}),
+        ...(this.lastRelayAddr ? { relayAddr: this.lastRelayAddr } : {}),
+      });
+    } catch { /* stats 失败不影响链路 */ }
+  }
+
+  /** proxy 通道出站（背压 8MiB，POC dcSend 同语义）。 */
+  async send(frame: unknown): Promise<void> {
+    const dc = this.dc;
+    if (!dc || dc.readyState !== 'open') return;
+    const s = JSON.stringify(frame);
+    // 背压等待加封顶（2026-09-12）：通道一旦黑洞，bufferedAmount 只涨不落，原先的 while 会
+    // 无限等待 → 上层请求永远发不出去、也不报错（真机实证：有 req 无 res）。超时即认通道已死。
+    const deadline = Date.now() + 5_000;
+    while (dc.bufferedAmount > 8 * 1024 * 1024) {
+      if (Date.now() > deadline) {
+        this.opts.onStatus({ state: 'off', pairType: null });
+        this.teardown();
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    dc.send(s);
+  }
+
+  private async poll(): Promise<void> {
+    try {
+      const { msgs, cursor } = await this.opts.signaling.poll(roomFor(this.opts.uid, this.opts.myDeviceId), this.cursor);
+      this.cursor = cursor;
+      for (const row of msgs) {
+        const m = row.payload;
+        if (!this.sid || m.sid !== this.sid) continue;   // 规则③ sid 守卫
+        if (m.type === 'answer' && m.sdp && this.pc && !this.remoteSet) {
+          await this.pc.setRemoteDescription(m.sdp as RTCSessionDescriptionInit);
+          await this.flushIce();
+        } else if (m.type === 'ice' && m.cand) {
+          await this.addIce(m.cand);
+        }
+      }
+    } catch (e) { console.log(`[sig] 轮询失败（下一 tick 重试）: ${e instanceof Error ? e.message : e}`); }
+  }
+
+  /** 规则① ICE 竞态缓冲。 */
+  private async addIce(cand: RTCIceCandidateInit): Promise<void> {
+    if (!this.pc) return;
+    if (this.remoteSet) { try { await this.pc.addIceCandidate(cand); } catch { /* 单个候选失败可忽略 */ } }
+    else this.iceQueue.push(cand);
+  }
+
+  private async flushIce(): Promise<void> {
+    this.remoteSet = true;
+    while (this.iceQueue.length) {
+      try { await this.pc?.addIceCandidate(this.iceQueue.shift()!); } catch { /* 单个候选失败可忽略 */ }
+    }
+  }
+
+  teardown(): void {
+    for (const t of [this.pollTimer, this.purgeTimer, this.statsTimer, this.pingTimer, this.watchdogTimer]) {
+      if (t) clearInterval(t);
+    }
+    this.pollTimer = this.purgeTimer = this.statsTimer = this.pingTimer = this.watchdogTimer = null;
+    if (this.ctrlDc) { try { this.ctrlDc.close(); } catch { /* 忽略 */ } this.ctrlDc = null; }
+    if (this.dc) { try { this.dc.close(); } catch { /* 忽略 */ } this.dc = null; }
+    if (this.pc) { try { this.pc.close(); } catch { /* 忽略 */ } this.pc = null; }
+    this.sid = null;
+    this.remoteSet = false;
+    this.iceQueue.length = 0;
+    this.lastPairType = null;
+    this.lastRelayAddr = undefined;
+  }
+}
