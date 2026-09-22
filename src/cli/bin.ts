@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 /** p2p-net CLI 入口：util.parseArgs 分发 init|login|start|service|doctor|status。
- *  当前只有 init 可用（Task 13）；其余命令为「后续阶段提供」的明确占位（人话提示，exit 0）。
+ *  init/login/start 已可用（Task 13/17）；service/doctor/status 为「后续阶段提供」的明确占位。
  *  无参/--help → 帮助（exit 0）；未知命令 → stderr 提示 + 帮助（exit 1）。
- *  strict: false：子命令各自的选项归各阶段自行解析，入口不抢先拒绝。
+ *  strict: false：子命令各自的选项归各命令自行解析（如 start --foreground），入口不抢先拒绝。
+ *
+ *  start 是长驻前台进程：runStart 装配完成后进程靠控制面/发现端点 server handle 存活；
+ *  SIGINT/SIGTERM → handle.stop() 干净收尾（配对环/HostAgent/隧道/scanner/server）后退出。
  */
 
 import { parseArgs } from 'node:util';
 
 import { runInit } from './init.js';
+import { runLogin } from './login.js';
+import { runStart } from './start.js';
 
 const HELP = `p2p-net — Self-hosted WebRTC remote-access data plane
 
@@ -15,8 +20,8 @@ const HELP = `p2p-net — Self-hosted WebRTC remote-access data plane
 
 命令：
   init      初始化部署（Supabase 引导 + 逐台 VPS 编排）
-  login     登录并保存凭据（后续阶段提供 / coming in a later phase）
-  start     前台启动桌面端代理（后续阶段提供 / coming in a later phase）
+  login     登录并保存凭据（auth.json，0600）
+  start     前台启动桌面端代理（--foreground 由常驻服务调用，抑制提示横幅）
   service   常驻服务管理 install|start|stop|status（后续阶段提供 / coming in a later phase）
   doctor    分层诊断（后续阶段提供 / coming in a later phase）
   status    查看运行状态（后续阶段提供 / coming in a later phase）
@@ -25,7 +30,7 @@ const HELP = `p2p-net — Self-hosted WebRTC remote-access data plane
   -h, --help  显示本帮助
 `;
 
-const COMING_SOON = new Set(['login', 'start', 'service', 'doctor', 'status']);
+const COMING_SOON = new Set(['service', 'doctor', 'status']);
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -52,9 +57,36 @@ async function main(argv: string[]): Promise<number> {
     }
   }
 
+  if (cmd === 'login') {
+    try {
+      await runLogin();
+      return 0;
+    } catch (e) {
+      // AuthError/ConfigError 的 message 已是人话（含 p2p-net login / init 指引），不甩堆栈
+      console.error(e instanceof Error ? e.message : String(e));
+      return 1;
+    }
+  }
+
+  if (cmd === 'start') {
+    try {
+      const handle = await runStart({ foreground: values.foreground === true });
+      const shutdown = () => {
+        void handle.stop().finally(() => process.exit(0));
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+      return 0; // 进程靠控制面/发现端点 server handle 存活
+    } catch (e) {
+      // 预期失败（ConfigError/AuthError/未登录/端口被占）message 已是人话，不甩堆栈
+      console.error(e instanceof Error ? e.message : String(e));
+      return 1;
+    }
+  }
+
   if (COMING_SOON.has(cmd)) {
     console.log(`「p2p-net ${cmd}」尚未实现，将在后续阶段提供（coming in a later phase）。`);
-    console.log('当前可用命令：p2p-net init');
+    console.log('当前可用命令：p2p-net init / login / start');
     return 0;
   }
 
