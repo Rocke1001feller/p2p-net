@@ -260,6 +260,7 @@ test('验证不绿 → InitError(verify) 带安全组 443/3478 提示与探针�
     connectRunner: async () => runner,
     ...verify,
     tunnelStatusProbe: async () => 500,
+    verifyRetry: { attempts: 2, intervalMs: 1 },
   };
   await assert.rejects(provisionVps(baseCreds(), baseOpts(log), log, deps), (e) => {
     assert.ok(e instanceof InitError, `应为 InitError，实际 ${e}`);
@@ -270,4 +271,21 @@ test('验证不绿 → InitError(verify) 带安全组 443/3478 提示与探针�
     assert.match(e.message, /tunnelAlive=false/);
     return true;
   });
+});
+
+test('验证探针重试：首红次绿 → 成功（restart↔ACME 签发竞态回归）', async () => {
+  const calls: string[] = [];
+  const { runner } = fakeRunner(calls);
+  const { log } = fakeLogger();
+  const verify = greenVerifyDeps();
+  let certCalls = 0;
+  const deps: ProvisionDeps = {
+    connectRunner: async () => runner,
+    ...verify,
+    certDaysLeftProbe: async () => (certCalls++ === 0 ? -1 : 30), // 首轮证书未就绪，次轮就绪
+    verifyRetry: { attempts: 3, intervalMs: 1 },
+  };
+  const r = await provisionVps(baseCreds(), baseOpts(log), log, deps);
+  assert.equal(r.pwaUrl, `https://${IP}`);
+  assert.equal(certCalls, 2, '证书探针应恰好被调用两次（首红次绿即停）');
 });

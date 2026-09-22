@@ -50,6 +50,10 @@ export interface VerifyDeps {
 
 export interface ProvisionDeps extends VerifyDeps {
   connectRunner?: (creds: VpsCreds) => Promise<SshRunnerLike>;
+  /** 验证重试旋钮：证书签发是 systemctl restart 之后的异步事件（ACME 数秒~数十秒），
+   *  首跑立即探针必遇竞态（E2E 实测 restart 后 ~2s 探针全红、~60s 后全绿）。
+   *  默认 6 次 × 10s；测试可压成 { attempts: 1 }。 */
+  verifyRetry?: { attempts?: number; intervalMs?: number };
 }
 
 export interface VpsVerifyResult {
@@ -67,6 +71,8 @@ const RESTART_CMD = 'systemctl restart p2p-net-tunnel caddy coturn';
 const PROBE_TIMEOUT_MS = 10_000;
 const ERR_EXCERPT_LEN = 200;
 const SECURITY_HINT = '请确认云厂商安全组/防火墙已放行 443/tcp 与 3478（tcp+udp），然后重跑 init';
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** 写入 VPS /config.json 的渲染器（与 pwa/src/config.ts RuntimeConfig 逐字段对齐）。 */
 export function renderConfigJson(cfg: { supabaseUrl: string; publishableKey: string; ip: string }): string {
@@ -149,8 +155,15 @@ export async function provisionVps(
   }
 
   log.info('vps', '运行四层验证探针', { ip });
-  const v = await verifyVps(ip, deps);
-  log.info('vps', '验证探针结果', { ip, httpsOk: v.httpsOk, certDaysLeft: v.certDaysLeft, tunnelAlive: v.tunnelAlive });
+  const maxAttempts = deps.verifyRetry?.attempts ?? 6;
+  const retryIntervalMs = deps.verifyRetry?.intervalMs ?? 10_000;
+  let v: VpsVerifyResult = { httpsOk: false, certDaysLeft: -1, tunnelAlive: false };
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    v = await verifyVps(ip, deps);
+    log.info('vps', '验证探针结果', { ip, attempt, maxAttempts, httpsOk: v.httpsOk, certDaysLeft: v.certDaysLeft, tunnelAlive: v.tunnelAlive });
+    if (v.httpsOk && v.certDaysLeft > 0 && v.tunnelAlive) break;
+    if (attempt < maxAttempts) await sleep(retryIntervalMs);
+  }
   if (!v.httpsOk || v.certDaysLeft <= 0 || !v.tunnelAlive) {
     throw new InitError(
       'verify',
