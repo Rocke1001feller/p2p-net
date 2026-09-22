@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { HostAgent, PeerSession, type HostStatus } from '../host.js';
-import { Peer } from '../peer.js';
+import { Peer, type LinkStatus } from '../peer.js';
 import { roomFor, type SigMessage } from '../signaling/protocol.js';
 import type { PollResult } from '../signaling/client.js';
 import type { IceCandidateLike } from '../signaling/protocol.js';
@@ -326,5 +326,91 @@ test('HostAgent：两个客户端（不同 deviceId）同时在线，host 必须
     assert.equal(Buffer.from(bChunk.dataB64, 'base64').toString(), 'ok-/b');
   } finally {
     agent.stop(); A.client.close(); B.client.close(); closeServer(server);
+  }
+});
+
+// ---- I1 会话会计：宽限到期必须合成一次终态 onStatus，否则 /status 长期谎报活跃会话 ----
+
+/** bogus offer 入表（acceptOffer 失败但会话已登记），返回会话对象与私有面句柄。 */
+async function seedBogusSession(agent: HostAgent, clientKey: string): Promise<PeerSession> {
+  const onSignal = (agent as unknown as { onSignal: (m: unknown) => Promise<void> }).onSignal.bind(agent);
+  await onSignal({ type: 'offer', sid: 's1', from: clientKey, sdp: { type: 'offer', sdp: 'v=0 bogus' } }).catch(() => {});
+  const sessions = (agent as unknown as { sessions: Map<string, PeerSession> }).sessions;
+  const s = sessions.get(clientKey);
+  assert.ok(s, 'bogus offer 后会话应已入表');
+  return s;
+}
+
+/** 直驱会话状态回调（等同 Peer 上报的状态，绕过 ICE——测的是会计语义不是网络）。 */
+function driveStatus(agent: HostAgent, clientKey: string, session: PeerSession, state: LinkStatus['state']): void {
+  (agent as unknown as { onSessionStatus: (k: string, s: PeerSession, st: LinkStatus) => void })
+    .onSessionStatus(clientKey, session, { state, pairType: null });
+}
+
+function mkAgent(statuses: HostStatus[], sessionGraceMs?: number): HostAgent {
+  return new HostAgent({
+    supabaseUrl: 'http://unused.invalid', publishableKey: 'pk', accessToken: () => null,
+    deviceId: 'desk-1', uid: 'u', turnFetcher: async () => ({ iceServers: [] }),
+    onStatus: (s) => statuses.push(s),
+    signaling: new MemSignaling(), pollMs: 30,
+    ...(sessionGraceMs !== undefined ? { sessionGraceMs } : {}),
+  });
+}
+
+const terminalsOf = (statuses: HostStatus[], clientKey: string) =>
+  statuses.filter((s) => s.clientKey === clientKey && (s.state === 'failed' || s.state === 'closed'));
+
+test('HostAgent：宽限到期 → 恰好一次合成终态 failed + 摘除会话（I1 修复）', async () => {
+  const statuses: HostStatus[] = [];
+  const agent = mkAgent(statuses, 10);
+  try {
+    const session = await seedBogusSession(agent, 'phone-1');
+    driveStatus(agent, 'phone-1', session, 'disconnected'); // 手机走出覆盖：宽限启动
+    await until(() => agent.sessionCount === 0, 3000, '宽限到期应摘除会话');
+    const terminals = terminalsOf(statuses, 'phone-1');
+    assert.equal(terminals.length, 1, `终态事件必须恰好一次: ${JSON.stringify(statuses)}`);
+    assert.equal(terminals[0]!.state, 'failed', '宽限到期应合成 failed（客户端未显式关闭，语义诚实）');
+    assert.equal(terminals[0]!.deviceId, 'desk-1');
+    // dispose 的 pc.close() 异步回声不得再发终态（出表守卫）
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(terminalsOf(statuses, 'phone-1').length, 1, '出表后的状态回声不得再发终态');
+  } finally {
+    agent.stop();
+  }
+});
+
+test('HostAgent：显式 closed → 恰好一次终态，不合成 failed', async () => {
+  const statuses: HostStatus[] = [];
+  const agent = mkAgent(statuses, 10);
+  try {
+    const session = await seedBogusSession(agent, 'phone-2');
+    driveStatus(agent, 'phone-2', session, 'closed'); // 客户端显式关闭：立即摘除
+    assert.equal(agent.sessionCount, 0);
+    await new Promise((r) => setTimeout(r, 60));
+    const terminals = terminalsOf(statuses, 'phone-2');
+    assert.equal(terminals.length, 1, `显式 closed 终态必须恰好一次: ${JSON.stringify(statuses)}`);
+    assert.equal(terminals[0]!.state, 'closed', '显式关闭必须保持 closed，不得被合成 failed 覆盖');
+  } finally {
+    agent.stop();
+  }
+});
+
+test('HostAgent：宽限期内 connected 自愈取消摘除；之后显式 closed 仍恰好一次终态', async () => {
+  const statuses: HostStatus[] = [];
+  const agent = mkAgent(statuses, 20);
+  try {
+    const session = await seedBogusSession(agent, 'phone-3');
+    driveStatus(agent, 'phone-3', session, 'disconnected'); // 宽限启动
+    driveStatus(agent, 'phone-3', session, 'connected');    // 宽限期内自愈 → clearGrace
+    await new Promise((r) => setTimeout(r, 80));            // 远超 20ms 宽限
+    assert.equal(agent.sessionCount, 1, '自愈后不得宽限摘除');
+    assert.equal(terminalsOf(statuses, 'phone-3').length, 0, '自愈后不得合成终态');
+    driveStatus(agent, 'phone-3', session, 'closed');
+    assert.equal(agent.sessionCount, 0);
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(terminalsOf(statuses, 'phone-3').length, 1, '自愈-关闭全程终态仍恰好一次');
+    assert.equal(terminalsOf(statuses, 'phone-3')[0]!.state, 'closed');
+  } finally {
+    agent.stop();
   }
 });

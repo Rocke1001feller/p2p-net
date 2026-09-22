@@ -62,6 +62,8 @@ export interface HostAgentOptions {
    * 可被 PWA 驱使打任意 localhost 端口。
    */
   isPortAllowed?: (port: number) => boolean;
+  /** 测试缝：覆盖会话宽限期（默认 SESSION_GRACE_MS=20s；测试注入小值驱动宽限到期路径）。 */
+  sessionGraceMs?: number;
 }
 
 // 调试日志（P2P_NET_DEBUG=1 启用）；错误类日志不受开关限制（轮询/onSignal 失败必须留痕）
@@ -287,16 +289,7 @@ export class HostAgent {
       await session.peer.acceptOffer(msg.sid, msg.sdp, {
         onChannel: (dc, label) => session.wireChannel(dc, label, this.opts.onServiceFrame),
         onIce: (cand) => this.reply(clientKey, msg.sid, { type: 'ice', sid: msg.sid, cand, from: this.opts.deviceId }),
-        onStatus: (s) => {
-          session.lastStatus = s;
-          // 2026-09-12 根因修复：只有 closed 立即摘；connecting/disconnected/failed 走宽限期，
-          // 抖动期保留 ICE 路由与在途请求（旧行为把 disconnected 当 failed 秒摘 → 请求全挂）。
-          const verdict = sessionDisposition(s.state);
-          if (verdict === 'keep') session.clearGrace();
-          else if (verdict === 'drop') this.dropSession(clientKey, session);
-          else session.startGrace(SESSION_GRACE_MS, () => this.dropSession(clientKey, session));
-          this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId, clientKey });
-        },
+        onStatus: (s) => this.onSessionStatus(clientKey, session, s),
       });
       const local = session.peer.localDescription;
       if (local) { this.reply(clientKey, msg.sid, { type: 'answer', sid: msg.sid, sdp: local, from: this.opts.deviceId }); dbg('answer sent to room', roomFor(this.opts.uid, clientKey)); }
@@ -324,6 +317,33 @@ export class HostAgent {
     if (this.sessions.get(key) === session) this.sessions.delete(key);
     session.dispose();
     dbg('session dropped', key, 'last=' + session.lastStatus.state);
+  }
+
+  /**
+   * 会话状态归一口：维护 lastStatus + 摘除策略 + 事件转发。
+   * 出表守卫：会话被摘除/换绑后，其 Peer 的残余状态回声（如 dispose → pc.close() 的
+   * 异步 closed）不再进入事件流——终态（closed / 宽限到期合成的 failed）只发一次。
+   */
+  private onSessionStatus(clientKey: string, session: PeerSession, s: LinkStatus): void {
+    if (this.sessions.get(clientKey) !== session) return;
+    session.lastStatus = s;
+    // 2026-09-12 根因修复：只有 closed 立即摘；connecting/disconnected/failed 走宽限期，
+    // 抖动期保留 ICE 路由与在途请求（旧行为把 disconnected 当 failed 秒摘 → 请求全挂）。
+    const verdict = sessionDisposition(s.state);
+    if (verdict === 'keep') session.clearGrace();
+    else if (verdict === 'drop') this.dropSession(clientKey, session);
+    else session.startGrace(this.opts.sessionGraceMs ?? SESSION_GRACE_MS, () => this.expireSession(clientKey, session));
+    this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId, clientKey });
+  }
+
+  /**
+   * 宽限到期（I1 会话会计修复）：先合成一次终态 onStatus（state:'failed'——客户端未显式
+   * 关闭，用 'closed' 会谎称正常关闭），再摘除会话。否则手机走出覆盖后 /status 长期谎报
+   * 活跃会话（静默 drop 无终态事件，环形缓冲里的 session_start 永远配不了对）。
+   */
+  private expireSession(clientKey: string, session: PeerSession): void {
+    this.opts.onStatus?.({ ...session.lastStatus, state: 'failed', deviceId: this.opts.deviceId, clientKey });
+    this.dropSession(clientKey, session);
   }
 
   /** 单测/排障用：当前会话数。 */
