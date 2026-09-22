@@ -37,5 +37,6 @@ test('package.json exports 映射：. / ./browser / ./package.json', () => {
   assert.equal(pkg.exports['.'].default, './dist/index.js');
   assert.equal(pkg.exports['./browser'].default, './dist/browser.js');
   assert.equal(pkg.exports['./package.json'], './package.json');
-  assert.equal(pkg.scripts.test, 'tsx --test "src/**/*.test.ts"');
+  // 主套件同时覆盖 src/ 与 pwa/src/（2026-09-22 起：pwa 测试此前不在主 glob 里，bind 解析 bug 漏网）
+  assert.equal(pkg.scripts.test, 'tsx --test "src/**/*.test.ts" "pwa/src/**/*.test.ts"');
 });

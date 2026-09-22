@@ -1,7 +1,8 @@
 /**
  * 云端链路：扫码登录（ticket 兑换）→ verifyOtp 建会话 → bind_device_auth 绑 phone 设备 →
  * turn-credentials 取 TURN 临时凭据。契约逐字对齐老仓 mobile/src/cloud.ts；
- * bind 响应按 D-M1-3 只取 device_id（network_name/virtual_ip/relays 等 v1 字段一律忽略）。
+ * bind 响应只取设备 id（network_name/virtual_ip/relays 等 v1 字段一律忽略），
+ * 形态归一见 parseBindResponse。
  *
  * Supabase 地址与 publishable key 不再硬编码：一律取 loadRuntimeConfig()（同源 /config.json，
  * 由 p2p-net init 写入 VPS）。模块内 memo 一份以免每个 RPC 都重拉；拉取失败清缓存以便重试。
@@ -107,7 +108,7 @@ export async function loginByPassword(email: string, password: string): Promise<
   }
 }
 
-/** 绑定本机为账号下 phone 设备：响应只消费 device_id（D-M1-3）。 */
+/** 绑定本机为账号下 phone 设备：响应只消费设备 id（D-M1-3；network_name/virtual_ip/relays 等 v1 字段一律忽略）。 */
 export async function bindPhone(hostname: string): Promise<BindResult> {
   const { data, error } = await (await supabase()).rpc('bind_device_auth', {
     p_hostname: hostname,
@@ -115,9 +116,22 @@ export async function bindPhone(hostname: string): Promise<BindResult> {
   });
   if (error?.message.includes('invite_required')) throw new Error('invite_required');
   if (error) throw new Error(`设备绑定失败：${error.message}`);
-  const b = data as { device_id?: string } | null;
-  if (!b?.device_id) throw new Error('设备绑定响应缺少 device_id');
-  return { deviceId: b.device_id };
+  const id = parseBindResponse(data);
+  if (!id) throw new Error('设备绑定响应缺少 device_id');
+  return { deviceId: id };
+}
+
+/** bind_device_auth 响应归一：DDL 为 returns uuid（PostgREST 直返裸字符串）；
+ *  jsonb {device_id} 是 D-M1-3 历史形态，保留兜底。
+ *  2026-09-22 真机实锤：旧代码只认对象形态 → 裸 uuid 被判缺 device_id → 绑定即抛错、
+ *  LS_DEVICE_ID 永不落盘 → startConnect 静默 bail，手机端永远连不上。 */
+export function parseBindResponse(data: unknown): string | null {
+  if (typeof data === 'string' && data) return data;
+  if (data && typeof data === 'object') {
+    const id = (data as { device_id?: unknown }).device_id;
+    if (typeof id === 'string' && id) return id;
+  }
+  return null;
 }
 
 export interface TurnCredentialsResponse {
