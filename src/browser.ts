@@ -12,4 +12,5 @@ export {
   type FetchLike,
 } from './signaling/client.js';
 export * from './frames.js';
+export * from './pool.js';
 export * from './status.js';

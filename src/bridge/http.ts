@@ -69,6 +69,17 @@ function rewriteLocation(value: string, port: number): string {
 
 export class HttpBridge {
   private ctrls = new Map<number, AbortController>();
+  /**
+   * 请求生命周期终结回调（正常 done / req-abort / 错误殊途同归）：
+   * 宿主据此清 req→通道粘滞映射（Task 4）与帧账本 resDone（Task 5）。
+   */
+  onSettled?: (id: number) => void;
+
+  /** ctrls 删除的唯一收口：任何路径终结都必须经此，漏一处就会泄漏粘滞映射。 */
+  private settle(id: number): void {
+    this.ctrls.delete(id);
+    this.onSettled?.(id);
+  }
 
   /** 帧入口：处理 req / req-abort；其余帧（ws 系列、ping）交还调用方路由。 */
   async handle(dc: DcLike, frame: unknown): Promise<void> {
@@ -77,7 +88,7 @@ export class HttpBridge {
       const ctrl = this.ctrls.get(frame.id);
       if (ctrl) {
         ctrl.abort();
-        this.ctrls.delete(frame.id);
+        this.settle(frame.id);
       }
     }
   }
@@ -124,7 +135,7 @@ export class HttpBridge {
       headSent = true;
 
       if (NO_BODY_STATUS.includes(res.statusCode ?? 0)) {
-        this.ctrls.delete(id);
+        this.settle(id);
         res.resume();
         await sendChunk(dc, id, null, true);
         return;
@@ -137,11 +148,11 @@ export class HttpBridge {
           await sendChunk(dc, id, Buffer.from(piece.buffer, piece.byteOffset, piece.byteLength), false);
         }
       }
-      this.ctrls.delete(id);
+      this.settle(id);
       await sendChunk(dc, id, null, true);
       if (process.env.P2P_NET_DEBUG) console.error('[p2p-net] done#%d :%d%s %dB +%dms', id, frame.port, frame.path, sentBytes, Date.now() - t0);
     } catch (e) {
-      this.ctrls.delete(id);
+      this.settle(id);
       const msg = e instanceof Error ? e.message : String(e);
       if (ctrl.signal.aborted) return; // 客户端取消：静默丢弃（POC AbortError 同语义）
       if (!headSent) {
@@ -157,6 +168,7 @@ export class HttpBridge {
   /** 全量中止在途请求（host 断开时调用）。 */
   abortAll(): void {
     for (const ctrl of this.ctrls.values()) ctrl.abort();
+    // 不逐个回调 onSettled：会话 dispose 时 reqDc 粘滞映射随会话对象整体销毁，无需逐 id 通知。
     this.ctrls.clear();
   }
 }

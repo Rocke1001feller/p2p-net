@@ -230,10 +230,10 @@ export class Peer {
   }
 
   /** offerer 侧（集成测的假客户端用；生产浏览器侧用原生 RTCPeerConnection，不走这里） */
-  async connectAsClient(handlers: PeerHandlers): Promise<{
+  async connectAsClient(handlers: PeerHandlers, opts: { poolSize?: number } = {}): Promise<{
     sid: string;
     sdp: SdpLike;
-    channels: { proxy: RTCDataChannel; ctrl: RTCDataChannel };
+    channels: { proxy: RTCDataChannel; pool: RTCDataChannel[]; ctrl: RTCDataChannel };
   }> {
     const sid = Math.random().toString(36).slice(2, 10);
     this.dispose();
@@ -243,7 +243,10 @@ export class Peer {
     this.lastStats = { pairType: null };
     this.statusCb = handlers.onStatus;
     const pc = this.pc = this.newPc();
-    const proxy = pc.createDataChannel('proxy');
+    // proxy 通道池（spec D2）：label 与 PWA 对齐——首条恒 'proxy'（0.1.0 兼容），其后 'proxy1..N-1'
+    const n = Math.max(1, Math.min(16, opts.poolSize ?? 1));
+    const pool: RTCDataChannel[] = [];
+    for (let i = 0; i < n; i++) pool.push(pc.createDataChannel(i === 0 ? 'proxy' : `proxy${i}`));
     const ctrl = this.createCtrl();
     pc.ondatachannel = (ev) => handlers.onChannel(ev.channel, ev.channel.label);
     pc.onicecandidate = (ev) => {
@@ -254,7 +257,7 @@ export class Peer {
     pc.onconnectionstatechange = () => { void this.refreshStats().then(() => this.emitStatus()); this.scheduleStats(); };
     await pc.setLocalDescription(await pc.createOffer());
     this.remoteSet = true; // offerer：此后到达的远端候选由 werift 内部缓冲
-    return { sid, sdp: pc.localDescription!, channels: { proxy, ctrl } };
+    return { sid, sdp: pc.localDescription!, channels: { proxy: pool[0]!, pool, ctrl } };
   }
 
   /** 主动关闭当前会话（host agent stop 时调用）。 */

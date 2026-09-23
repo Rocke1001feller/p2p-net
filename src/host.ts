@@ -16,9 +16,10 @@
 import type { RTCDataChannel, RTCIceServer } from 'werift';
 import { Peer, type LinkStatus } from './peer.js';
 import { dcSend, HttpBridge, type DcLike } from './bridge/http.js';
+import { pickLeastBufferedIdx, proxyLabelIdx } from './pool.js';
 import { WsBridge } from './bridge/ws.js';
 import { assertPortAllowed, PortNotAllowedError } from './bridge/guard.js';
-import { decodeFrame, decodeBinFrame, isBinFrame, isPing, isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen, type TunnelFrame } from './frames.js';
+import { decodeFrame, decodeBinFrame, isPing, isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen, type TunnelFrame } from './frames.js';
 import { SignalingClient, type PollResult } from './signaling/client.js';
 import { isSigMessage, roomFor, type SigMessage } from './signaling/protocol.js';
 
@@ -114,11 +115,20 @@ export class PeerSession {
   private graceTimer?: ReturnType<typeof setTimeout>;
   private readonly wsPort?: number;
   private readonly isPortAllowed?: (port: number) => boolean;
+  /**
+   * proxy 通道池（spec D2）：按 label 下标注册（'proxy'→0、'proxyN'→N）。
+   * req/req-abort 入站恒在 proxy0（PWA 侧路由保证）；res/ws-* 出站按 id/wid 粘滞选最闲——
+   * 同一响应/同一条 WS 的帧永不跨通道（保序），不同请求可并发占满池。
+   */
+  private readonly pool: DcLike[] = [];
+  private readonly reqDc = new Map<number, DcLike>();
+  private readonly widDc = new Map<number, DcLike>();
 
   constructor(wsPort?: number, isPortAllowed?: (port: number) => boolean) {
     this.wsPort = wsPort;
     this.isPortAllowed = isPortAllowed;
     this.wsBridge = new WsBridge({ port: wsPort });
+    this.httpBridge.onSettled = (id) => this.reqDc.delete(id);
   }
 
   /** §5.3 白名单校验：true=放行；仅 PortNotAllowedError 折成 false（拒绝），其余异常上抛。 */
@@ -132,6 +142,12 @@ export class PeerSession {
     }
   }
 
+  /** 池化选路：open 通道中 bufferedAmount 最小者；池空/全灭 → 回落到达通道。 */
+  private pickDc(fallback: DcLike): DcLike {
+    const idx = pickLeastBufferedIdx(this.pool);
+    return (idx >= 0 ? this.pool[idx] : undefined) ?? fallback;
+  }
+
   wireChannel(dc: RTCDataChannel, label: string, onServiceFrame?: (dc: RTCDataChannel, frame: unknown) => void): void {
     if (label === 'ctrl') {
       dc.onmessage = (ev) => {
@@ -140,17 +156,21 @@ export class PeerSession {
       };
       return;
     }
-    if (label.startsWith('proxy')) {
+    const poolIdx = proxyLabelIdx(label);
+    if (poolIdx >= 0) {
       const bdc = asDataPlaneDc(dc);
+      this.pool[poolIdx] = bdc;
       dc.onmessage = (ev) => {
         const raw = ev.data;
-        if (typeof raw !== 'string' && isBinFrame(raw as Buffer)) {
-          const bf = decodeBinFrame(raw as Buffer);
-          // host 只消费二进制 ws-msg（浏览器上行）；res-chunk 方向为协议异常，丢弃。
-          if (bf?.k === 'ws-msg') void this.wsBridge.handle(bdc, { k: 'ws-msg', wid: bf.wid, dataBin: bf.data });
+        if (raw instanceof Buffer || raw instanceof Uint8Array) {
+          // Task 2 二进制入站：PWA ws 上行（encodeWsMsgBin）——跟随 wid 粘滞通道。
+          const bf = decodeBinFrame(raw instanceof Uint8Array && !Buffer.isBuffer(raw) ? Buffer.from(raw) : raw as Buffer);
+          // bf 形态为 {k,wid,data}，不满足 isWsMsg（要求 text/dataB64/dataBin）——按 k 判定并折成
+          // dataBin 形态进桥（Task 2 语义原样，仅出站通道由到达通道改为 wid 粘滞）。
+          if (bf?.k === 'ws-msg') void this.wsBridge.handle(this.widDc.get(bf.wid) ?? bdc, { k: 'ws-msg', wid: bf.wid, dataBin: bf.data });
           return;
         }
-        const m = decodeFrame(raw);
+        const m = decodeFrame(raw as string);
         if (!m) return;
         if (isReq(m)) {
           // §5.3 白名单强制：先校验再触达 localhost——PWA 不得借 host 打任意端口。
@@ -162,7 +182,9 @@ export class PeerSession {
             return;
           }
           dbg('req', m.method, 'port=' + m.port, m.path);
-          void this.httpBridge.handle(bdc, m);
+          const out = this.pickDc(bdc);
+          this.reqDc.set(m.id, out);
+          void this.httpBridge.handle(out, m);
           return;
         }
         if (isReqAbort(m)) { dbg('req-abort', m.id); void this.httpBridge.handle(bdc, m); return; }
@@ -174,10 +196,17 @@ export class PeerSession {
             void dcSend(bdc, { k: 'ws-close', wid: m.wid, code: 4403, reason: `port ${port} not in allowlist` });
             return;
           }
-          void this.wsBridge.handle(bdc, m);
+          const out = this.pickDc(bdc);
+          this.widDc.set(m.wid, out);
+          void this.wsBridge.handle(out, m);
           return;
         }
-        if (isWsMsg(m) || isWsClose(m)) { void this.wsBridge.handle(bdc, m); return; }
+        if (isWsMsg(m) || isWsClose(m)) {
+          const out = this.widDc.get(m.wid) ?? bdc;
+          if (isWsClose(m)) this.widDc.delete(m.wid);
+          void this.wsBridge.handle(out, m);
+          return;
+        }
         onServiceFrame?.(dc, m);
       };
       return;

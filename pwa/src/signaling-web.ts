@@ -10,7 +10,8 @@
  * 状态灯：原生 getStats → p2p 库 pairTypeFromStats/rttFromStats（werift 无 selected、浏览器有——
  * 库内两判据都写，此处直接复用）。
  */
-import { pairTypeFromStats, roomFor, rttFromStats, relayAddrFromStats, SignalingClient, decodeBinFrame, encodeWsMsgBin } from 'p2p-net/browser';
+import { pairTypeFromStats, roomFor, rttFromStats, relayAddrFromStats, SignalingClient, decodeBinFrame, encodeWsMsgBin, PROXY_POOL_SIZE } from 'p2p-net/browser';
+import { PoolRouter } from './poolRouter.js';
 
 export interface LightStatus {
   state: 'off' | 'connecting' | 'connected' | 'failed';
@@ -77,7 +78,9 @@ function b64ToU8(b: string): Uint8Array {
 
 export class WebRtcSession {
   private pc: RTCPeerConnection | null = null;
-  private dc: RTCDataChannel | null = null;
+  private dc: RTCDataChannel | null = null;   // = dcs[0] 别名：isOpen / 心跳回退 / teardown 兼容锚点
+  private dcs: RTCDataChannel[] = [];
+  private router: PoolRouter | null = null;
   private ctrlDc: RTCDataChannel | null = null;
   private sid: string | null = null;
   private deskDeviceId: string | null = null;
@@ -123,21 +126,31 @@ export class WebRtcSession {
     };
     pc.onconnectionstatechange = () => void this.emitPcStatus();
 
-    const dc = this.dc = pc.createDataChannel('proxy');
-    // 二进制帧必须同步解码：浏览器默认 blob 形态无法同步读，先切 arraybuffer 再挂 onmessage。
-    dc.binaryType = 'arraybuffer';
+    // proxy 通道池（spec D2）：req 恒走 proxy0；res/ws 由 host 按 id/wid 粘滞选最闲。
+    // 每条通道都是活性证明来源——任何通道回帧都刷 lastPongAt（handleChannelMessage 语义不变：
+    // 字符串走 JSON、ArrayBuffer 走帧协议 v2 二进制解码，Task 3 双端同批）。
+    const dcs: RTCDataChannel[] = [];
+    for (let i = 0; i < PROXY_POOL_SIZE; i++) {
+      const ch = pc.createDataChannel(i === 0 ? 'proxy' : `proxy${i}`);
+      // 二进制帧必须同步解码：浏览器默认 blob 形态无法同步读，先切 arraybuffer 再挂 onmessage。
+      ch.binaryType = 'arraybuffer';
+      ch.onmessage = (ev) => {
+        handleChannelMessage(ev.data, {
+          onProof: () => { this.lastPongAt = Date.now(); },
+          onFrame: (m) => this.opts.onFrame(m),
+        });
+      };
+      dcs.push(ch);
+    }
+    const dc = this.dc = dcs[0]!;
+    this.dcs = dcs;
+    this.router = new PoolRouter(() => this.dcs);
     dc.onopen = () => {
       this.lastPongAt = Date.now();
       this.opts.onStatus({ state: 'connected', pairType: null });
       void this.refreshStats();
     };
     dc.onclose = () => this.opts.onStatus({ state: 'off', pairType: null });
-    dc.onmessage = (ev) => {
-      handleChannelMessage(ev.data, {
-        onProof: () => { this.lastPongAt = Date.now(); },
-        onFrame: (m) => this.opts.onFrame(m),
-      });
-    };
 
     // 带外控制通道（unordered + 不重传）：ping/pong 不与批量数据同队排队，RTT 才反映真实链路
     const ctrl = this.ctrlDc = pc.createDataChannel('ctrl', { ordered: false, maxRetransmits: 0 });
@@ -216,9 +229,10 @@ export class WebRtcSession {
     } catch { /* stats 失败不影响链路 */ }
   }
 
-  /** proxy 通道出站（背压 8MiB，POC dcSend 同语义）。 */
+  /** proxy 池出站（背压 8MiB，POC dcSend 同语义）：req→proxy0；ws-open/msg/close 按 PoolRouter 粘滞。 */
   async send(frame: unknown): Promise<void> {
-    const dc = this.dc;
+    const idx = this.router?.channelFor(frame) ?? 0;
+    const dc = this.dcs[idx] ?? this.dc;
     if (!dc || dc.readyState !== 'open') return;
     // ws 上行二进制体：直接上二进制帧（省 33% 线税 + 双端编解码 CPU）
     const f = frame as { k?: string; wid?: number; dataB64?: string };
@@ -286,7 +300,10 @@ export class WebRtcSession {
     }
     this.pollTimer = this.purgeTimer = this.statsTimer = this.pingTimer = this.watchdogTimer = null;
     if (this.ctrlDc) { try { this.ctrlDc.close(); } catch { /* 忽略 */ } this.ctrlDc = null; }
-    if (this.dc) { try { this.dc.close(); } catch { /* 忽略 */ } this.dc = null; }
+    for (const ch of this.dcs) { try { ch.close(); } catch { /* 忽略 */ } }
+    this.dcs = [];
+    this.dc = null;
+    this.router = null;
     if (this.pc) { try { this.pc.close(); } catch { /* 忽略 */ } this.pc = null; }
     this.sid = null;
     this.remoteSet = false;
