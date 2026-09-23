@@ -34,6 +34,7 @@ import {
   HEALTH_CHECK_DELAYS_MS, bootGateDecision, dataPlaneAlive, healthDecision, looksBooted,
 } from './workbenchRecovery.js';
 import { CascadeSession, type LinkMode } from './session.js';
+import { DataPlaneLiveness, WEDGE_MS } from './dataPlaneLiveness.js';
 import {
   hideConnecting, hideSheets, log, renderDevices, setMe, setStatus, showConnecting,
   showOfflineSheet, showPasteSheet, showScreen, showTab, setWorkspaceEnabled, toast,
@@ -70,8 +71,16 @@ const pendingSw = new Map<number, { swPort: MessagePort; origId: number; timer: 
  * （重连会新建 pc/dc，等同重载的效果，但自动完成、不做用户可见的中断）。
  */
 const inflightSw = new Map<number, number>();
-const SW_HANG_MS = 9_000;   // 单条请求无回帧多久算"挂住"（SW 自身 12s 超时，必须早于它）
-const SW_HANG_MIN = 2;      // 至少这么多条同时挂住才判定（避免单条慢请求误杀）
+/**
+ * 黑洞判定口径（2026-09-23 中继洪泛事故整改）：看门狗检测的是**全局零字节流动**，
+ * 不是单请求首帧慢。旧口径「单请求 9s 无首帧且 ≥2 条」在有序通道洪泛下必然误杀——
+ * host 125ms 灌入 6MB，后发请求的 res-head 排在大文件 chunk 之后，慢链路下 >9s 零回帧
+ * 是正常排队现象，拆连反而制造「重灌→再超时」死循环。
+ * 现在：任何回帧（res-head/res-chunk/ws-*）都刷新活性证明；有在途请求且全局静默
+ * 超 WEDGE_MS 才判死拆连。慢由 SW 超时与桥侧 512KiB 背压上限去兜。
+ */
+const liveness = new DataPlaneLiveness();
+const SW_HANG_MS = 9_000;   // 仅诊断日志口径：单请求无回帧超此值打 [frame] 日志（不再作为拆连依据）
 const pendingFetch = new Map<number, { resolve: (r: { status: number; body: Uint8Array }) => void; chunks: Uint8Array[]; status: number; timer: ReturnType<typeof setTimeout> }>();
 let dcSeq = 0;
 
@@ -241,7 +250,7 @@ async function onSwReq(m: { id: number; port?: number; method: string; path: str
     return;
   }
   const gid = ++dcSeq;
-  const timer = setTimeout(() => pendingSw.delete(gid), 31_000);
+  const timer = setTimeout(() => pendingSw.delete(gid), 90_000); // 慢链路大文件传输可超 31s；90s 兜底 GC
   pendingSw.set(gid, { swPort, origId: m.id, timer });
   inflightSw.set(gid, Date.now()); // 看门狗计时（回帧时清）
   trackReq(gid, m.port, m.path);   // 帧账本：发出记一笔，回帧销账
@@ -293,6 +302,7 @@ async function fetchVia(port: number, path: string, timeoutMs = 30_000): Promise
 }
 
 function onDcFrame(m: any): void {
+  liveness.noteFrame(); // 任何数据面回帧都是活性证明（含 ws-* / pong）
   if (m.k === 'res-head' || m.k === 'res-chunk') {
     settleReq(m.id); // 帧账本：回帧销账（无论是 SW 请求还是 shell 自身请求）
     const sw = pendingSw.get(m.id);
@@ -329,19 +339,19 @@ function onDcFrame(m: any): void {
   }
 }
 
-/** 数据面是否已黑：≥2 条请求超过 9s 没有回帧。隧道段不走 dc，故不参与判定。 */
+/** 数据面是否已黑：有在途请求且全局静默超阈（任何回帧都在刷新活性）。隧道段不走 dc，故不参与判定。 */
 function dataPlaneWedged(): boolean {
   if (!cascade || cascade.mode === 'tunnel') return false;
-  const now = Date.now();
-  let hung = 0;
-  for (const t of inflightSw.values()) if (now - t > SW_HANG_MS) hung += 1;
-  return hung >= SW_HANG_MIN;
+  return liveness.wedged(inflightSw.size);
 }
 
 setInterval(() => {
+  if (cascade && cascade.mode !== 'tunnel' && inflightSw.size > 0) {
+    log(`[pulse] 在途 ${inflightSw.size} 条；累计回帧 ${frameLedger.res}；静默 ${Math.round(liveness.silentFor() / 1000)}s`);
+  }
   if (!dataPlaneWedged()) return;
   const hung = harvestHung();
-  log(`[watchdog] 数据面 ${inflightSw.size} 条请求 >${SW_HANG_MS / 1000}s 无回帧 → 拆连重连`
+  log(`[watchdog] 数据面全局静默 >${WEDGE_MS / 1000}s（在途 ${inflightSw.size} 条无一回帧）→ 拆连重连`
     + (hung.length ? `（例：:${hung[0].port ?? '?'}${hung[0].path}）` : ''));
   inflightSw.clear();
   cascade?.stop(); // emit off → onCascadeStatus 会走指数退避重连（新建 pc，等同重载效果）
@@ -440,6 +450,7 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
 
   try {
     await cascade.connect(d.id, d.tunnelUrl ?? desk.tunnelUrl);
+    liveness.noteOpen(); // 新连接给完整静默宽限窗口
     wasConnected = true;
     reconnectAttempt = 0;
     hideConnecting();
@@ -607,6 +618,13 @@ async function openWorkbench(list?: { console?: string | { url?: string }[] }): 
       fetchRetries = 0;
       void fetchServices();
     });
+    return;
+  }
+  // 验收/排障钩子：?svc=<port> 直开指定服务（绕过 console 自述选择），供 bench/回归定向打击。
+  const svcQ = Number(Q.get('svc'));
+  if (Number.isInteger(svcQ) && svcQ > 0) {
+    consolePort = svcQ;
+    await openService(svcQ);
     return;
   }
   consolePort = cport;
@@ -866,6 +884,8 @@ const $id = <T extends HTMLElement = HTMLElement>(id: string): T => document.get
 // ---- 启动 ----
 async function boot(): Promise<void> {
   if (wechatGuard()) return;   // Q15：微信内置浏览器直接拦截
+  // ?debug=1 诊断浮层：真机无 DevTools 时把隐藏 #log 翻成可见浮层（越早越好，boot 失败也可见）
+  if (Q.has('debug')) document.getElementById('log')?.classList.replace('hidden', 'debug');
   log(`[boot] p2p-net 随行${DEV_MODE ? '（dev 直连钩子）' : ''}`);
   // 运行时配置是全端唯一配置来源：缺失/损坏必须渲染可操作错误页而非白屏（spec §3）。
   try {

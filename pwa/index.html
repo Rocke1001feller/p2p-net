@@ -56,6 +56,8 @@ button{font-family:inherit}
 .field input{flex:1;border:none;background:transparent;font-size:16px;outline:none;color:var(--ink)}
 .field input::placeholder{color:var(--ink3)}
 .hidden{display:none !important}
+/* ?debug=1 诊断浮层：无 DevTools 的真机（如 MIUI 浏览器）唯一可见日志面 */
+#log.debug{position:fixed;left:0;right:0;bottom:0;max-height:45%;overflow:auto;background:rgba(0,0,0,.85);color:#7fffb0;font:10px/1.45 monospace;padding:8px;margin:0;z-index:9999;white-space:pre-wrap;word-break:break-all}
 
 /* ---- 设备 tab ---- */
 .dev-card{position:relative;background:var(--card);border-radius:var(--r-lg);padding:16px;margin-bottom:12px;

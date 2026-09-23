@@ -21,7 +21,10 @@ export interface DcLike {
   readonly readyState?: string;
 }
 
-const BACKPRESSURE_BYTES = 8 * 1024 * 1024;
+// 512KiB（2026-09-23 由 8MiB 下调）：有序通道里后发请求的 res-head 排在积压 chunk 之后，
+// 阈值即「首帧延迟上界」。8MiB 在蜂窝中继（~1-3Mbps）意味着数十秒零回帧，把看门狗/超时全部引爆；
+// 512KiB 把上界压到秒级，同时足够吃掉 localhost 与慢链路之间的速度差。
+const BACKPRESSURE_BYTES = 512 * 1024;
 const NO_BODY_STATUS = [101, 204, 205, 304];
 const STRIP_REQ_HEADERS = new Set(['host', 'content-length', 'accept-encoding', 'connection', 'origin', 'referer']);
 const STRIP_RES_HEADERS = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection']);
@@ -33,6 +36,9 @@ export async function dcSend(dc: DcLike, frame: TunnelFrame): Promise<void> {
   if (dc.readyState !== undefined && dc.readyState !== 'open') return;
   while (dc.bufferedAmount > BACKPRESSURE_BYTES) await sleep(10);
   dc.send(JSON.stringify(frame));
+  // 每帧让出 macrotask：werift 纯 JS DTLS/SCTP 与批量编码同进程，不让出会把 ctrl pong 与
+  // 上游回调饿死（2026-09-23 真机实证：洪泛期 localhost 响应延迟 14-20s、对端误判拆连）。
+  await new Promise<void>((r) => setImmediate(r));
 }
 
 function rewriteLocation(value: string, port: number): string {
@@ -80,10 +86,12 @@ export class HttpBridge {
     const ctrl = new AbortController();
     this.ctrls.set(id, ctrl);
     let headSent = false;
+    const t0 = Date.now();
+    if (process.env.P2P_NET_DEBUG) console.error('[p2p-net] req#%d %s :%d%s', id, method, frame.port, path);
     try {
       const res = await new Promise<http.IncomingMessage>((resolve, reject) => {
         const req = http.request({ host: 'localhost', port: frame.port, path, method, headers: h, signal: ctrl.signal }, (res) => {
-        if (process.env.P2P_NET_DEBUG) console.error('[p2p-net] res', frame.method, frame.port, frame.path, '→', res.statusCode);
+        if (process.env.P2P_NET_DEBUG) console.error('[p2p-net] res#%d %s :%d%s → %d (+%dms)', id, frame.method, frame.port, frame.path, res.statusCode, Date.now() - t0);
         resolve(res);
       });
         req.on('error', reject);
@@ -108,13 +116,16 @@ export class HttpBridge {
         return;
       }
 
+      let sentBytes = 0;
       for await (const chunk of res) {
         for (const piece of chunkB64(chunk as Buffer)) {
+          sentBytes += piece.length;
           await dcSend(dc, { k: 'res-chunk', id, dataB64: piece });
         }
       }
       this.ctrls.delete(id);
       await dcSend(dc, { k: 'res-chunk', id, done: true });
+      if (process.env.P2P_NET_DEBUG) console.error('[p2p-net] done#%d :%d%s %dB(b64) +%dms', id, frame.port, frame.path, sentBytes, Date.now() - t0);
     } catch (e) {
       this.ctrls.delete(id);
       const msg = e instanceof Error ? e.message : String(e);

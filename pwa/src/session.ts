@@ -17,6 +17,7 @@ import { SignalingClient } from 'p2p-net/browser';
 import { CASCADE_TIMEOUT_MS, DISCOVERY_PORT, isPlausibleTunnelUrl } from './constants.js';
 import { fetchTurnCredentials } from './cloud.js';
 import { WebRtcSession, type LightStatus } from './signaling-web.js';
+import { planStageModes } from './cascadePlan.js';
 
 export type LinkMode = 'p2p' | 'tunnel' | 'turn';
 export type Stage = 'p2p' | 'tunnel' | 'turn' | 'done';
@@ -88,10 +89,10 @@ export class CascadeSession {
     this.teardownWeb();
 
     const stages: { mode: LinkMode; run: () => Promise<void> }[] = [];
-    if (this.opts.forceTunnel) {
-      stages.push({ mode: 'tunnel', run: () => this.runTunnelStage() });
-    } else {
-      if (!this.opts.forceTurn) {
+    for (const m of planStageModes(this.opts)) {
+      if (m === 'tunnel') {
+        stages.push({ mode: 'tunnel', run: () => this.runTunnelStage() });
+      } else if (m === 'p2p') {
         stages.push({
           mode: 'p2p',
           run: () => {
@@ -106,17 +107,17 @@ export class CascadeSession {
             })();
           },
         });
+      } else {
+        stages.push({
+          mode: 'turn',
+          run: async () => {
+            const jwt = await this.opts.getJwt();
+            if (!jwt) throw new Error('no_jwt_for_turn');
+            const creds = await fetchTurnCredentials(jwt);
+            await this.tryWebRtc(deskDeviceId, creds.iceServers, 'relay', CASCADE_TIMEOUT_MS.turn);
+          },
+        });
       }
-      stages.push({ mode: 'tunnel', run: () => this.runTunnelStage() });
-      stages.push({
-        mode: 'turn',
-        run: async () => {
-          const jwt = await this.opts.getJwt();
-          if (!jwt) throw new Error('no_jwt_for_turn');
-          const creds = await fetchTurnCredentials(jwt);
-          await this.tryWebRtc(deskDeviceId, creds.iceServers, 'relay', CASCADE_TIMEOUT_MS.turn);
-        },
-      });
     }
 
     const stageErrs: string[] = [];

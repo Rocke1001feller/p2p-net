@@ -14,6 +14,7 @@
  */
 /// <reference lib="webworker" />
 import shimSource from './shim.js?raw';
+import { ASSET_CACHE_NAME, shouldCacheResponse } from './assetCache.js';
 
 const swSelf = self as unknown as ServiceWorkerGlobalScope;
 
@@ -27,14 +28,13 @@ interface PendingEntry {
 const pending = new Map<number, PendingEntry>();
 let shimCache: string | null = null;
 /**
- * 帧往返超时（2026-09-12 调整 30s → 12s）。
- * 30s 太长的代价：链路一旦黑洞，工作台每个请求都要干等半分钟，界面表现为"点了没反应"。
- * 12s 仍远大于正常往返（实测真机直连 127–2000ms、隧道 ~2s），并能被上层重试覆盖。
- * 另外错误体改为 JSON：旧版回纯文本超时字符串（无 JSON），工作台按 JSON 解析 →
- * 用户看到的是语法错误（iOS 上文案为 "The string did not match the expected pattern."），
- * 完全掩盖了真实原因。
+ * 帧往返超时（2026-09-23 由 12s 上调 45s：中继洪泛事故整改）。
+ * 12s 的代价：中继慢链路下 host 瞬时灌入数 MB chunk，大文件的首帧在有序通道里排队
+ * 十几秒是正常态（桥侧背压上限 512KiB 已给排队上界）；12s 超时把「慢」误判成「死」，
+ * 工作台拿到 504 照样白屏。45s 覆盖 512KiB 排队 + 大 body 慢速流的极端窗口；
+ * 真黑洞由 shell 看门狗按全局静默（60s）判死拆连，不靠单请求超时兜。
  */
-const TUNNEL_TIMEOUT_MS = 12_000;
+const TUNNEL_TIMEOUT_MS = 45_000;
 
 swSelf.addEventListener('install', () => swSelf.skipWaiting());
 swSelf.addEventListener('activate', (e) => {
@@ -135,6 +135,15 @@ async function proxy(req: Request, u: URL): Promise<Response> {
   if (u.pathname.startsWith('/__p2pnet__/')) return fetch(req);   // shell 自身资产（shim、调试页）
   if (u.pathname === '/api/auth' || u.pathname.startsWith('/api/auth/')) return fetch(req); // Supabase 直连不拦
   // （/sig 与 /ice-config.js 已退役：不再放行，若有历史页面误触将进隧道对目标 404——语义正确）
+  // 隧道资产缓存（2026-09-23 蜂窝浸泡整改）：长命资产（immutable / max-age≥1d）命中即回，
+  // 全程不碰数据面——会话重建后的恢复从「全量重下 5.5MB」变「缓存秒开」，打断
+  // 「重连→洪泛→链路更差→再重连」的死亡螺旋。隧道断着也能出缓存。
+  if (req.method === 'GET') {
+    try {
+      const hit = await (await caches.open(ASSET_CACHE_NAME)).match(req.url);
+      if (hit) return hit;
+    } catch { /* CacheStorage 不可用时穿透隧道 */ }
+  }
   if (!port) return new Response(waitingHtml(), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 
   const id = seq++;
@@ -166,6 +175,15 @@ async function proxy(req: Request, u: URL): Promise<Response> {
   });
   port.postMessage({ k: 'req', id, port: scope.port, method: req.method, path, headers, bodyB64 });
   const res = await resPromise;
+  // 长命资产：tee 一份流给 CacheStorage（后台异步存），一份照常流给页面——
+  // 不牺牲首载的流式体验，换后续每次会话重建的秒开。判定严格按上游 Cache-Control。
+  if (req.method === 'GET' && res.ok && res.body && shouldCacheResponse(res.headers.get('cache-control'))) {
+    const [pageBranch, cacheBranch] = res.body.tee();
+    void caches.open(ASSET_CACHE_NAME)
+      .then((c) => c.put(req.url, new Response(cacheBranch, { status: res.status, headers: res.headers })))
+      .catch(() => { /* 缓存失败不影响本次响应 */ });
+    return new Response(pageBranch, { status: res.status, headers: res.headers });
+  }
   // HTML 响应：整段缓冲注入 shim（禁目标应用自带 SW 注册 + WebSocket 隧道 + BASE 前缀包装）
   if ((res.headers.get('content-type') || '').includes('text/html')) {
     const text = await res.text();

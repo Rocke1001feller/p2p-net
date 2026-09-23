@@ -35,11 +35,28 @@ const PURGE_MS = 60_000;
 const STATS_MS = 5_000;
 const PING_MS = 5_000;
 /**
- * 去活判定窗口（2026-09-12 根因修复）：ctrl 通道心跳连续 3 次（15s）收不到 pong 即判链路已死。
- * 真机实证：P2P 黑洞时 dc.readyState 仍是 'open'，isOpen 因此撒谎 → 界面显示"直连"、不重连，
- * 请求只能干等 SW 30s 超时（Android 直连下 Files/Source Control 全 504）。
+ * 去活判定窗口（2026-09-12 根因修复；2026-09-23 蜂窝浸泡放宽 15s→45s）：ctrl 通道心跳
+ * 连续收不到 pong 超此窗口即判链路已死。15s 的代价：蜂窝 4G 的 RRC 切换/信号波动造成
+ * 6-15s 丢包簇是常态（ctrl 为测真 RTT 用 unordered+零重传，丢包不重发），真机实测
+ * 6630ms 尖峰频繁出现，15s 窗口把「蜂窝打嗝」误判成「P2P 黑洞」，每次误判都触发
+ * 整页全量重下。45s ≈ 9 个心跳周期，真黑洞检测延迟仍在 SW 单请求超时（45s）量级内。
+ * 真机实证背景（15s 版）：P2P 黑洞时 dc.readyState 仍是 'open'，isOpen 因此撒谎 →
+ * 界面显示"直连"、不重连，请求只能干等 SW 超时（Android 直连下 Files/Source Control 全 504）。
  */
-const LIVENESS_MS = 15_000;
+const LIVENESS_MS = 45_000;
+
+/**
+ * proxy 通道入站帧处理（抽成纯函数便于单测，2026-09-23 心跳误判整改）。
+ * 任何合法帧都先记活性证明再上交路由：批量传输期间 ctrl 心跳（unordered 不重传）
+ * 会被饿死/丢失，但数据在流本身就是活着的证据，绝不能在传输中误判死亡拆连。
+ */
+export function handleProxyMessage(data: string, sinks: { onProof: () => void; onFrame: (m: unknown) => void }): void {
+  try {
+    const m = JSON.parse(data);
+    sinks.onProof();
+    sinks.onFrame(m);
+  } catch { /* 非法帧丢弃 */ }
+}
 
 export class WebRtcSession {
   private pc: RTCPeerConnection | null = null;
@@ -97,11 +114,10 @@ export class WebRtcSession {
     };
     dc.onclose = () => this.opts.onStatus({ state: 'off', pairType: null });
     dc.onmessage = (ev) => {
-      try {
-        const m = JSON.parse(ev.data);
-        if (m && m.k === 'pong') { this.lastPongAt = Date.now(); return; } // 控制通道降级到 proxy 时也认
-        this.opts.onFrame(m);
-      } catch { /* 非法帧丢弃 */ }
+      handleProxyMessage(ev.data, {
+        onProof: () => { this.lastPongAt = Date.now(); },
+        onFrame: (m) => this.opts.onFrame(m),
+      });
     };
 
     // 带外控制通道（unordered + 不重传）：ping/pong 不与批量数据同队排队，RTT 才反映真实链路
