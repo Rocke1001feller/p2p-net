@@ -15,9 +15,9 @@
 ## 快速开始
 
 ```bash
-npx p2p-net init      # 交互式：录入 VPS → Supabase 引导（建表/部署函数/写 secrets）→ 逐台 VPS 编排
-npx p2p-net login     # 邮箱+密码登录（init 时创建的首个账号），凭据 0600 落 ~/.p2p-net/auth.json
-npx p2p-net start     # 前台启动：端口扫描 + 控制面 + HostAgent + 隧道 + 每台 relay 打印配对 URL 与二维码
+npx @rocke1001feller/p2p-net init      # 交互式：录入 VPS → Supabase 引导（建表/部署函数/写 secrets）→ 逐台 VPS 编排
+npx @rocke1001feller/p2p-net login     # 邮箱+密码登录（init 时创建的首个账号），凭据 0600 落 ~/.p2p-net/auth.json
+npx @rocke1001feller/p2p-net start     # 前台启动：端口扫描 + 控制面 + HostAgent + 隧道 + 每台 relay 打印配对 URL 与二维码
 ```
 
 手机（与电脑不同网也行）扫终端里的二维码 → PWA 打开 → 自动完成配对登录 → 看到本机服务清单 → 点进 5173/3000 等服务即可操作。
@@ -25,8 +25,8 @@ npx p2p-net start     # 前台启动：端口扫描 + 控制面 + HostAgent + �
 确认好用之后装常驻服务（崩溃自愈 + 开机自启）：
 
 ```bash
-npx p2p-net service install    # macOS → launchd；Linux → systemd --user
-npx p2p-net service status     # 查看常驻服务状态
+npx @rocke1001feller/p2p-net service install    # macOS → launchd；Linux → systemd --user
+npx @rocke1001feller/p2p-net service status     # 查看常驻服务状态
 ```
 
 ## A 类 URL（配对链接）说明
@@ -71,12 +71,12 @@ init 全程使用 **Supabase Management API 纯 HTTPS 调用**，不依赖 supab
 ## 状态与诊断
 
 ```bash
-npx p2p-net status      # 运行状态：设备 ID / 活跃会话数 / 链路模式（p2p·relay）/ 平均 RTT / 服务数
-npx p2p-net doctor      # 七层归因诊断：auth → supabase → signaling → ice → vps → scanner → service
-npx p2p-net doctor --json   # 机器可读输出；退出码 = 失败层数
+npx @rocke1001feller/p2p-net status      # 运行状态：设备 ID / 活跃会话数 / 链路模式（p2p·relay）/ 平均 RTT / 服务数
+npx @rocke1001feller/p2p-net doctor      # 七层归因诊断：auth → supabase → signaling → ice → vps → scanner → service
+npx @rocke1001feller/p2p-net doctor --json   # 机器可读输出；退出码 = 失败层数
 ```
 
-日志位置：`~/.p2p-net/logs/`（`current.jsonl` 运行日志、`events.jsonl` 会话事件、`service.log` 常驻服务 stdout/stderr；自动轮转）。常驻服务日志也可以 `npx p2p-net service logs -f` 跟随。
+日志位置：`~/.p2p-net/logs/`（`current.jsonl` 运行日志、`events.jsonl` 会话事件、`service.log` 常驻服务 stdout/stderr；自动轮转）。常驻服务日志也可以 `npx @rocke1001feller/p2p-net service logs -f` 跟随。
 
 ## 配额说明
 
@@ -84,17 +84,17 @@ npx p2p-net doctor --json   # 机器可读输出；退出码 = 失败层数
 
 ## 故障排查
 
-先跑 `npx p2p-net doctor`——七层探针按连接级联同序归因，每层给出人话 detail + 可操作的 fix 建议；常见情形：
+先跑 `npx @rocke1001feller/p2p-net doctor`——七层探针按连接级联同序归因，每层给出人话 detail + 可操作的 fix 建议；常见情形：
 
-- **auth 层失败**：登录态过期 → 重跑 `npx p2p-net login`；
+- **auth 层失败**：登录态过期 → 重跑 `npx @rocke1001feller/p2p-net login`；
 - **vps 层失败**：多为安全组未放行（对照上方端口清单）或 VPS 上 coturn/caddy 异常（`systemctl status coturn caddy p2p-net-tunnel`）；
 - **scanner 层服务数不对**：确认你的 dev server 监听的端口在白名单内或能被 HTTP 探测判为 website（2xx + HTML）；
-- **常驻服务没起来**：`npx p2p-net service status` 看尾部日志；node 路径若来自 nvm/fnm 等版本管理器，切换默认版本后需重跑 `service install`。
+- **常驻服务没起来**：`npx @rocke1001feller/p2p-net service status` 看尾部日志；node 路径若来自 nvm/fnm 等版本管理器，切换默认版本后需重跑 `service install`。
 
 ## 卸载
 
 ```bash
-npx p2p-net service uninstall   # 停并删除常驻服务单元
+npx @rocke1001feller/p2p-net service uninstall   # 停并删除常驻服务单元
 rm -rf ~/.p2p-net               # 删除本地配置/凭据/日志
 # VPS 上（可选）：systemctl disable --now coturn caddy p2p-net-tunnel && rm -rf /opt/p2p-net
 ```
