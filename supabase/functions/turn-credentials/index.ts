@@ -1,6 +1,6 @@
 // turn-credentials — TURN REST API 临时凭据（coturn use-auth-secret 语义）
 // 契约：POST /functions/v1/turn-credentials（要登录态 JWT）
-//   200 {iceServers:[stun,turn-udp,turn-tcp]×每个host, username, credential, ttlSeconds}
+//   200 {iceServers:[stun,turn]×每个host, username, credential, ttlSeconds}（turn 默认单 udp，TURN_TRANSPORT 可调）
 //   401 not_authenticated / 405 method_not_allowed / 500 secret_missing / 500 TURN_HOSTS not configured
 // 凭据算法：username = `<unix到期>:<uid前8位>`，credential = base64(HMAC-SHA1(secret, username))
 // 密钥来源：`supabase secrets set TURN_STATIC_AUTH_SECRET`（与各 TURN 服务器 /etc/turnserver.conf 的 static-auth-secret 同值）
@@ -41,9 +41,16 @@ Deno.serve(async (req) => {
   const ttl = 3600 * 6;
   const username = `${Math.floor(Date.now() / 1000) + ttl}:${uid.slice(0, 8)}`;
   const credential = createHmac("sha1", secret).update(username).digest("base64");
+  // Wave 1（spec D4）：默认只发单 UDP。v3 三臂实测（n=6）：UDP-only 6/6、TCP-only 5/6、
+  // both 2/6=33% —— 双 transport 同发是成功率毒药。TURN_TRANSPORT 仅为 A/B 复核保留。
+  const transport = (Deno.env.get("TURN_TRANSPORT") ?? "udp").toLowerCase();
+  const turnUrls = (h: string): string[] =>
+    transport === "both"
+      ? [`turn:${h}:3478?transport=udp`, `turn:${h}:3478?transport=tcp`]
+      : [`turn:${h}:3478?transport=${transport === "tcp" ? "tcp" : "udp"}`];
   const iceServers = hosts.flatMap((h) => [
     { urls: [`stun:${h}:3478`] },
-    { urls: [`turn:${h}:3478?transport=udp`, `turn:${h}:3478?transport=tcp`], username, credential },
+    { urls: turnUrls(h), username, credential },
   ]);
   return json(200, {
     iceServers,
