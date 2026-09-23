@@ -87,7 +87,9 @@ function onPortMsg(m: any): void {
     });
     p.resolve(new Response(stream, { status: m.status, headers: m.headers }));
   } else if (m.k === 'res-chunk' && p.ctrl) {
-    if (m.dataB64) p.ctrl.enqueue(b64u8(m.dataB64));
+    // 帧协议 v2 双形态：二进制帧 m.data（Uint8Array 视图）直 enqueue；旧 JSON 帧走 dataB64
+    if (m.data) p.ctrl.enqueue(m.data instanceof Uint8Array ? m.data : new Uint8Array(m.data));
+    else if (m.dataB64) p.ctrl.enqueue(b64u8(m.dataB64));
     if (m.done) { p.ctrl.close(); pending.delete(m.id); }
   }
 }

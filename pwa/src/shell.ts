@@ -315,7 +315,9 @@ function onDcFrame(m: any): void {
     const pf = pendingFetch.get(m.id);
     if (pf) {
       if (m.k === 'res-head') { pf.status = m.status; return; }
-      if (m.dataB64) pf.chunks.push(u8FromB64(m.dataB64));
+      // 帧协议 v2 双形态：二进制帧 m.data 直传；旧 JSON 帧走 dataB64
+      if (m.data instanceof Uint8Array) pf.chunks.push(m.data);
+      else if (m.dataB64) pf.chunks.push(u8FromB64(m.dataB64));
       if (m.done) {
         clearTimeout(pf.timer);
         pendingFetch.delete(m.id);
@@ -335,7 +337,9 @@ function onDcFrame(m: any): void {
     const tab = tabs.get(port);
     const orig = tab?.wids.get(n);
     if (!tab || orig === undefined) return;
-    tab.iframe.contentWindow?.postMessage({ __p2pnet: true, ...m, wid: orig }, location.origin);
+    // 帧协议 v2 边界转换：二进制 ws 体（m.data）→ dataB64 喂 iframe（shim 协议不动；线税已在 dc 段省掉）
+    const out = m.data instanceof Uint8Array ? { ...m, data: undefined, dataB64: b64FromU8(m.data) } : m;
+    tab.iframe.contentWindow?.postMessage({ __p2pnet: true, ...out, wid: orig }, location.origin);
   }
 }
 
@@ -362,6 +366,12 @@ function u8FromB64(b: string): Uint8Array {
   const u8 = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
   return u8;
+}
+
+function b64FromU8(u8: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
 }
 
 // iframe → 引擎的 ws 帧：按来源 tab 重映射 wid（隧道模式分流到网关 WS）

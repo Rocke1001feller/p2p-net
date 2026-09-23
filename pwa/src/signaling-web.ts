@@ -10,7 +10,7 @@
  * 状态灯：原生 getStats → p2p 库 pairTypeFromStats/rttFromStats（werift 无 selected、浏览器有——
  * 库内两判据都写，此处直接复用）。
  */
-import { pairTypeFromStats, roomFor, rttFromStats, relayAddrFromStats, SignalingClient } from 'p2p-net/browser';
+import { pairTypeFromStats, roomFor, rttFromStats, relayAddrFromStats, SignalingClient, decodeBinFrame, encodeWsMsgBin } from 'p2p-net/browser';
 
 export interface LightStatus {
   state: 'off' | 'connecting' | 'connected' | 'failed';
@@ -56,6 +56,23 @@ export function handleProxyMessage(data: string, sinks: { onProof: () => void; o
     sinks.onProof();
     sinks.onFrame(m);
   } catch { /* 非法帧丢弃 */ }
+}
+
+/** 通道入站统一解码（帧协议 v2）：字符串走 JSON；ArrayBuffer 走二进制帧。
+ *  任何合法帧都先记活性证明——批量传输期数据在流本身就是活着的证据。 */
+export function handleChannelMessage(data: string | ArrayBuffer, sinks: { onProof: () => void; onFrame: (m: unknown) => void }): void {
+  if (typeof data === 'string') return handleProxyMessage(data, sinks);
+  const bf = decodeBinFrame(new Uint8Array(data));
+  if (!bf) return;
+  sinks.onProof();
+  sinks.onFrame(bf);
+}
+
+function b64ToU8(b: string): Uint8Array {
+  const bin = atob(b);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
 }
 
 export class WebRtcSession {
@@ -107,6 +124,8 @@ export class WebRtcSession {
     pc.onconnectionstatechange = () => void this.emitPcStatus();
 
     const dc = this.dc = pc.createDataChannel('proxy');
+    // 二进制帧必须同步解码：浏览器默认 blob 形态无法同步读，先切 arraybuffer 再挂 onmessage。
+    dc.binaryType = 'arraybuffer';
     dc.onopen = () => {
       this.lastPongAt = Date.now();
       this.opts.onStatus({ state: 'connected', pairType: null });
@@ -114,7 +133,7 @@ export class WebRtcSession {
     };
     dc.onclose = () => this.opts.onStatus({ state: 'off', pairType: null });
     dc.onmessage = (ev) => {
-      handleProxyMessage(ev.data, {
+      handleChannelMessage(ev.data, {
         onProof: () => { this.lastPongAt = Date.now(); },
         onFrame: (m) => this.opts.onFrame(m),
       });
@@ -201,19 +220,33 @@ export class WebRtcSession {
   async send(frame: unknown): Promise<void> {
     const dc = this.dc;
     if (!dc || dc.readyState !== 'open') return;
+    // ws 上行二进制体：直接上二进制帧（省 33% 线税 + 双端编解码 CPU）
+    const f = frame as { k?: string; wid?: number; dataB64?: string };
+    if (f.k === 'ws-msg' && typeof f.dataB64 === 'string') {
+      if (!(await this.waitSendSlot(dc))) return;
+      // encodeWsMsgBin 产出为新分配整体帧（byteOffset=0），.buffer 即完整字节——库 d.ts 的
+      // Uint8Array<ArrayBufferLike> 与 TS 5.7+ 的 ArrayBufferView<ArrayBuffer> 重载不兼容，
+      // 走 ArrayBuffer 重载发送（线上字节与直接 send(Uint8Array) 完全相同）。
+      dc.send(encodeWsMsgBin(f.wid!, b64ToU8(f.dataB64)).buffer as ArrayBuffer);
+      return;
+    }
     const s = JSON.stringify(frame);
-    // 背压等待加封顶（2026-09-12）：通道一旦黑洞，bufferedAmount 只涨不落，原先的 while 会
-    // 无限等待 → 上层请求永远发不出去、也不报错（真机实证：有 req 无 res）。超时即认通道已死。
+    if (!(await this.waitSendSlot(dc))) return;
+    dc.send(s);
+  }
+
+  /** 背压等待（8MiB，5s 封顶）：黑洞通道只涨不落，超时即认通道已死（2026-09-12 语义不变）。 */
+  private async waitSendSlot(dc: RTCDataChannel): Promise<boolean> {
     const deadline = Date.now() + 5_000;
     while (dc.bufferedAmount > 8 * 1024 * 1024) {
       if (Date.now() > deadline) {
         this.opts.onStatus({ state: 'off', pairType: null });
         this.teardown();
-        return;
+        return false;
       }
       await new Promise((r) => setTimeout(r, 10));
     }
-    dc.send(s);
+    return true;
   }
 
   private async poll(): Promise<void> {
