@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 20+ / TypeScript（`tsx --test`）、werift ^0.24.4、浏览器原生 RTCPeerConnection、Supabase Edge Function（Deno）、coturn（relay VPS 49.233.155.13）、Android 蜂窝真机。
 
-**Spec:** `docs/superpowers/specs/2026-09-23-wave1-performance-health-cost-design.md`（D1-D8 设计决策与证据浓缩的唯一事实源；本计划逐任务实现之）
+**Spec:** `docs/superpowers/specs/2026-09-23-wave1-performance-health-cost-design.md`（D1-D9 设计决策与证据分级的唯一事实源；本计划逐任务实现之）
 
 ## Global Constraints
 
@@ -20,6 +20,7 @@
 - 密钥纪律：VPS 密码、Supabase access token、TURN secret、用户 JWT 一律用 `$ENV_VAR` 引用、当场从用户会话获取，**绝不写进任何进 git 的文件**（含本计划、e2e 报告）。
 - 真机门禁：Wave 1 结束时跑 60min 浸泡 + 蜂窝真人实测，四指标对比基线（p90=53ms / stall 16 次 587s / 15min 周期 / 字节量），报告落 `e2e/`。
 - 基线锚点（一切对比不得另起口径）：host done 时延 p50=4ms/p90=53ms（蜂窝 TURN）；22min 真人实测 468 请求零错误、1.3MB 隧道流量；大 JSON 期 1KB 请求排队 39s。
+- **开发纪律（2026-09-23 二轮迭代新增，二期起生效）**：每 Task 的最后 Commit 步骤替换为——在 `wave1/task-N-<slug>` 分支 commit → 自检合并门禁三件套（①问题陈述：解决了什么问题、证据分级；②本仓实测记录；③`npm test` 全绿）→ squash merge 回 main；禁 force push main。动网络路径的 Task（1/2/3/4/7/8/9/13）实测记录必须含真机或真 relay 证据；纯内部重构（5/6/11/12/14）可 loopback+单测。不存在「可直接吸收」：外部证据只有假设强弱之别，落点 Task 实测归档后才许在 spec §2 移入「已实测」。成本优化不得破 v0.1.0 四指标基线（D9 底线）。
 
 ## Review Focus
 
@@ -1509,6 +1510,147 @@ git add src/host.ts src/cli/start.ts src/tests/ledger-host.test.ts pwa/src/frame
 git commit -m "feat(ledger): 帧账本+字节计量——/status dataPlane 与 events.jsonl session_end 带 bytes（成本一等指标，spec D5/D8）"
 ```
 
+#### Task 5 增补（2026-09-23 二轮迭代）：路径类型 + wire 字节进账本（spec D9 测量支柱）
+
+> 动机：容量方程（D9）的中继率/字节因子两大参数全仓无实测。账本只记应用字节，不知每会话走的是 direct/relay/tunnel 哪条路、线上实际跑了多少 wire 字节。本增补给账本加 `pathType` 与 `wireBytesSent/wireBytesRecv`，方法照抄 v3 tc-accounting（【外部实测+源码取证】，移植参考 `DevAnyWhere-v3/cores/devanywhere-net/packages/core/src/status.ts:1-25` + `facts.ts:430-489`）。
+>
+> 判据（werift 侧，勿想当然）：candidate-pair 行**无 selected 字段**；选定对 = `state==='succeeded'`（nominated 者亦在其中，多对时优先取 nominated）；`localCandidateId → local-candidate.candidateType`：`relay`→中继，`host/srflx/prflx`→直连。PWA 浏览器侧用标准 `selected===true`。
+
+**Files:**
+- Create: `src/pathType.ts`
+- Modify: `src/host.ts`（会话建池后启动 5s 采样器；session_end 落 pathType/wire 字节）
+- Modify: `src/cli/start.ts`（`/status` dataPlane 透出 pathType/wireBytes）
+- Modify: `pwa/src/frameLedger.ts`（PWA 侧 getStats 采样 + tunnel 帧归类）
+- Test: `src/tests/pathType.test.ts`
+
+**Interfaces:**
+- Consumes: Task 5 既有 `frameLedger`（host/pwa 两侧）、`session.events`。
+- Produces: `classifyCandidateType(ct: string|undefined): PathType`；`selectedPairStats(stats: unknown[]): { pathType: PathType; wireSent: number; wireRecv: number }`；ledger 新字段 `pathType: 'direct'|'relay'|'tunnel'|'unknown'`、`wireBytesSent: number`、`wireBytesRecv: number`（Task 12/13 直接消费：字节因子 = wire 增量 ÷ 应用字节增量；Task 13 真机门禁记录路径占比）。
+
+- [ ] **Step 13: 失败测试——三型路径分类 + tunnel 归类**
+
+`src/tests/pathType.test.ts`：
+
+```ts
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { classifyCandidateType, classifyVia, selectedPairStats } from '../pathType.js';
+
+const pair = (over: object) => ({ type: 'candidate-pair', id: 'p1', state: 'succeeded', localCandidateId: 'l1', bytesSent: 1000, bytesReceived: 2000, ...over });
+const local = (candidateType: string) => ({ type: 'local-candidate', id: 'l1', candidateType });
+
+test('classifyCandidateType: relay→relay, host/srflx/prflx→direct, 其他→unknown', () => {
+  assert.equal(classifyCandidateType('relay'), 'relay');
+  assert.equal(classifyCandidateType('host'), 'direct');
+  assert.equal(classifyCandidateType('srflx'), 'direct');
+  assert.equal(classifyCandidateType('prflx'), 'direct');
+  assert.equal(classifyCandidateType(undefined), 'unknown');
+});
+
+test('selectedPairStats: 无 selected 字段，取 state==succeeded 的对（werift 判据）', () => {
+  const stats = [pair({}), local('relay')];
+  const r = selectedPairStats(stats);
+  assert.equal(r.pathType, 'relay');
+  assert.equal(r.wireSent, 1000);
+  assert.equal(r.wireRecv, 2000);
+});
+
+test('selectedPairStats: 多对 succeeded 时优先 nominated', () => {
+  const stats = [
+    pair({ id: 'p1', localCandidateId: 'l1', bytesSent: 1, bytesReceived: 1 }),
+    pair({ id: 'p2', localCandidateId: 'l2', nominated: true, bytesSent: 9, bytesReceived: 9 }),
+    local('relay'),
+    { type: 'local-candidate', id: 'l2', candidateType: 'srflx' },
+  ];
+  const r = selectedPairStats(stats);
+  assert.equal(r.pathType, 'direct');
+  assert.equal(r.wireSent, 9);
+});
+
+test('selectedPairStats: 无 succeeded 对 → unknown，不崩', () => {
+  const r = selectedPairStats([{ type: 'candidate-pair', id: 'p1', state: 'in-progress' }]);
+  assert.equal(r.pathType, 'unknown');
+  assert.equal(r.wireSent, 0);
+});
+
+test('tunnel 帧（via:tunnel）归类为 tunnel，不进 getStats 判定', () => {
+  assert.equal(classifyVia('tunnel'), 'tunnel');
+  assert.equal(classifyVia('dc'), 'unknown');
+  assert.equal(classifyVia(undefined), 'unknown');
+});
+```
+
+- [ ] **Step 14: 跑测试确认失败**
+
+Run: `npx tsx --test src/tests/pathType.test.ts`
+Expected: FAIL（`../pathType.js` 不存在）
+
+- [ ] **Step 15: 实现 pathType.ts + host 采样器（5s 节拍，快照路径禁 I/O）**
+
+`src/pathType.ts`：
+
+```ts
+export type PathType = 'direct' | 'relay' | 'tunnel' | 'unknown';
+
+export function classifyCandidateType(ct: string | undefined): PathType {
+  if (ct === 'relay') return 'relay';
+  if (ct === 'host' || ct === 'srflx' || ct === 'prflx') return 'direct';
+  return 'unknown';
+}
+
+// 帧级归类：隧道网关转发的帧带 via:'tunnel'，与 getStats 判定正交（tunnel 段不过 DataChannel）
+export function classifyVia(via: string | undefined): PathType {
+  return via === 'tunnel' ? 'tunnel' : 'unknown';
+}
+
+// werift candidate-pair 无 selected 字段：选定对 = state==='succeeded'（nominated 优先）
+export function selectedPairStats(stats: any[]): { pathType: PathType; wireSent: number; wireRecv: number } {
+  const pairs = stats.filter((s) => s?.type === 'candidate-pair' && s.state === 'succeeded');
+  const nominated = pairs.find((p) => p.nominated);
+  const pair = nominated ?? pairs[0];
+  if (!pair) return { pathType: 'unknown', wireSent: 0, wireRecv: 0 };
+  const loc = stats.find((s) => s?.type === 'local-candidate' && s.id === pair.localCandidateId);
+  return {
+    pathType: classifyCandidateType(loc?.candidateType),
+    wireSent: pair.bytesSent ?? 0,
+    wireRecv: pair.bytesReceived ?? 0,
+  };
+}
+```
+
+host 侧采样（`src/host.ts` 会话内）：
+
+```ts
+// 会话建立后启动；getStats 累计值→增量累进 ledger；pc 关闭时 clearInterval
+const wireTimer = setInterval(async () => {
+  try {
+    const stats = await pc.getStats();
+    const cur = selectedPairStats([...stats.values()]);
+    if (prevWire) {
+      frameLedger.wireBytesSent += Math.max(0, cur.wireSent - prevWire.wireSent);
+      frameLedger.wireBytesRecv += Math.max(0, cur.wireRecv - prevWire.wireRecv);
+    }
+    if (cur.pathType !== 'unknown') frameLedger.pathType = cur.pathType;
+    prevWire = cur;
+  } catch { /* 采样失败零副作用，下拍再来 */ }
+}, 5000);
+```
+
+PWA 侧（`pwa/src/frameLedger.ts`）：同样 5s 节拍，浏览器判据 `candidate-pair && selected===true`；tunnel 转发的响应帧（`via:'tunnel'`）把对应字节计入 tunnel 桶且 pathType 记 'tunnel'。
+
+纪律：采样器只写内存账本；`/status` 快照与 events.jsonl 落盘走既有路径，**快照路径不新增任何 I/O**。
+
+- [ ] **Step 16: 跑测试确认通过 + 全量回归**
+
+Run: `npx tsx --test src/tests/pathType.test.ts` 通过；`npm test` 全绿（先停常驻 host，跑完恢复）。
+
+- [ ] **Step 17: Commit（走开发纪律：独立分支 + squash 合并，见 Global Constraints）**
+
+```bash
+git add src/pathType.ts src/host.ts src/cli/start.ts src/tests/pathType.test.ts pwa/src/frameLedger.ts
+git commit -m "feat(ledger): pathType+wire 字节进账本——getStats 选定对增量法（werift 无 selected 字段，state==succeeded 判据），spec D9 测量支柱"
+```
+
 ---
 
 ### Task 6: stallSuspect 三条件黄灯（spec D5：徽章双驱动，stall 期如实示警）
@@ -2898,10 +3040,13 @@ Run: `npx tsx --test src/tests/status.test.ts` → 全 PASS。
 每 1 B 应用数据经过 TURN 中继 ≈ **1.68 B** 线字节（RTP/DTLS/SCTP/ICE/UDP 四层封装税）。
 直连（p2p host/srflx）不过中继，**不计费字节** —— 直连率就是利润率。
 
-## 2. 单 VPS 容量账（bj2 档，30 Mbps 按量）
+## 2. 单 VPS 容量账（bj2 档，30 Mbps 按带宽计费）
 
-30 Mbps × 50% 持续利用率 ≈ 2.9 TB/月线字节 ≈ 1.7 TB/月应用字节（÷1.68）。
-结论：中继是**兜底**不是常态——常态化中继 1 个重度用户（2 GB/月应用字节）约耗 0.1% 容量；
+固定带宽月出量公式【实测-外部 v3 tc-cost】：月线字节 = 带宽 × 31,557,600s ÷ 12 × 利用率 u。
+30 Mbps × u50% ≈ **4.9 TB/月线字节** ≈ **2.9 TB/月应用字节**（÷1.68）；对照档：5M→0.8TB、100M→16.4TB 线字节。
+吞吐天花板 = 出口带宽档（5Mbps 档实测封顶 0.32 MiB/s【实测-外部】）——按带宽计费的节点，
+瞬时并发吞吐先天封顶，容量规划看带宽档不看流量包。
+结论：中继是**兜底**不是常态——常态化中继 1 个重度用户（2 GB/月应用字节）约耗 0.07% 容量；
 真正吃容量的是「直连率塌陷 × 大文件传输」的组合。
 
 ## 3. 观测口径（Wave 1 落地）
@@ -2920,10 +3065,57 @@ Run: `npx tsx --test src/tests/status.test.ts` → 全 PASS。
 
 ## 5. 红线推演（什么组合会亏穿）
 
-单 VPS 月成本 C 元、2.9 TB 线字节容量：容纳 N 个「纯中继中度用户」（500 MB/月应用）
-≈ 2900÷1.68÷0.5 ≈ 3400 人——**纯中继也能活**；亏穿点是「直连率 <70% 且人均大文件
-（>2 GB/月）」。所以运营北极星指标 = **直连率**（events.jsonl cascade_choice 的 mode 分布），
-其次才是人均字节。
+单 VPS 月成本 C 元、4.9 TB 线字节容量（30Mbps@u50%）：容纳 N 个「纯中继中度用户」
+（500 MB/月应用）≈ 4900÷1.68÷0.5 ≈ 5800 人——**纯中继也能活**；亏穿点是「直连率塌陷
+（蜂窝↔家宽实测可低至 0【实测-外部】）且人均大文件（>2 GB/月）」。所以运营北极星指标 =
+**直连率**（events.jsonl 的 pathType 分布，Task 5 增补起按接入类型分桶），其次才是人均字节。
+
+## 6. 容量方程 v1（spec D9：10 万用户近乎免费的量化回答）
+
+> 方程：**VPS 成本 = 在线数 ×（中继率+隧道率）× 会话带宽 × 字节因子**；信令成本单列。
+> 所有参数带证据分级；估算必须带误差带，禁止单点拍脑袋数字。
+
+### 6.1 参数现状表
+
+| 参数 | 现值 | 证据分级 | 标定落点 |
+|---|---|---|---|
+| 字节因子（TURN） | 1.68；砍 base64 后预期 ≈1.26 | 【实测-外部 v3 tc-cost】，本仓复测中 | Task 5 增补 wire 账 + Task 13 真机复测 |
+| 字节因子（隧道） | ≈1.17-1.20；砍 base64 后 desktop 腿 -23% | 【实测-外部】 | 同上 |
+| 字节因子（p2p 直连） | 0（不过中继，不计费字节） | 【实测-外部】 | — |
+| 会话带宽 | 50-100 kbps/在线 | 【弱证据 n=2】，禁止当结论 | Task 5 起分路径实测积累 |
+| 中继率 | 云↔云 0%、家宽无 VPN 0%、蜂窝↔家宽 ≈2/3（联通）-100%（电信多出口 NAT） | 【实测-外部】，N≥20 前不信点估计 | Task 5 增补 pathType 分桶；Wave 2 直连率矩阵 |
+| VPS 单价/计费方向 | 部署者自查：方向差 2×【实测-外部】、时长差 3×【推断】= 最大不确定项 | 【未验证-本仓】 | cost-model.md 随账单迭代 |
+| 信令成本 | 轮询制 1.25-3.3 QPS/在线 | 【实测-外部+算术】 | 三期 ws 长连（实测 QPS/在线≈0.0099） |
+
+### 6.2 10 万用户部署形态推演（10 万注册 / 10% 并发 = 1 万峰值在线）
+
+每在线用户月中继线字节 = 会话带宽 × 在线时长 × 中继率 × 1.68。
+
+| 情形 | 参数 | 线字节/在线·月 | 总量（1 万在线） | 30Mbps VPS 台数（4.9TB/台） | 月账单区间* | 单位成本 |
+|---|---|---|---|---|---|---|
+| 中心 | 50kbps × 8h/天 × 中继率 2/3 | ≈6.1 GB | ≈61 TB | ≈13 台 | ¥2k-4k | **¥0.2-0.4/在线·月** |
+| 悲观 | 100kbps × 24h/天 × 中继率 100%（蜂窝全塌） | ≈54 GB | ≈544 TB | ≈111 台 | ¥1.7w-3.3w | **¥1.7-3.3/在线·月** |
+
+\* VPS 单价按 ¥150-300/台/月（30Mbps 按带宽计费档）估，**部署者必须按自购账单替换**；
+误差带来源：计费方向 2×、在线时长口径 3×、会话带宽弱证据 2×。
+带宽峰值校核：中心情形 1万×50kbps×2/3≈333Mbps ≤ 13台×30Mbps=390Mbps（偏紧，u 口径误差带内）；
+悲观情形 ≈1Gbps ≤ 111×30=3.3Gbps ✓。
+**量化锚（草案）**：单位成本 ≤¥4/在线·月（外部参考 v3 门禁同值）——中心与悲观情形均不破锚；
+折算每千注册用户每月成本 ≈ ¥20-40（中心）/ ¥170-330（悲观）。
+底线：任何成本优化不得压破 v0.1.0 四指标基线。
+
+### 6.3 信令上限（部署规模天花板）
+
+轮询制 1 万在线 = 1.25-3.3 万 QPS，Supabase 任一公开档位均打不住【实测-外部+算术】。
+**二期口径**：单环境部署规模上限 = 所购 Supabase 档位 QPS 上限 ÷ 3.3 QPS/在线（部署者自算）；
+10 万用户形态的信令 = 三期必答题（ws 长连，单机万级并发已实测【实测-外部】）。
+
+### 6.4 待 Wave 2 标定清单
+
+单机饱和压测（搬 v3 压测方法论：healthz 采样真值、爬坡 200/s/台、多机多出口）；
+蜂窝×家宽×运营商直连率矩阵（N≥20）；NAT 类型 facts；级联顺序成本复审
+（隧道 0.933 元/GB vs TURN 1.344 元/GB【实测-外部】，v0.1.0 现状 TURN 先于隧道）；
+「暖场通道」relay→direct 后台升级（WebRTC 需自研 upgrade 轮）。
 ```
 
 - [ ] **Step 6: Commit**
@@ -3005,9 +3197,14 @@ curl -s http://127.0.0.1:19727/status | jq .dataPlane   # host 侧（本机另�
 
 `e2e/wave1-realdevice-gate.md`：四指标对比表（基线 vs 实测，逐条分级【实测-真机】）+ 压缩 A/B 结论 + Go/No-Go 判定（四条核心条件全过 = Go；任一不过 = 回 systematic-debugging，不许带伤发布）。coturn 侧字节对账（VPS `vnstat` 窗口增量 ÷ host 账本增量）。
 
+**报告必含两条成本门禁数据（2026-09-23 二轮迭代新增，spec 退出门禁 #9）：**
+
+1. **路径占比**：本次真机各会话的 direct/relay/tunnel 归属与占比——数据源 = Task 5 增补的账本字段（`/status` dataPlane 的 `pathType` + events.jsonl `session_end.pathType`），强制 relay 浸泡臂之外须另留一段**自然级联窗口**（不加 `?transport=relay`）采集真实路径分布；这是 D9 容量方程中继率参数的本仓首个实测点（N=1 起步，禁止外推当结论）。
+2. **字节因子复测**：VPS `vnstat` 窗口线字节增量 ÷ host 账本同期应用字节增量，对照外部实测 1.68；二进制帧（Task 2/3）落地后预期 ≈1.26（-25%）。tx/rx 分开记（方向差 2×【实测-外部】）。复测值回填 `docs/cost-model.md` §6.1 参数现状表（分级随之从【实测-外部】升级为【实测-本仓】）。
+
 ```bash
-git add e2e/wave1-realdevice-gate.md
-git commit -m "test(e2e): Wave 1 真机蜂窝门禁——四指标对比 + Go/No-Go（spec §验收）"
+git add e2e/wave1-realdevice-gate.md docs/cost-model.md
+git commit -m "test(e2e): Wave 1 真机蜂窝门禁——四指标对比 + 路径占比/字节因子复测 + Go/No-Go（spec §验收）"
 ```
 
 ---
@@ -3096,3 +3293,4 @@ Task 10（gzip 实验，依赖 2/3）──────────────�
 - **占位符扫描**：全部代码步骤含完整可写代码；仅两处「执行者以现状为准」声明（bridge.test.ts 的 startHttpServer 返回形态、status.test.ts 的 deps 写法）——均为追加用例时对既有设施签名的合理容差，非占位符。
 - **类型一致性**：`SessionLedger`/`makeLedger`/`dataPlaneSnapshot`（Task 5 产、Task 12 消）；`PooledChannel`/`pickLeastBufferedIdx`/`proxyLabelIdx`/`PROXY_POOL_SIZE`（Task 4 产、Task 4/11 消）；`enc?: 'gzip'`（Task 10 产消同任务）；`IceTransportsOwner`（Task 8 产、peer.ts 消）；`LivenessConfig`（Task 9 产、session/shell 消）。已逐一推演。
 - **Review Focus 挂钩**：#1 PWA 构建/部署漂移→Task 3 Step 5 与 Task 13 Step 2 的 sha256 对账；#2 非 werift 零副作用→Task 8 测试用例 3；#3/#5 tunnel 与死/卡边界→Task 6 测试与注释；#4 两会话隔离→Task 4/5 测试。
+- **2026-09-23 二轮迭代**：spec §2 重写为假设/已实测/避免三级（废除「可直接吸收」）；新增 D9 容量方程（映射：Task 5 增补 pathType/wire 字节进账本 → Task 12 §6 参数现状表与 10 万用户推演 → Task 13 Step 7 路径占比+字节因子复测回填）；开发纪律（独立分支 + squash 合并 + 门禁三件套）入 Global Constraints；修正 cost-model 容量账错误（30Mbps@u50%：2.9TB 线字节→4.9TB 线字节≈2.9TB 应用字节，§5 红线人数 3400→5800 联动修正）。新增类型 `PathType`/`classifyCandidateType`/`classifyVia`/`selectedPairStats`（Task 5 增补产、Task 12/13 消），与既有 `SessionLedger` 字段命名已对齐推演。另：D9 覆盖映射已并入上文 Spec 覆盖链（Task 5 增补→12§6→13 Step7），占位符扫描复检通过（tunnel 归类测试已落实名断言）。

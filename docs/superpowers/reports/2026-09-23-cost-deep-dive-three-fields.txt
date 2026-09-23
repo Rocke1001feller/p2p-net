@@ -1,0 +1,556 @@
+<agent_swarm_result>
+<summary>completed: 5</summary>
+<subagent agent_id="agent-56" item="深挖 /Users/separationofconcerns/Documents/TryEverything/DevAnyWhere-v3/cores/devanywhere-net 的【压测与容量】：①找全部压测/浸泡/负载实验（已知有万级压测实录），方法（怎么造负载、什么工具/脚本）、饱和点（多少连接/多大带宽时什么先崩）、每连接内存/CPU 曲线、断连率随规模形状；②werift ^0.24.4 下如何判断一条会话是直连还是中继（candidate-pair/nominated pair 的 candidateType 读取 API 与代码位置，getStats 可用性）——p2p-net 要给帧账本加路径类型测量，需要这个实证 API；③任何单机 coturn/VPS 容量数据。重点看 packages/node/src 与 test/e2e/experiments 类目录与 docs。" outcome="completed">探索完成。以下为完整调查报告。
+
+---
+
+# devanywhere-net 压测与容量深挖报告
+
+仓库：`/Users/separationofconcerns/Documents/TryEverything/DevAnyWhere-v3/cores/devanywhere-net`（werift ^0.24.4 + ws + coturn + Caddy + Supabase，与 p2p-net 同栈）。该仓有严格的证据分级纪律（AGENTS.md §五-6/§五-9），本文沿用其【实测】/【推断】/【未验证】标注。
+
+## ① 压测 / 浸泡 / 负载实验全录
+
+### A. 信令长连接万级压测（该仓最大规模的容量实验，共三批）
+
+**被测面**：`packages/node/src/signaling/relay-server.ts`（Node ws 长连接 + Supabase PostgREST 邮箱双写），部署形态 = Caddy 443 TLS 终结 → `127.0.0.1:19701` launcher。
+
+**造负载的方法与工具**（全部【实测】在档）：
+- driver：`scripts/signaling-load.mjs`（ws 客户端；两两配对进 `loadtest-pair-<i>:room` 房间模拟"一桌面一手机"；1% 连接每秒发 1 条 `sig-msg`，发送时刻打在 payload 里回算投递时延）——`scripts/signaling-load.mjs:11-13,120-170`
+- 分布式编排：`scripts/signaling-distributed.sh`，4 台云 driver（relay-bj2/gz2/sg/jk）各切片、错峰 15s、每 5s 经 SSH 采被测机本机 `healthz.connsOnline`（并发真值口径 = 服务端采样，不是 driver 自报）——`relay-iac/RUNBOOK.md:630-667`
+- 爬坡纪律：`--batch 50 --batch-gap-ms 250`（≈200/s/台）——实证发现突发建连会被家庭 NAT/路径 RST（`docs/benchmark/signaling-load-relay-sh-2026-09-14.md:186-188`）
+- driver 机调优：`ip_local_port_range=1024 65535`、`tcp_tw_reuse=1`、`somaxconn=65535`、`fs.file-max=2097152`、nofile 1048576——`relay-iac/RUNBOOK.md:646-651`
+- 邮箱真实性：打的是**生产 Supabase 双写**（非桩），压测行真实落表、事后 `DELETE room=like.loadtest-*` 清理并复查 `*/0`——`docs/benchmark/signaling-gate-sh2-2026-09-14.md:61-65`
+
+**三批读数（数字原文照抄）**：
+
+| 批次 | 机型 | 结果 | 出处 |
+|---|---|---|---|
+| 2026-09-14 首批（relay-sh **2C/1.9G**） | Mac 单机 driver | 6k 档 opened 5997 但**并发存活采样峰值只有 705**；1k-v2 档 `closedAfterOpen=969、aliveAtEnd=31`；10k 档 pre-open 57% ECONNRESET | `docs/benchmark/signaling-load-relay-sh-2026-09-14.md:86-89` |
+| 同日心跳修复后重测 | 同上 | 1958 opened → 服务端采样 1956（**99.9%**），timewait 3292→17；万级真值被 driver 路径截断（EADDRNOTAVAIL 1511 + ECONNRESET 4557） | 同上 `:161-201` |
+| 同日分布式网格（relay-sh 2C） | 4 driver × 2500 | **服务端 healthz 采样峰值 4113**，RSS 114-122MB、load ≤0.2、mailboxFailures 0——"relay-sh（2C/1.9G）的分布式负载天花板 ≈ 4.1k 并发在线" | 同上 `:336-344` |
+| 2026-09-14 门禁档（relay-sh2 **4C/7.6G**） | 切片 3500/3000/2500/1000 | **10000/10000 全存活**（healthz 峰值 10000 + aliveAtEnd 10000 双口径首次一致）；`qps/online ≈ 0.0099`；load 峰值 0.72、稳态可用内存 ≥6.3GB；投递 p50 281-462ms、p95 ≤873ms | `docs/benchmark/signaling-gate-sh2-2026-09-14.md:15-44` |
+| **2026-09-17 独立复测 ×3**（relay-sh2） | 4 driver × 2500 | **3/3 次 10000 全存活**：run1 `aliveAtEnd=9999, closedAfterOpen=1`；run2/run3 `10000/10000, closedAfterOpen=0`；run2 时间线 `9929 → 10000 → 10000 → 10000 → 10000` 连续四拍稳态 | `docs/benchmark/signaling-10000-rerun-2026-09-17.md:22-39`；原始件 `bench/runs/signaling-10000-2026-09-17/run{1,2,3}.json` |
+
+**饱和点（什么先崩）**：
+1. **2C/1.9G 机 ≈4.1k 并发在线**（【实测】峰值 4113；「吃满它的是 TLS 握手吞吐、不是消息面」=【推断】——RSS 114-122MB、load ≤0.2 只支持"不是消息面"那一半）。2C 上 TLS 建连吞吐实测 ~60/s（1k 档）→ ~17/s（10k 档突发）（`signaling-load-relay-sh-2026-09-14.md:209-222`）；「吞吐随核数近似线性」=【推断】（无 4C 对照）。
+2. **4C/7.6G 机 10000 是目标值不是天花板**——">10000 未测，真正的容量上限需递增档位（12500/15000/20000）"（`signaling-10000-rerun-2026-09-17.md:79`）。
+3. **先崩的从来不是消息面而是"建连面 + 心跳语义"**：修复前心跳「一拍未回 pong（5s 窗）即 terminate」在 WAN 拥塞窗口批量收割健康连接——6k 档 opened→alive 只有 11.8%；对照实验钉死（100 条空闲 90s 零死亡 vs 事件循环失速 12s 后 ~8s 内 100/100 被割、close code 全 1006）（`signaling-load-relay-sh-2026-09-14.md:101-140`）。修复 = `deadAfterMs` 默认 15000（=3×heartbeatMs）+ 任意入站帧刷新存活（`packages/node/src/signaling/relay-server.ts:96-98,241-252`）。
+4. **driver 侧瓶颈形状**（压测方法论关键）：Mac 单机 ~2k 后源端口池耗尽（EADDRNOTAVAIL）、~6k 并发会话时路径崩溃性丢流（采样 SSH 与全部 ws 同一时刻被 RST）（`signaling-load-relay-sh-2026-09-14.md:180-201`）。
+
+**每连接内存**：
+- driver 侧：Mac `1k 168.6MB → 5k ~520MB → 10k 741.9MB`（`signaling-load-relay-sh-2026-09-14.md:99`）；云 driver `bj2 243MB@2428 连接、sg 367MB@2276`；门禁档 `315MB@3500 / 328MB@3000 / 272MB@2500 / 174MB@1000`（`signaling-gate-sh2-2026-09-14.md:33-38`）；9-17 复测 `rssPeakMB 242.7 / 318.3 @2500`（`bench/runs/signaling-10000-2026-09-17/run2.json`）。**定容规则 ≈1GB 可用内存 / 1000 连接**（【推断】，依据强度 n=1——`signaling-load-relay-sh-2026-09-14.md:356-361`）。换算 ≈ **100-150 KB/连接**（Node ws 客户端侧）。
+- 服务端：2C 机 4113 并发时 RSS 仅 114-122MB（≈ **28 B/连接 级**，ws 服务端极轻）；4C/7.6G 机万级时 heap 上限 6144MB、稳态可用内存 ≥6.3GB。healthz 自带 `rssMB` 字段（`packages/node/launcher/signaling-relay.mjs:77`）。
+
+**断连率随规模的形状**：死亡**聚簇在建连拥塞窗口**（爬升期），不是均匀分布——"幸存的 31 条连接在拥塞结束后稳定存活 28s+ 零死亡"（`signaling-load-relay-sh-2026-09-14.md:122-124`）。修复后形状变成：爬升→稳态 100% → 阶梯下降（driver 按 slice 退出的预期行为）。run1 唯一的 1/10000 `closedAfterOpen` 成因【未验证】（无 terminate 留痕）。
+
+### B. 栈吞吐 / 时延 bench（T-A/T-B 系列，relay-sh2 4C/7.4GiB/EPYC 7K83/Node 20）
+
+**工具**：`packages/bench`（自研 runner，n=20 预热 3，nearest-rank 分位，噪声带 `baseline.p50 ± max(2×MAD, 1%×p50)`，劣化 >5% 即红）；netem 装置 = veth + 双 netns + tc netem（`packages/bench/rig/netem.sh`）。
+
+| 读数 | 值 | 出处 |
+|---|---|---|
+| T-A 栈天花板单流（split 双进程） | **11.705 MB/s**（inproc 同进程 6.447——共享单核压低 ~43%） | `docs/benchmark/baseline-1.0.md:52`、`docs/benchmark/tb-netem-2026-09-14.md:91` |
+| T-A 4 并发合计 | 9.634 MB/s（split）；`L3.concurrent_streams`=4.783（4 流聚合增益 ≈0，共享一条 SCTP 关联+一颗核的必然） | `tb-netem-2026-09-14.md:92,121-125` |
+| T-A 建链 `L1.dc_open` | 461.5-477 ms | `baseline-1.0.md:56` |
+| T-A 队头阻塞增量 | p50 27.27 / **p95 37.77 ms**（对照 v2 实测 78 s——池化修复治好） | `baseline-1.0.md:121-132` |
+| **T-B1**（60ms/1%/10Mbps）单流 | **0.450-0.470 MB/s ≈ T-A 的 4%**；建链 637-647 ms；两次独立采集互证 | `tb-netem-2026-09-14.md:160-180` |
+| T-B2（40ms/0.5%/50Mbps）单流 | 0.923 MB/s（链路利用率 14.8%）——**丢包率的杀伤远大于带宽限制** | `tb-netem-2026-09-14.md:199-212` |
+| T-B3（150ms/2%/2Mbps） | `L2.*` 全部 null（n=0，23 轮 0 有效吞吐样本）；建链 p50 1374 ms | `tb-netem-2026-09-14.md:349-373` |
+| werift 纯 JS DTLS 发送侧 CPU | **~12.5 ms/消息**（issue #19，换核触发器量化证据） | `docs/issue-ledger.md:22`、`docs/benchmark/stall-loss-2026-09-15.md:263-274` |
+| **丢包下 per-stream 永久停滞** | T-B1 修复后仍 **100% 复现**（2026-09-18，3/3 warmup 全灭，每轮 214-219s）；现场：`msSinceLastFrame=30`（帧仍在流入）+ `totalBuffered=0` + 请求 120s 零完成 = **接收侧交付不出去**（#50 家族，未根除） | `docs/benchmark/tb-rerun-2026-09-18-report.md:28-62` |
+
+### C. T-C 真 relay 链路成本实测（直接回答成本方程，Stage 1.6 出口）
+
+工具：`scripts/tc-probe.mjs` + `packages/bench/src/scenarios/tc-accounting.ts`（字节账本：payload 与 wire 分开、tx/rx 分开、getStats 选定候选对增量计 WebRTC 腿）。32 MiB × ≥3 轮 × 双向。
+
+**字节因子（每 1 字节用户载荷在 relay 侧产生的字节数）【实测】**——`docs/benchmark/tc-cost-2026-09-15.md:126-133`：
+
+| 通道 | ingress/载荷 | egress/载荷 | 性质 |
+|---|---|---|---|
+| p2p | 0 | 0 | 架构保证 |
+| tunnel（prod 生产外推） | **1.196** | **1.167** | 实测（desktop 腿为帧字节，含 base64） |
+| tunnel（rig 仅公网腿） | 0.500 | 0.500 | 实测 |
+| turn | **1.680** | **1.680** | 实测（peer 腿 wire ×2 对称） |
+
+- **成本序证实**：单向 prod 口径 隧道 **0.933 元/载荷GB < TURN 1.344**（0.8 元/GB 单价）；「隧道省的是公网腿，省不掉 desktop 腿」（prod 是 rig 的 2.3 倍）——`tc-cost-2026-09-15.md:78-90`
+- **新发现协议税【实测】**：app 层 base64 把载荷抬 4/3（每 16384B 应答片编成 21848 chars，**1 GB 载荷 = 1.333 GB 上路**）；砍掉它 TURN 单向 1.344→约 1.01 元/GB（−25%）——`tc-cost-2026-09-15.md:135-149`
+- **TURN 腿吞吐天花板 = 出口带宽档**：双向稳定 **0.32 MiB/s ≈ 2.7 Mbps**，与 relay-sh 的 5 Mbps 档同阶，"不是 coturn 或协议的极限"；三批独立采集一致（0.30-0.34）——`tc-cost-2026-09-15.md:38-40,105-110`
+- **5 Mbps 档节点月供载荷能力 ≈ 0.8 TB ÷ 1.68 ≈ 0.48 TB**（u=50%）；固定带宽月出公网容量表：5Mbps→0.2/0.8/1.6 TB/月、50Mbps→1.6/8.2/16.4、100Mbps→3.3/16.4/32.9（u=10/50/100%）——`tc-cost-2026-09-15.md:94-110`
+- **计费方向贡献恰好 ~2×（两通道都是），不是 3.3×**；3.3× 矛盾的剩余因子 = 日均负载时长（8h vs 全天），需 30 天真实计量——`tc-cost-2026-09-15.md:114-124`
+
+### D. 真机 field acceptance（2026-09-17，4 发射端 × 3 通道 × PWA/Flutter 双侧，真实蜂窝）
+
+`docs/field-acceptance/2026-09-17-full-matrix-and-baseline.md`：
+- 建链：tunnel 档 **460-1752 ms**；turn 档 4158-6738 ms；p2p 档 3027-14614 ms（`:32-62,71-73`）
+- **TURN 档双 transport 竞争【实测】**：同时下发 UDP+TCP 两个 TURN URL 时建链成功率仅 **33%**（2/6）；只发 UDP → 83-100%。根因 = ICE agent 在两条 relay 路径间竞争导致 allocation 冲突。修复 = 凭据只发单 transport（`:105-134`）
+- **手机侧蜂窝多出口 NAT【实测】**：coturn 看到同一会话两个不同出口 IP（`36.112.201.175` 与 `106.37.77.38`），allocation 绑定漂移即 stale——运营商侧行为，代码不可修，缓解 = ICE-restart（`:100-103,136-139`）
+- **P2P 直连占比本轮 ≈0【实测】**：所有 p2p 档 facts 显示 `whyNotCheaper.p2p: "选定候选对为 relay（直连候选对 2 条未成功）"`——"蜂窝+家庭 NAT 双向打洞成功率本就低（v2 时代实测 1/3）【推断】；P2P 直连占比（GA ≥75%）远未达标——这直接关系到中继带宽成本"（`:144-151`）
+- 对照：云机↔云机（relay-sh→relay-sh2）打洞 **10/10 = 100%**、ctrl RTT p50 10ms（`docs/benchmark/tc-b-experiment-2026-09-15.md:20,139-140`）；Mac 家宽 VPN OFF 打洞 5/5、下行 9.97 MiB/s（`tc-cost-2026-09-15.md:215-221`）
+
+### E. werift 同意黑洞（对应 p2p-net "stall/~周期死亡" 的同族缺陷）
+
+issue #69 根因【实测】：werift 0.24.4 的 RFC 7675 同意检查**每 4-6s 单发无重传**，连续 30s 无响应 → `consentFresh=false` + `state=failed` + **循环自己退出且无自愈路径**；之后 `IceTransport.send()` 首行静默 return（不抛错、不计数、不打日志）→ SCTP 收不到 SACK → `dc.bufferedAmount` 永久钉在背压阈值上 = 假健康黑洞。公网现场：同一会话 Mac 侧同意死亡 13 次、每 ≈30s 复发。修复 = 看门狗就地 `setState('connected') + queryConsent()` 复活（默认 3s 周期、上限 5 次）——`packages/node/src/transport/consent-watchdog.ts:1-39,98-124`、`docs/benchmark/upload-stall-69-2026-09-16.md:8-34,186-222`。**注意该缺陷每侧各自独立，必须双侧都装看门狗**（`upload-stall-69:93-96`）。
+
+## ② werift ^0.24.4 下判定直连 vs 中继的实证 API
+
+**结论：可用，且该仓已在生产代码 + 真机测量中真跑。【实测】级证据链如下。**
+
+1. **API 入口**：`RTCPeerConnection.getStats()`（`node_modules/werift/lib/webrtc/src/peerConnection.js:1021`），返回 `RTCStatsReport`（Map 子类，`.values()` 展平成行）。
+2. **行形状（安装包源码实证，werift 0.24.4，`node_modules/werift/package.json:3`）**：
+   - candidate-pair 行构造于 `node_modules/werift/lib/webrtc/src/transport/ice.js:355-380`：`{type:'candidate-pair', id, localCandidateId, remoteCandidateId, state, nominated, packetsSent/Received, bytesSent, bytesReceived, currentRoundTripTime, …, consentRequestsSent}`——**没有 `selected` 字段**；state 枚举 = frozen/waiting/in-progress/**succeeded**/failed（同文件 `:13-28`）；pairs 输出时 nominated 排前（`:349-353`）。
+   - local/remote-candidate 行：`{type, id, address, port, protocol, candidateType, priority, foundation, relatedAddress, relatedPort, usernameFragment, tcpType}`（`ice.js:310-345`）——`candidateType ∈ host/srflx/prflx/relay`。
+3. **判定代码（仓内现成实现，可直接移植）**：
+   - 选定对判据：`type==='candidate-pair' && (selected===true || state==='succeeded')`——"werift 0.24.4 的 candidate-pair 行没有 selected 字段，选定对用 state==='succeeded'（nominated 亦在）；浏览器侧是 selected===true 语法。两判据都写，state 为主——双侧通吃"（`packages/core/src/status.ts:1-14`）
+   - 路径类型：`local?.candidateType ?? remote?.candidateType`；`relay→'relay'`，`host/srflx→'p2p'`（`status.ts:16-25`）；含 prflx 的更全枚举在 `packages/core/src/facts.ts:445-456`（`pairCandidateTypeFromStats`）
+   - 字节账本：`pairBytesFromStats` 读选定对 `bytesSent/bytesReceived` 累计值做增量（`facts.ts:430-437`）——**这正是 p2p-net "帧账本加路径类型测量"要的实证 API**，T-C 成本报告里的 TURN 1.680 因子就是这么量出来的（`tc-cost-2026-09-15.md:50-57`）
+   - 采样节拍：host 侧 5s 定时 `refreshStats()`（`packages/node/src/peer.ts:84,285-306`），产出 `PeerStatsReading{pairType, candidateType, rttMs, relayAddr, bytes, evidence}`（`peer.ts:86-98`）；快照路径禁 I/O，只读缓存
+   - 证据汇总：`icePairEvidence`（total/failed/direct/relay/unknown 候选对计数，ICE 失败细分归因用）（`facts.ts:458-480`）
+4. **运行时实证等级**：集成测试用真实 werift PC 全链跑（`packages/node/tests/host.integration.test.ts:5-6` import 真实 `DvaHostAgent/DvaPeer`，`newPc()` 构造真实 `RTCPeerConnection`，`peer.ts:127-134`）；真机/T-C 测量里 host 侧 107 次 `connected` 均报 `pairType:p2p`（`tc-b-experiment-2026-09-15.md:140`）；field 验收里 facts 的 `whyNotCheaper.p2p:"选定候选对为 relay…"` 也是这条链路的产出。**「无 selected 字段」这一原始取证出自 v2 仓 gate4 spike（`packages/core/src/status.ts:4` 引 `examples/gate4/README.md`），该目录在本机 v3 cores 副本中不存在——原始 artifact 未亲见，但安装包源码（本条 2）独立证实了同一事实。**
+5. **浏览器/Flutter 侧差异**：浏览器原生 stats 用 `selected===true`（`packages/browser/src/webrtc-session.ts:20,219`）；Flutter 经 `flutter_webrtc` 展平后同判据（`packages/flutter_core/lib/src/status.dart:25-45`）。p2p-net 的 host 在 Node/werift 侧 → 用 `state==='succeeded'`；PWA 侧 → `selected`。
+
+## ③ 单机 coturn / VPS 容量数据
+
+**fleet 事实源**（`relay-iac/nodes.yaml:60-185`）：8 台在网，roles=[turn,tunnel,static]：
+- relay-bj 阿里云 3Mbps（EIP NAT，`external-ip` 必须成对）、relay-sh/gz 火山 2C/1.9G 5Mbps、relay-sh2 腾讯 **4C/7.6G 50Mbps**、relay-bj2 腾讯 4C/3.7G 30Mbps、relay-gz2 火山 2C/4G 100Mbps、relay-sg Byteplus 新加坡 2C/4G 100Mbps、relay-jk Byteplus 雅加达 2C/2G 100Mbps（内网镜像实测 33-218Mbps，公网上限均"待控制台核对"）
+
+**coturn 容量【实测/实录】**：
+- **每并发 WebRTC relay 会话 ≈ 1 个 relay 端口**；端口段 50000-50019 = "20 端口 ≈ 20 并发 relay 会话"，扩产按「并发会话数 × ~1.2」估端口、三处一致（conf/安全组/nodes.yaml）——`relay-iac/nodes.yaml:53-55`、`docs/coturn-relay-ops.md:216-217`（v2 实录）
+- **TURN 吞吐天花板 = 出口带宽档，不是 coturn 本身**：5Mbps 档实测双向 0.32 MiB/s 封顶（见 ①-C）
+- iPhone 蜂窝实测走 **TURN/TCP**（v2 实录，`relay-iac/RUNBOOK.md:137`）；`401` 是 TURN 握手正常第一步，**给 coturn 上 fail2ban 是错的**（`RUNBOOK.md:476,483-484`）
+- coturn 会话关闭主因 `allocation timeout`（WebRTC 客户端不主动 refresh，正常）（`docs/coturn-relay-ops.md:431`）
+
+**隧道 relay 容量【未验证】**："单台容量未测：本进程是纯转发面，`LimitNOFILE=65535`、堆上限默认 512MB，但**没有隧道模式的并发/吞吐读数**……若单台被打爆，症状是 relay 侧 RSS 增长而非拒绝——需要 `desktopsOnline` 的观测与告警（未建）"——`docs/ops/tunnel-relay-deploy-2026-09-14.md:184-188`
+
+**信令 relay 容量【实测】**：见 ①-A（2C/1.9G → ~4.1k；4C/7.6G → 10000/10000 ×3 全存活；>10000 未测）。
+
+**成本/容量推导基线**（【文档推断】，v2 仓 `docs/capacity-plan-100k.md` + 本仓 `docs/metrics-baseline.md:177-203`）：10% 并发 = 1 万在线；中继均值 50kbps；日均 8h；0.8 元/GB。中继率 25% → 2500 并发中继 → 45TB/月 ≈ 3.6 万元（¥3.6/在线·月）；中继带宽需求 ≈ 在线数 × 中继率 × 0.5Mbps（1.3-2.5Gbps@万在线）。**口径警告【实测】**：同一组假设单向复算只有 13.5TB/月 ≈1.08 万——3.3× 差 = 时长（3×量级）× 方向（恰好 2×）× 通道成分（1.4×），收敛优先级 **时长 > 方向 > 通道**（`metrics-baseline.md:188-193`、`tc-cost-2026-09-15.md:151-161`）。
+
+---
+
+## 可迁移假设清单（→ p2p-net：WebRTC/werift/coturn/Supabase 同栈）
+
+| # | 假设内容 | 证据强度 | 迁移条件 |
+|---|---|---|---|
+| 1 | **ws 信令长连接：4C/7.6G 单机可承载 10000 并发在线**（真实 TLS+Supabase 双写在链路内，3 次独立复跑，异常断连 ≈0）；2C/1.9G ≈4.1k | 【实测】（该仓真跑） | p2p-net 信令若也是"ws + 邮箱双写"形态可直接引用；若 Supabase 写路径不同（如 Realtime）需重测。server 侧 RSS 极低（114-122MB@4.1k），容量瓶颈在建连 CPU 不在内存 |
+| 2 | **心跳必须「连续 N 拍（15s）无入站才割 + 任意入站帧刷新存活」**；单拍容忍（5s）在 WAN 拥塞窗口批量收割健康连接（opened→alive 可低到 11.8%） | 【实测】（对照实验钉死） | 直接移植语义即可（`relay-server.ts:96-98,241-252` 逐字可抄）；这是生产级隐患不只是压测假象——蜂窝 5s 级停顿是日常 |
+| 3 | **压测方法论：并发真值 = 服务端 healthz 采样，不信 driver `opened`**；driver 需多机多出口（单机 ~2k 端口耗尽、~6k 路径崩）；driver 定容 ≈1GB/1000 连接；爬坡 ≈200/s/台 | 【实测】（方法论）；定容规则【推断】n=1 | 工具 `scripts/signaling-load.mjs` + `signaling-distributed.sh` 可直接复用；p2p-net 若用 Supabase Realtime 需改写 driver 协议帧 |
+| 4 | **werift 0.24.4 getStats 判路径**：candidate-pair 无 `selected`，选定对 = `state==='succeeded'`（nominated 亦在）；`localCandidateId→local-candidate.candidateType`，relay=中继、host/srflx/prflx=直连；同对 `bytesSent/Received` 累计值做 wire 字节增量 | 【实测】（安装包源码 + 真机运行） | **版本锁 0.24.4**——其它 werift 版本行形状未验证；浏览器侧用 `selected===true`；代码可从 `packages/core/src/status.ts` + `facts.ts:430-489` 逐字移植。这直接满足"帧账本加路径类型"需求 |
+| 5 | **字节因子：p2p=0、tunnel≈1.17-1.20、TURN≈1.68（每 1 字节载荷在 relay 侧的字节）**；成本序 P2P < 隧道 < TURN 成立 | 【实测】（真 relay 链路，n≥3 轮 ×32MiB 双向） | 因子依赖帧协议形态：若 p2p-net 帧不用 base64，TURN 因子应降到 ~1.26（封装税）而非 1.68；**base64 是 4/3 协议税，砍帧格式即可回收 23-25% 成本**——先查 p2p-net 的帧编码 |
+| 6 | **TURN 单会话吞吐天花板 = VPS 出口带宽档**（5Mbps 档实测封顶 0.32 MiB/s，与 coturn/协议无关）；扩容 TURN 的性价比入口是换高带宽档节点 | 【实测】（三批一致） | 直接成立；容量方程里"会话带宽"即被 min（链路， 出口档） 钉死。coturn 每会话 ≈1 relay 端口，端口段按并发 ×1.2 配 |
+| 7 | **直连率（第一杠杆）高度环境分层**：云↔云 100%、家宽无 VPN 100%、家宽+VPN 0%、蜂窝+家庭 NAT 本轮 ≈0（v2 实测 1/3） | 【实测】（各分层均有对照实验） | p2p-net 的 direct_ratio 必须**分接入类型测量**（蜂窝/家宽/企业网），单一数字无意义；VPN 对 UDP 的破坏形态 = 单 socket 多目的地被钉流到首个目标（可观测规则已钉死）——前置门禁装置 `scripts/udp-preflight.mjs` 可移植 |
+| 8 | **TURN 凭据只下发单一 transport（UDP 优先）**；UDP+TCP 同时下发会因 ICE 竞争把成功率打到 33% | 【实测】（三臂 n=6×3） | 直接检查 p2p-net 的 turn-credentials 签发逻辑；蜂窝多出口 NAT 导致的出口 IP 漂移是运营商行为，缓解靠 ICE-restart 级联 |
+| 9 | **werift 同意黑洞：30s 无响应即永久静默丢包（假健康），无自愈**；每侧各自独立，看门狗（3s 周期查 `iceTransports[0].connection`，`setState('connected')+queryConsent()` 复活，上限 5 次）可兜底 | 【实测】（注入复现 3/3 + 公网现场 13 次死亡留痕） | **p2p-net 的 "~15min 周期死亡" 建议优先排查此族**（同意 30s 到期 × 网络瞬时态的间歇性命中，与"周期性"外观一致）；看门狗代码 `packages/node/src/transport/consent-watchdog.ts` 可直接移植，但注意它读 werift 未文档化字段；host 与 PWA 两侧都要装 |
+| 10 | **werift TS 栈吞吐**：单流 loopback 11.7 MB/s（4 vCPU）；1% 丢包 +60ms 跌到 4%；发送侧 DTLS ~12.5ms/消息；丢包下接收侧交付停滞缺陷未根除（T-B1 100% 复现） | 【实测】 | host done 时延 p90=53ms 的基线比对要在同拓扑做；**丢包下 per-stream 停滞（白屏级）是 werift 0.24.4 现存缺陷**——p2p-net 浸泡测试若见 stall，先按 #50/#69 两族判别（交付停滞 vs 同意黑洞，现场签名不同：前者 buffered=0 帧仍流入，后者 buffered 钉死零发包） |
+| 11 | **TLS 建连吞吐是信令机第一约束**：2C ≈17-60/s（突发越长尾越低）；「随核数近似线性」 | 【实测】2C 单点；线性外推【推断】 | p2p-net 容量方程的"上线速率"维度：万级用户同时重连（断网恢复风暴）时建连速率是闸门；4C 门禁档 400/s 聚合爬坡未饱和（load 峰值 0.72） |
+| 12 | **成本方程口径**：单向/双向计费贡献恰好 2×；通道成分 1.4×；日均负载时长 ≈3× 是最大开口项；账单门禁 5 万元/月、单位成本 ≤¥4.0/在线·月 | 【实测】（方向与通道）；时长【推断】 | p2p-net 二期容量方程必须先把"VPS 计费方向"问清（控制台账单），再用 30 天真实会话时长分布收敛最大项；否则 3.3× 不确定性直接吞掉所有精度 |
+
+**该仓明确未测、迁移时不能引用的项**：>10000 信令并发（12500/15000/20000 档未跑）；隧道 relay 单机容量；qps/online 0.0099 在 9-17 复测未重算（仍是 9-14 历史值）；driver 定容规则（n=1）；relay-jk "疑似 OOM"（无证据）；核数线性外推。</subagent>
+<subagent agent_id="agent-57" item="深挖 /Users/separationofconcerns/Documents/TryEverything/DevAnyWhere-v3/cores/devanywhere-net 的【成本实验】：①tc-cost 实验全家：TURN 字节因子 1.68 的测量方法（对照组怎么搭、算了哪些字节）、中继成本账务口径；②任何直连率/中继率的实测分布数据与影响直连率的尝试（IPv6、NAT 类型、STUN 配置、候选优先级）；③TURN 双 transport 实验（UDP-only 6/6、TCP-only 5/6、both 2/6）的成本含义；④base64 税（33%）与二进制帧的省字节测算；⑤压缩（gzip/zstd）到底做没做过（grep 实证），没做就确认是处女地。给出每个实验的目录/文件位置与关键数字。" outcome="completed"># devanywhere-net 成本专项调研报告
+
+仓库：`/Users/separationofconcerns/Documents/TryEverything/DevAnyWhere-v3/cores/devanywhere-net`（下称 net 仓）。全部结论标注证据等级，量化数据原文照抄。
+
+## 实验资产地图
+
+| 资产 | 位置 |
+|---|---|
+| T-C 成本序实测报告（主报告） | `docs/benchmark/tc-cost-2026-09-15.md` |
+| p2p 腿隔离实验（干净云机 peer） | `docs/benchmark/tc-b-experiment-2026-09-15.md` |
+| VPN on/off 对照（A 实验） | `docs/benchmark/tc-a-experiment-2026-09-16.md` |
+| VPN 绕过四方案矩阵 | `docs/benchmark/vpn-bypass-matrix-2026-09-16.md` |
+| 真机 24 格矩阵（含 TURN 双 transport 实验） | `docs/field-acceptance/2026-09-17-full-matrix-and-baseline.md` |
+| 记账纯函数（成本算法唯一事实源） | `packages/bench/src/scenarios/tc-accounting.ts` |
+| 采集探针 | `scripts/tc-probe.mjs`、`scripts/udp-preflight.mjs` |
+| 原始 artifact（绝不覆盖纪律存档） | `bench/runs/tc-202609*.json`（11 条 T-C 批次） |
+| TURN 凭据函数（双 transport 修复落点） | `supabase/functions/turn-credentials/index.ts` |
+
+## ① TURN 字节因子 1.68：测量方法与账务口径【实测】
+
+**对照组怎么搭**（tc-cost:6）：host = relay-sh2（腾讯云上海 4C/7.6G），peer = 操作机 Mac（家宽 NAT），TURN 服务器 = relay-sh（火山 5 Mbps 档）。载荷 = **3 轮 × 32 MiB × 2 方向 = 201 326 592 B**（tc-cost:52），双向各 3 有效轮，CV 1.3%/5.6%（tc-cost:31）。三批独立采集（22:10 / 22:47 / 23:10）读数一致（0.30–0.34 MiB/s），"可复现性最好"（tc-cost:39-40）。
+
+**算了哪些字节**（tc-cost:48-57 + `tc-accounting.ts:39-53,69-89`）：
+- peer 腿 = `getStats` **选定候选对字节增量**（wire 字节，含 DTLS/SCTP/UDP 封装）；tunnel 无 getStats 用 HTTP body 近似（低估 ~1%）；
+- desktop 腿 = host 侧帧计数（JSON 串长）；TURN 的 host 腿"按对称计"——`tc-accounting.ts:129-141`：「peer 腿实测 rx≈D·w、tx≈U·w，故双腿总 egress = tx+rx」；
+- tx/rx 分开、app/wire 分开，"每个因子都有名有姓"（tc-accounting.ts:4-6）。
+
+**1.68 的原始账**（artifact `bench/runs/tc-2026091514595-8307b9-T-C-turn.json` 的 `raw.cost.account`，我用 python 复核）：peerLegTx=175 061 319、peerLegRx=163 136 005，(tx+rx)/payload = **1.6798442800839741**（tc-cost:63 同数）。
+
+**账务口径**：
+- 单价 **0.8 元/GB**（`tc-accounting.ts:17-18`）；三口径并列：①单向（egress）②双向（ingress+egress）③固定带宽折算（tc-cost:75-76）。
+- 成本表（tc-cost:80-84）：TURN 单向 **1.344** / 双向 2.688；隧道 prod 单向 **0.933** / 双向 1.890；隧道 rig 0.400；P2P = 0。「成本决策用 prod 列」（tc-cost:90）。
+- **rig vs prod 双列**：rig=采集拓扑（desktop 与 relay 同机走回环），prod=生产外推（两腿都出公网 NIC）；「隧道省的是公网腿，省不掉 desktop 腿」——隧道 prod 是 rig 的 2.3 倍（tc-cost:86-89）。
+- 固定带宽口径（tc-cost:94-110 + `tc-accounting.ts:209-233`）：月出公网 = 带宽 × 31557600/12 s × u；**5 Mbps 档 u=50% → 0.8 TB/月**；盈亏平衡「**每 100 元月租换 125 GB/月**」；「5 Mbps 档节点月供载荷能力 ≈ 0.8 TB ÷ 1.68 ≈ **0.48 TB**（u=50% 计）」。
+- **采集器缺陷留痕**（tc-cost:68-71）：旧版隧道腿双重计数曾把成本序打成"贴脸"（1.333 vs 1.344），修正后 prod 因子 1.196/1.167——教训：字节账的计数器本身要做对账实验。
+- **#15 的 3.3× 矛盾**：方向口径只贡献 ~2×（两通道都是，tc-cost:114-124），剩余因子候选是日均时长（8h vs 全天 = 3×），**未闭合**，收敛优先级「时长 > 方向 > 通道成分」（tc-cost:160-161）。
+
+## ② 直连率/中继率实测分布与干预尝试
+
+| 场景 | 直连率 | 等级 | 位置 |
+|---|---|---|---|
+| Mac 家宽 + VPN ON（家宽 NAT ↔ 云 host） | **0/5** | 【实测】 | tc-cost:165,29 |
+| 干净云机 peer（relay-sh 1:1 NAT）↔ 云 host | **10/10，384 MiB 全对账** | 【实测】 | tc-b:18-21,169-176 |
+| 同 Mac，VPN OFF（唯一变量） | **5/5，下行 9.97 MiB/s**（TURN 兜底仅 0.32） | 【实测】 | tc-a:41-52 |
+| VPN ON + host 路由例外（A-B-A 反转闭环） | **5/5，下行 6.48 MiB/s** | 【实测】 | vpn-bypass:60-65 |
+| **真机蜂窝（电信）↔ 家宽，12 格 p2p 档** | **全部落到 relay（直连 0）** | 【实测】 | full-matrix:82,144-151 |
+| v2 时代蜂窝↔家庭 NAT | 1/3（跨仓引用，本仓未复测） | 【文档推断】 | full-matrix:150 |
+
+**机制级发现（全是实测）**：
+- **失败定因**：VPN 使「单 socket 多目的地 UDP 被钉到首个目标端口/整体丢失」（udp-preflight A/B/C 三组对照，tc-cost:178-194；on/off 18/18 钉流↔18/18 正确，tc-a:32-35）。werift 恰是"单 socket 多目的地"形态（tc-cost:188-190）。
+- **云 host 侧**：安全组对**无会话入向 UDP 一律丢弃**（host 侧 50 次 STUN 事务超时），打洞靠 **peer 发起、host 回包**的路径成功（tc-b:30-32,186-190）；云 host 需 `--ice-port-range 50000-50019` 落在放行段（tc-cost:200）。
+- **VPN 绕过四方案全部实测有效**（vpn-bypass:24-29）：A1 `IP_BOUND_IF=en0`、A1-node 绑定源地址、A3 每目标独立 socket 均 18/18 恢复；A2 host route 完成端到端判决。落地评估：A1 最优（用户态、随库分发），但跨平台等价物未测（vpn-bypass:96-106,124-127）。
+- **IPv6**：仅作为候选之一出现（tc-cost:189），**无专项实验**【未验证】。
+- **STUN 配置**：p2p 档只用自建 coturn 做 STUN、不含 TURN 候选（`docs/architecture.md:88`）；「STUN 服务器多样性」只是建议，未做（full-matrix:174）【未验证】。
+- **口径警告**：直连占比口径曾三处互斥（按字节/时间加权/按会话数），2026-09-13 定稿**按字节**（`docs/control-spec.md:621`）。目标档：GA ≥75% / COM ≥85% / STR ≥92%（`metrics-baseline.md:197`），行业锚 S13 ~80%、S11 Tailscale >90%（:51,53）。
+
+## ③ TURN 双 transport 实验【实测】
+
+位置：`docs/field-acceptance/2026-09-17-full-matrix-and-baseline.md:86-142`，实体机蜂窝、三臂对照（n=6×3，唯一变量 = transport）：
+
+| 臂 | 配置 | 成功率 |
+|---|---|---|
+| A | UDP only | **6/6 = 100%** |
+| B | TCP only | 5/6 = 83% |
+| C | **both（旧生产配置）** | **2/6 = 33%** |
+
+机制（full-matrix:113-116）：「同时下发两个 TURN URL 时，ICE agent 在两条 relay 路径间竞争，导致 TURN allocation 冲突与 15s 超时」；失败时 coturn 记 `allocation timeout` / `stale session state`（:96-99）。修复已落地：`supabase/functions/turn-credentials/index.ts:41-58` 默认只发 `?transport=udp`，修复后验证 **5/6 = 83%**（:131-134）；残留 1/6 归因为**蜂窝多出口 NAT**（同会话两个出口 IP `36.112.201.175`/`106.37.77.38`，运营商侧，:136-139）。
+
+**成本含义**：①both 配置下 2/3 的 TURN 会话连不上 → 重试/降级会放大信令与建链开销；②TCP-only 本就 83% 且 TURN-over-TCP 吞吐更差，UDP 优先是成本与成功率双赢；③TURN 档建链 4158–6738 ms vs 隧道 460–1752 ms（full-matrix:71-73），慢建链本身也是会话成本。
+
+## ④ base64 税（33%）与二进制帧测算【实测发现 + 文档推断测算，未实施】
+
+- 实测：「每 16384 B 应答片编成 21 848 chars（4/3）。**每 1 GB 载荷 = 1.333 GB 上路**；JSON 包装 + DTLS/SCTP/UDP 头把 1.333 抬到 TURN 实测的 **1.680**（1.26×）」（tc-cost:135-141）。隧道 desktop 腿字节账直接可见 4/3：140 102 039 ≈ 96 MiB × 4/3（tc-cost:65-66）。
+- 砍掉后的测算【文档推断】：「TURN 单向单位成本：1.344 → 约 1.01 元/载荷 GB（**−25%**）；隧道 desktop 腿：1.167 → 约 0.9（−23%）」（tc-cost:142-146）。落点写明 `packages/core/src/frames.ts`（`chunkB64` 面），「建议单独立项（本批只管测出来）」（tc-cost:148-149）。
+- **现状核实**：二进制帧至今未实施——DataChannel 仍发 JSON 字符串（`packages/node/src/bridge/http.ts:120`、`packages/browser/src/webrtc-session.ts:237`、`packages/browser/src/cascade.ts:129` 的 `JSON.stringify(frame)`），`chunkB64`/`dataB64`/`bodyB64` 遍布 core/node/browser 三端。issue-ledger 与 roadmap 无对应已完成项。**这层税原样保留，是 p2p-net 可直接收割的存量。**
+
+## ⑤ 压缩：grep 实证【未验证 = 处女地】
+
+- **zstd / CompressionStream / permessage-deflate：全仓 0 命中**（含 docs、packages、scripts、relay-iac、supabase）。
+- gzip 的出现处全部**与数据面无关**：`packages/bench/src/payload/shell.ts:21,87`（W 层静态资源 gzip 字节预算，判定用 gzip、brotli 仅参考）、`relay-iac/lib/payload-init.sh:200`（Caddy `encode gzip` 静态站）、`.gitignore:46-47`（证据归档压缩，`*.jsonl.gz`，"压缩比实测 ~40×"）、`docs/field-acceptance/2026-09-17-l0-rum-first-measurement.md:94`（HTML gzip 后 0.87 KB 的观测）。
+- **反向证据**：bench 负载**故意不可压缩**——「确定性负载（非随机）避免压缩/随机性引入变量」（`packages/bench/src/harness/echo-server.ts:4`、`docs/benchmark/baseline-v0.md:66`）。即现有全部吞吐/字节因子读数都是在不可压缩字节流下测的，**数据面压缩对成本因子的影响从未被测过**。
+
+## 可迁移假设清单（→ p2p-net：WebRTC/werift/coturn/Supabase）
+
+| # | 假设 | 证据强度 | 迁移条件 |
+|---|---|---|---|
+| 1 | TURN 中继字节因子 ≈1.68/载荷 GB（base64 4/3 + WebRTC 封装 1.26×），单向 0.8 元/GB 下 ≈1.34 元/GB | 【实测】 | p2p-net 若沿用 base64 JSON 帧则直接继承；上二进制帧后预期 ≈1.26，须用 getStats 候选对增量复测（方法照抄 `tc-accounting.ts`） |
+| 2 | 成本序 P2P(0) < 隧道（0.933) < TURN(1.344)，隧道 prod 是 rig 的 2.3 倍 | 【实测】 | 需 p2p-net 有反向隧道兜底通道；werift+ws 栈同构，算法可直接搬 `trafficCostRow`/`planGOrderVerdict` |
+| 3 | 单向/双向计费口径差 ~2×；时长假设差 ~3×，是成本方程最大不确定项 | 【实测】(2×)【推断】(3×) | 先核实 p2p-net 目标 VPS 供应商计费方向；30 天真实计量前预算按双向留误差带 |
+| 4 | 固定带宽档盈亏平衡：每 100 元月租 ⇔ 125 GB/月；5 Mbps 节点月供载荷 ≈0.48 TB(u=50%) | 【实测】（公式+容量） | 拿 p2p-net 真实 VPS 账单填入 `impliedYuanPerPayloadGb` 公式即可 |
+| 5 | **TURN 凭据只下发单一 transport**：both=33%、UDP-only=100%、TCP-only=83% | 【实测】 | p2p-net 栈同构（coturn + Supabase Edge Function 签 REST 凭据）→ 直接适用；函数改动 ~5 行（照 `turn-credentials/index.ts:54-58`） |
+| 6 | 蜂窝多出口 NAT 使 TURN allocation 判 stale（残留 1/6 失败），需 ICE-restart 级联 | 【实测】（现象）/【未验证】（缓解效果） | coturn 行为与栈无关，p2p-net 蜂窝场景同样会撞上；需实现 UDP 失败→ICE-restart→TCP 的恢复轮并复测 n≥20 |
+| 7 | 砍 base64 税：TURN −25%、隧道 desktop 腿 −23% | 【文档推断】（由实测字节账推算，未做隔离实验） | p2p-net 二期直接上二进制帧（DC 支持 binary），上线前后各测一次字节因子即完成隔离验证 |
+| 8 | 数据面压缩（gzip/zstd）对中继成本的影响 | 【未验证】= 处女地 | 需先换可压缩负载（现 bench 负载故意不可压缩），再测压缩后因子 vs CPU 代价 |
+| 9 | VPN 用户直连率被"单 socket 多目的地钉流"杀死；绑接口/绑源地址/每目标 socket 可救 | 【实测】（样本=1 款 VPN）/【未验证】（泛化） | werift 同为单 socket ICE 形态 → p2p-net 同样脆弱；host 侧部署文档应写"UDP 端口段放行 + 依赖 cone NAT"，客户端侧绑接口需 native 能力评估 |
+| 10 | 云 host 安全组丢无会话入向 UDP，打洞靠 peer 发起路径成功 | 【实测】 | p2p-net 的 host 若部署在云 VPS，放行段 + stateful 回包规则照抄即可（relay-iac 已有） |
+| 11 | 行业直连率锚 ~80%（STUN 可解）/ Tailscale >90%；v2 蜂窝↔家宽实测 1/3 | 【文档推断】（引用）/【文档推断】（跨仓） | p2p-net 二期必须自测真实分布（蜂窝×家宽×运营商矩阵），这是容量方程第一杠杆，不能引用 |
+| 12 | 4C/7G 单机信令长连接 1 万并发全存活（3/3 复跑） | 【实测】 | p2p-net 若用 Supabase 长连接信令，容量参照点可用；注意其被测是自建 relay 非 Supabase 本体 |
+| 13 | TURN 吞吐天花板 = 节点带宽档（5 Mbps 档实测 0.32 MiB/s，三批可复现），非 coturn/协议限制 | 【实测】 | 容量方程中 TURN 节点按带宽档计数；p2p-net 测 coturn 时先钉死节点出口档再归因 |
+
+**给 p2p-net 二期的三句话**：①字节因子测量装置（getStats 增量 + tx/rx 分开 + rig/prod 双列）可以整套搬走，`tc-accounting.ts` 是现成的纯函数；②最大的两个立即可收割项 = 单 transport 凭据（成功率 33%→83%+）与二进制帧（−25% TURN 成本），前者一天能落地，后者是存量的税；③直连率的真实分布（尤其蜂窝×家宽）在该仓也是 0/1/3 的残缺状态，且"蜂窝直连占比"在其 metrics-baseline §5 里仍标`待测`——这是两个项目共同的最大空白，谁先做矩阵谁拿到容量方程的第一杠杆。</subagent>
+<subagent agent_id="agent-58" item="盘点 /Users/separationofconcerns/Documents/stripe/DevAnyWhere 的【成本资产】：①docs/capacity-plan-100k.md 的假设证据链——50~100kbps 会话带宽、25% 中继率、45TB/月、3.6万元/月这些数字各自的出处是实测还是拍脑袋；②docs/coturn-relay-ops.md 的 VPS 规格/带宽计费/容量实录（如 bj2 30Mbps、月供 2.9TB@u50%），有没有真实账单/流量监控数据；③poc/webrtc-pwa 与 supabase/ 里关于信令成本、Supabase 用量/限额、TURN 凭据函数的任何成本相关记录；④draft-ideas 里全中转 vs P2P 的测算原文数字。" outcome="completed"># DevAnyWhere 仓【成本资产】盘点报告
+
+先说一个重要更正：任务里举例的「bj2 30Mbps、月供 2.9TB@u50%」在本仓**不存在**（全仓 grep `bj2|30Mbps|2.9TB|流量包` 零命中）。仓内真实的 VPS 记录是 relay-bj/sh/gz 三台**固定带宽**机，且**没有任何真实账单或流量监控数据**——「按流量计费」在文档里还是待办项。以下逐块给证据。
+
+---
+
+## ① capacity-plan-100k.md 假设证据链（逐数字溯源）
+
+| 数字 | 原文 | 出处与性质判定 |
+|---|---|---|
+| 50~100kbps 会话带宽 | 「Claude Code Web UI 流量画像：文本流式输出为主，平均约 **50~100 kbps**，峰值 ~1Mbps」（docs/capacity-plan-100k.md:18） | **弱实测背书**。唯一实测佐证是 first-live-run-report.md:38「流量画像实证：首次页面加载 ~4.9MB（一次性、走中继、可被浏览器缓存摊薄），会话期 ~170KB。与容量测算的"均值 50~100kbps、峰值 ~1Mbps"假设一致，模型可信」——但这是 **n=1 的一次真机会话**（2026-07-28，数据在 first-live-run-report.md:23-24：手机 rx 67.2kB/tx 100.4kB，广州中继 tx 4.92MB），且 170KB 摊到分钟级会话远低于 50kbps，「一致」的判词偏宽。第二个数据点：iPhone 5G 会话 relay 流量约 1MB / 5 分钟（docs/coturn-relay-ops.md:283、427）。**稳态码率从未实测** |
+| 25% 中继率 | 「按 25% 中继率 ≈ 支撑 **500 同时在线**」（capacity-plan-100k.md:22）；「中继率 25% = **2500 并发中继**」（:23） | **未验证（拍脑袋）**。全仓没有任何中继率统计。唯一 NAT 实测样本是最难组合「对称↔端口受限」（docs/p2p-experiment-2.1-report.md:8-9,17：A2 打洞❌→relay），且同一场景给足时间后**升级成了 DIRECT p2p**（first-live-run-report.md:22「**DIRECT p2p（udp），551ms**」、:36「中继的角色应从"终身通道"重新定义为"暖场通道"」）。capacity-plan:12 自己写「对称 NAT 用户（实测存在，实验 2.1）」——实测存在的只是「对称 NAT 存在」，不是 25% 这个率 |
+| 45TB/月 | 「2500 并发中继 × 50kbps 均值（文本 UI 实际均值）× 日均 8 小时负载 ≈ **45 TB/月**」（capacity-plan-100k.md:29） | **文档推断**（纯算术：2500×50kbps×8h×30d≈45TB）。三个乘数全是假设。「文本 UI 实际均值」的"实际"二字名不副实 |
+| 3.6 万元/月 | 「≈ **3.6 万元/月**」（capacity-plan-100k.md:29）；悲观 14 万/月（:30）；收入对照 10 万/月（:31） | **文档推断**。单价「约 0.8 元/GB」（:27）**无出处、无账单**；且当前三台 VPS 是固定带宽 3M/5M/5M，「VPS 改按流量计费（待查控制台）」（docs/handoff-0.9.19-cleanup-roadmap.md:66）——计费模式本身还没发生 |
+| 「+10% 打洞率 ≈ 中继成本 -40%」 | capacity-plan-100k.md:37 | **文档推断**，无推导过程 |
+| 扩容公式 | 「中继带宽需求（Mbps) ≈ 在线数 × 中继率 × 0.5；单台 5M 节点按 70% 水位告警即加机」（capacity-plan-100k.md:44） | **文档推断**。注意与 :23 的 0.5~1Mbps/会话口径一致，但与 :29 的 50kbps 成本口径差 10~20 倍（带宽按峰值、成本按均值，合理但需意识到是两本账） |
+
+补充：13Mbps 总带宽、130 并发中继、500 在线、1.3~2.5Gbps 扩容需求这组数在 handoff-0.9.19-cleanup-roadmap.md:64 被原样复述（「费用测算约 3.6 万/月与预期收入紧平衡」），属同一模型的二手引用，不是独立证据。
+
+---
+
+## ② coturn-relay-ops.md 的 VPS 规格 / 计费 / 容量实录
+
+**真实规格**（docs/p2p-relay-vps-ops.md:10-12，2026-07-27 建制）：
+- relay-bj 39.106.59.183 阿里云北京 **2C/1.6G** Ubuntu 24.04，**3M** 固定带宽
+- relay-sh 14.103.82.152 / relay-gz 118.145.226.60 火山引擎 **2C/1.9G**，各 **5M**
+
+**计费：没有任何真实账单/流量监控数据。** 反证：handoff-0.9.19-cleanup-roadmap.md:66「Prometheus 采集+70% 水位告警（现仅人工 checklist）」「VPS 改按流量计费（待查控制台）」——监控和按流量计费都未落地。coturn-relay-ops.md:20 只有出口带宽对体验的影响记录：「出口带宽 | 3Mbps（体验瓶颈，bundle 2.7MB 首屏 10-20s）」。
+
+**容量实录（均为真跑过的，判【实测】）**：
+- TURN 端口容量模型：「生产每并发会话约消耗 1 个端口」「按『并发会话数 × ~1.2』估端口数」（coturn-relay-ops.md:55-56、216-218）——spike 收窄到 udp 50000-50019 共 20 端口，实机 4×allocate 成功（:281）
+- iPhone 5G 蜂窝基线（2026-09-06 00:09-00:14 UTC+8，:281-283、424-435）：「4×allocate 成功（udp+tcp 混合，实际数据走 TURN/TCP），DataChannel 建立、登录、shell 交互全通，会话 relay 流量约 1MB」
+- CloudCLI 套件跨 NAT relay 13/13 pass（:269）
+- 批量传输期 RTT 实测（修复后）：「RTT = 189→100→92→18→22ms」（:382-383）
+- **与 p2p-net「~15min 周期死亡」可能相关的实测线索**：「会话关闭原因统计：多数 `allocation timeout`（WebRTC 客户端不主动 refresh，正常）」（:432）——coturn allocation 默认生命周期约 10 分钟，客户端不 refresh 即被回收，这是 TURN 栈的固有周期，值得 p2p-net 对照
+- 滥用审计实录（:409-422）：613 行日志、4 个 IP 全是自己人、22 次 401 均为正常握手——公网 TURN 零滥用（截至 2026-09-06）
+
+---
+
+## ③ poc/webrtc-pwa 与 supabase/ 的成本相关记录
+
+**信令成本**：无任何量化测算，只有定性断言——「起见/信令/心跳/路由同步…**极小**（KB/s 级/节点）」（capacity-plan-100k.md:10）；「信令 | Supabase Realtime / 自研 WS | 只传 SDP，极轻」（docs/proposals/proposal-e-webrtc-pwa.html:106）。POC 信令实现是零依赖轮询邮箱：内存 200 条封顶、TTL 120s、无鉴权无房间（poc/webrtc-pwa/server.js:17-18、39-49），文档自认「POC 的轮询邮箱无鉴权无房间，仅 POC 级，产品化时整体替换」（docs/superpowers/specs/2026-09-05-rearchitecture-design.md:76）。**未压测**。
+
+**Supabase 用量/限额**：**全仓零记录**（grep 限额/额度/egress/quota 无命中）。VERSIONS.md:34-38 只登记了 project-ref `lyfyzzgviwpxtpylbzcx` 与 3 个 Edge Functions。v2 架构已拍板「A2 信令 = **Supabase Edge Function / Realtime**」（rearchitecture-design.md:25），但 Realtime 并发连接数/消息量限额从未在本仓调研过。
+
+**TURN 凭据函数**：**不存在**。supabase/functions/ 只有 claim-invite（Turnstile 防滥用+一机一码）、redeem-pairing-ticket（122bit UUID+短 TTL+原子单次消费）、seed-stats（种子计数，max-age=10 缓存）。TURN 凭据目前只有 coturn 静态明文凭据 `dva:7352…`（coturn-relay-ops.md:16），换 TURN REST API 临时凭据（`use-auth-secret` + HMAC-SHA1）是写明但未做的生产化债务（coturn-relay-ops.md:389-392；rearchitecture-design.md:77、176）。
+
+**字节量埋点**：POC host 页有 rxBytes/txBytes 计数器（poc/webrtc-pwa/host/index.html:77、129、137、206，仅 UI 显示，不落盘不上报）。bench 实测数据在 results.log：入口 HTML bytes=6842 耗时 674~796ms、bundle 2752642B 在 relay 路径 0.13~0.25 MiB/s、connect 8154~11883ms（2026-09-17，prflx/relay 与 relay/relay 两种 pair）。**遥测管线**（NAT 类型/打洞成功率/中继延迟上报 Supabase `report_event`）代码存在但**默认关闭**（cli/lib/cloud.js:201-203），仓内无任何回收数据分析。
+
+---
+
+## ④ draft-ideas 全中转 vs P2P 测算原文
+
+出处是 2026-08-04 与 Google AI Studio 的对话记录（AI 估算，非实测，判【文档推断】），draft-ideas/10万用户手机上使用电脑上的Claude code.md：
+
+- :772「高峰期有 **10% 用户同时在线（1 万并发）**…平均仅占用 **1 Mbps** 带宽」
+- :776「**所需公网带宽**：10,000 × 1 Mbps = **10 Gbps**」
+- :777「国内云厂商（腾讯云/阿里云）10 Gbps 的公网带宽/流量费，**每月成本高达数十万甚至上百万元人民币**」
+- :780「**70%~80% 的流量**…**P2P 直连**，不经过 VPS」
+- :782「**所需公网中继带宽**：降至 **1~2 Gbps** 甚至更低」
+- :783「**流量与带宽成本直接暴降 80% 以上！**」
+- :905「即使是 1核1G、1~2Mbps 带宽的最低配轻量服务器即可，**月费十几块钱**」
+
+仓内另一处同口径独立推演（同样纯文档）：方案 B 全中转「按 10 万用户/1 万在线/50~100kbps 测算约 **90~180TB/月 ≈ 7~14 万元/月（0.8 元/GB）**」（docs/proposals/proposal-b-reverse-tunnel.html:136）——注意这里的 50~100kbps 和 0.8 元/GB 与 capacity-plan 同源，互为循环引用，不是交叉验证。
+
+---
+
+## 可迁移假设清单（→ p2p-net：WebRTC/werift/coturn/Supabase）
+
+| # | 假设内容 | 证据强度 | 迁移条件 |
+|---|---|---|---|
+| 1 | 文本流式远控会话带宽 50~100kbps、峰值~1Mbps | 弱实测（n=2 会话：~170KB 会话期、1MB/5min relay；无稳态码率测量） | 流量画像同为 Claude Code Web UI 可借用方向值；须在 werift DataChannel 上实测稳态码率——SCTP/TURN/TCP 与 EasyTier 隧道开销结构不同，且本仓实测 relay 路径 bundle 仅 0.13~0.25 MiB/s，3M 带宽即瓶颈 |
+| 2 | 中继率 25%（悲观 40%） | 未验证（无任何统计；唯一 n=1 最难 NAT 样本先 relay 后打穿） | **不可直迁**。WebRTC/ICE 打洞率与 EasyTier 不具可比性（回退路径更丰富，含 TURN/TCP）；p2p-net 必须用 getStats candidate-pair 类型自建分布统计（POC 已有现成读法：pwa/local/index.html:58-72） |
+| 3 | 45TB/月、3.6 万元/月（0.8 元/GB） | 文档推断（算术正确，三个乘数+单价全无实测） | 用 p2p-net 实测中继率×会话带宽重算；0.8 元/GB 需以目标云厂商控制台按流量报价核实（本仓 VPS 至今是固定带宽，零账单数据） |
+| 4 | 全中转 10Gbps→数十万/月，P2P 降 80%+ | 文档推断（AI 对话估算） | 结构性结论（直连不占 VPS 带宽）对 WebRTC 同样成立；量级数字不可引用 |
+| 5 | 中继是「暖场通道」：relay→DIRECT 分钟级后台升级，中继成本随后归零 | 实测 n=1（EasyTier，first-live-run-report.md:22,36） | **机制不可直迁**：ICE 连通性检查在建连期定型，不会后台从 relay 升级 host/srflx；p2p-net 若想要同等效应需自实现 ICE restart 重选策略。若成立，45TB 账本可再降 |
+| 6 | TURN 每并发会话 ≈1 个 relay 端口，端口数按并发×1.2 估 | 实测（coturn 4.6.1 实机，20 端口段 4 allocate） | 同栈（coturn）直接可迁 |
+| 7 | iPhone 蜂窝实际走 TURN/TCP；3478 tcp 必开 | 实测（coturn journal，udp+tcp allocate 并存、数据走 TCP） | 同栈直接可迁 |
+| 8 | TURN allocation 不 refresh 即 ~10min 级超时回收（会话关闭主因） | 实测（coturn 日志统计） | 同栈直接可迁；疑似与 p2p-net v0.1.0「~15min 周期死亡」同源，优先排查 host 侧（werift）是否周期发 TURN refresh/permission |
+| 9 | 信令成本「极小、KB/s 级」，Supabase Realtime 可承载 | 文档推断（POC 轮询邮箱无鉴权无压测；Realtime 未上线、限额零调研） | p2p-net 落 Supabase Realtime 前必须自测：并发连接数、消息速率、免费/Pro 档限额——本仓给不了任何数 |
+| 10 | TURN REST API 临时凭据（HMAC-SHA1）方案 | 文档推断（方案成文，代码未写，现网跑静态明文） | p2p-net 需自建签发（Supabase Edge Function 算 HMAC-SHA1(username) 很自然），本仓无代码可搬 |
+| 11 | 「+10% 打洞率 ≈ 中继成本 -40%」 | 文档推断（无推导） | 方向正确（成本与（1−直连率） 线性），具体系数用 p2p-net 自己的中继率重算 |
+
+**给二期容量方程的一句话输入**：本仓能提供的是「成本方程的骨架 + 同栈 coturn 运维参数（端口/协议/allocation 生命周期）+ 两组弱实测流量数据点」；方程里四个关键乘数（中继率、会话带宽、单价、字节因子）在本仓**无一有实测或账单支撑**，p2p-net 的成本专项需要自己把这四个数测出来，其中中继率因栈不同（ICE vs EasyTier 打洞）必须重测、不能借用 25%。</subagent>
+<subagent agent_id="agent-59" item="盘点 /Users/separationofconcerns/Documents/money/DevAnyWhere 的【成本与容量工作】：这条 v2.0.0-beta 线在性能/健康/成本上推进了什么？找：①中继分级/限速/计费相关实现或文档（capacity-plan 提过「中继限速分级」「按流量计费」「--foreign-relay-bps-limit」类机制是否落地过）；②任何容量/压测/带宽实测数据；③直连率提升的尝试（IPv6、UPnP、NAT 引导、客户端展示 P2P/中继状态）；④监控告警（中继流量占比、带宽水位、扩容触发点）的实际代码或配置。给出每项的位置与量化结果。" outcome="completed">探索完成。以下为盘点报告。
+
+# 钱仓 v2.0.0-beta 线「成本与容量」工作盘点
+
+**总判断**：这条线（beta.1→beta.11，2026-09-05→09-12）的主线是「打通 + 稳定」，成本专项**没有作为独立工作流推进**。capacity-plan-100k.md 提出的三大降本杠杆中，只有「防白嫖 + 兜底顺序」类措施落了地；**中继限速分级、中继流量监控、扩容告警全部停留在文档占位**（明确推迟到 M3 计费里程碑）。实测数据集中在「小水管 relay 的真实体验」和「蜂窝直连率小样本 A/B」两块，对 p2p-net 二期有直接参考价值。
+
+## ① 中继分级 / 限速 / 计费：【未落地，仅文档占位】
+
+- **限速分级推迟到 M3**：再架构定稿写明「免费档中继限速分级本期仅占位，M3 计费上线时实施」——`docs/superpowers/specs/2026-09-05-rearchitecture-design.md:26`（A3 决策）；同文 :156「TURN 限速分级：免费档中继限速（capacity-plan-100k.md 的降本杠杆）M1 仅占位记录，M3 实施」；M3 定义 =「Stripe 订阅 + entitlement enforcement + TURN 限速分级」:165。截至 beta.11（09-12）M3 未开始。
+- **`--foreign-relay-bps-limit` 全仓只出现 1 次**，在 `docs/origin/capacity-plan-100k.md:39`——那是 EasyTier 老线的 flag，v2 线不用 EasyTier，**从未在任何配置或代码中落地**。
+- **devanywhere-p2p 库内无任何限速代码**：对 `cores/devanywhere-p2p` 全部 `.ts` 搜 `limit|quota|throttl|bps|bandwidth` 零命中（隧道 relay `src/tunnel/relay.ts:98-342` 纯转发，连字节计数都没有）。
+- **coturn 实机配置无限速项**：`/etc/turnserver.conf` 全文实录（`docs/coturn-relay-ops.md:36-48`）只有 listening-port/external-ip/min-max-port/use-auth-secret/realm，无 `max-bps`/`user-quota`/`total-quota`。
+- **已落地的成本控制替代物**（【实测】）：
+  - **TURN REST 临时凭据**：`use-auth-secret` + Supabase Edge Function 签发，username=`<unix到期>:<uid前8位>`、credential=HMAC-SHA1(secret)，**ttl = 3600×6 = 6h**（`devanywhere-website/supabase/functions/turn-credentials/index.ts:37-38`）；实测旧静态凭据 30s 内无法建连（`docs/coturn-relay-ops.md:460-462`）。
+  - **级联顺序即成本裁决**：「relay 服务器仅兜底控成本——TURN 是最后一段」（`devanywhere-client/pwa/src/session.ts:3`；`docs/relay-deployment.md:98`「P2P → 隧道 → TURN 的顺序是产品定案」）。超时参数 `CASCADE_TIMEOUT_MS = { p2p: 10_000, p2pFull: 15_000, tunnel: 6_000, turn: 15_000 }`（`devanywhere-client/pwa/src/config.ts:36`）。
+  - 计费侧只有商业决策文字：D2 种子限免到 2026-09-30、M3 Stripe（`docs/superpowers/specs/2026-09-05-rearchitecture-design.md:42,155`）。【文档推断】
+
+## ② 容量 / 压测 / 带宽实测数据
+
+**实测（真跑过、有数据）：**
+
+| 数据 | 原文 | 位置 |
+|---|---|---|
+| 小样本功能压测 | 「带负载压测（8 轮×3 并发 + 2 轮切网）`200=21 / 失败=3`，3 次失败全部发生在断网窗口内；网络恢复后 0.6s 内自动恢复，后续 24/24 全 200」 | `docs/release-v2.0.0-beta.7.md:39` |
+| 稳定性压测 | 「压测 + 3 轮断网切换后 `runs=1 / never exited / stability=0/0`（修复前同场景必死）」 | `docs/release-v2.0.0-beta.8.md:36` |
+| 3Mbps relay 体验 | 「出口带宽 3Mbps（体验瓶颈，bundle 2.7MB 首屏 10-20s）」 | `docs/coturn-relay-ops.md:20`；同 :275 |
+| 大流量期间 RTT | 修复后同链路批量传输期间「RTT = 189→100→92→18→22ms」，会话 pair 双侧 relay（…:50013 / …:50006） | `docs/coturn-relay-ops.md:382-383` |
+| 蜂窝单会话字节量 | iPhone 5G 蜂窝会话「relay 流量约 1MB」（00:09-00:14，99 个请求） | `docs/coturn-relay-ops.md:283,428` |
+| relay RTT 基线 | gate4：「RTT 18ms」，relayAddr 39.106.59.183:50007 | `cores/devanywhere-p2p/examples/gate4/artifacts/summary.json:4` |
+| 蜂窝 relay RTT | A 组观测 `rttMsObserved: [42,47,53,109]` / `[39,44,64]` | `devanywhere-client/pwa/dev/smoke-evidence/ice-ab-cellular/summary-a.json:29,40` |
+
+**关键口径（【实测】coturn 语义 + 配置）**：「生产每并发会话约消耗 1 个端口」；spike 把 relay 段收窄到 **50000-50019 仅 20 个端口**（`docs/coturn-relay-ops.md:55-56`）——**即 relay-bj 当前并发上限 ≈ 20 个 TURN 会话**；放宽公式「并发会话数 × ~1.2」（:216）。这是该仓唯一接近「容量方程」的实测锚点。
+
+**文档推断（写了没跑）**：13Mbps ÷ 100kbps ≈ 130 并发中继会话、25% 中继率 ≈ 500 在线；10 万用户需 1.3~2.5Gbps、45TB/月 ≈ 3.6 万元/月（`docs/origin/capacity-plan-100k.md:22-31`）。
+
+**未验证**：无任何吞吐压测（MB/s over DataChannel）、无多并发容量压测、无 N 台 VPS 规格-容量标定。
+
+## ③ 直连率提升尝试
+
+- **ICE 策略 A/B 实验（【实测】，本仓最接近"直连率"的量化数据）**：2026-09-09，Xiaomi 2409BRN2CC / China Unicom LTE / Wi-Fi 关，N=3×2：
+  - A（P2P 段仅 STUN，10s 超时 → TURN 段强制 relay）：**连通 3/3；1/3 p2p 直连（约 5s）；2/3 经 TURN relay（50009/50019，约 15s = 10s 白等 + 5s）**；RTT 39–109ms。
+  - B（首段 full ICE、policy all）：**0/3**，15s 内无 relay 候选，连后续 turn-only 兜底段也 0/3（疑似 full 段失败后 daemon host 状态未恢复）。
+  - 证据：`docs/superpowers/specs/2026-09-09-p0-ice-ab-decision.md:24-29`；`devanywhere-client/pwa/dev/smoke-evidence/ice-ab-cellular/summary-a.json:43` / `summary-b.json:32`。决策：保留显式级联分段，B 方案仅留 dev 钩子。
+  - 已知污染样本的待办：**STUN 清单里 relay-sh/gz 两台是死节点**（未部署 coturn），「会影响直连成功率与 10s 超时内的候选质量」（`docs/superpowers/specs/2026-09-09-p0-ice-ab-decision.md:37,44`；`devanywhere-client/pwa/src/config.ts:30` 注释）。
+- **客户端 P2P/中继状态展示（【实测】已落地）**：
+  - 库层：`pairTypeFromStats()` 从 candidate-pair stats 判定 p2p/relay（werift 用 `state==='succeeded'`、浏览器用 `selected===true` 双判据）——`cores/devanywhere-p2p/src/status.ts:12-25`；
+  - PWA：状态灯三段「P2P 直连 / 隧道 / TURN 中继」+ 色值口径 `#0A8A5F/#7BC96F`（`devanywhere-client/pwa/index.html:242-244`、`src/ui.ts:65` `MODE_LABEL = { p2p: '直连', tunnel: '隧道', turn: '中继' }`）；
+  - daemon：`/status.transport = { running, pairType, relayAddr, rttMs }`（`devanywhere-server/desktop/daemon/engine.js:191`；断连归零防假绿灯 `desktop/lib/transport.js:130-138`）；App 设置页「后台服务」事实卡片（`docs/TODO.md:54-55`）。
+- **稳定性间接保直连（【实测】）**：beta.11 根治「ICE 候选因 ufrag 不匹配被整丢」→ 40s 内 ICE generation 从 **18 降到 2**（`docs/release-v2.0.0-beta.11.md:124-134`），修复 `cores/devanywhere-p2p/src/peer.ts` `addIceTolerant()`。
+- **iPhone 蜂窝实证走 TURN/TCP**：「3478 tcp 强烈建议开（iPhone 蜂窝实测走的 TURN/TCP）」（`docs/coturn-relay-ops.md:213,282`）。
+- **IPv6 直连 / UPnP / NAT 引导：【未做】**。全仓搜代码仅命中 `::1` 回环解析修正（`cores/devanywhere-p2p/src/tests/bridge.test.ts:347`、`devanywhere-server/desktop/daemon/netstatparse.js:4-5`），与 NAT 穿透无关；capacity-plan 杠杆 1（IPv6/UPnP/路由器引导）在 v2 线没有任何实现或专项文档。
+- **3478→443 复用**（蜂窝/企业网只放 443 的长尾）：生产化债务 #2，未实施（`docs/coturn-relay-ops.md:394-395`）。
+
+## ④ 监控告警（中继流量占比 / 带宽水位 / 扩容触发）
+
+- **口径已立、实现为零**：「节点带宽是成本项：TURN 只兜底，`中继` 占比升高要当作告警而不是常态」（`docs/relay-deployment.md:99`）；故障表有「中继占比异常升高」排查行（:120）。**但全仓没有任何"中继占比"的采集代码**——PWA 生产路径无 telemetry/beacon/report 上报（grep 零命中），隧道 relay 进程无计数（`cores/devanywhere-p2p/src/tunnel/relay.ts`），Supabase 无 metering/usage 表或函数（grep `meter|usage|bytes` 零命中）。
+- **实际存在的可观测实现**（面向健康而非成本，【实测】）：PWA 帧账本 `sent/res/hung/lastHung` 经 `__dvaDebug().frames` 暴露（`docs/TODO.md:56-57`）；数据面黑洞看门狗「连续 ≥2 条 >9s 无回帧即判黑洞，主动拆连重连」（`docs/relay-deployment.md:122-124`、`docs/release-v2.0.0-beta.7.md:29`）；daemon `/status.stability = {uncaught, unhandled, lastAt, lastMsg}`（`devanywhere-server/desktop/daemon/engine.js:63-75,190`）。
+- **滥用巡检（【实测】人工命令，非自动告警）**：coturn 全量 613 行日志逐条复查，仅 4 个自有 IP、22 次 401 均为正常握手第一步、「部署至今无陌生 IP 扫描/滥用」；审计命令固化在 `docs/coturn-relay-ops.md:415-417`。
+- **扩容公式/水位告警：【文档推断】未实现**——「中继带宽需求（Mbps) ≈ 在线数 × 中继率 × 0.5；单台 5M 节点按 70% 水位告警即加机」（`docs/origin/capacity-plan-100k.md:44`）依赖老线 `easytier-cli stats`（Prometheus 格式），v2 线 coturn 侧无 exporter、无 Prometheus/Grafana 任何配置。
+- **邻近成本动作（下载分发，【实测】）**：PWA 静态壳迁 Cloudflare Pages 免费 CDN，理由是「relay 单节点预算仅 3Mbps，静态流量会挤占数据面转发带宽」（`docs/pwa-redesign/README.md:43-63`）；DMG 分发主走腾讯云 COS（实测 24–28 MB/s），relay 镜像只作第三路兜底「带宽受限」（`docs/relay-deployment.md:108`、`docs/release-v2.0.0-beta.2.md:48-49`）。
+
+## 可迁移假设清单（→ p2p-net WebRTC/werift/coturn/Supabase 栈）
+
+| # | 假设 | 证据强度 | 迁移条件 |
+|---|---|---|---|
+| 1 | **显式级联分段 ICE（STUN-only 直连段 + 明确超时 → 强制 relay 段）优于 full ICE 合并**；full 合并在该仓蜂窝实测 0/3 | 实测（N=3，单运营商单设备，方向性强但样本极小） | p2p-net 栈同构（werift host + 浏览器 PWA）可直接复刻；需两段 PeerConnection 生命周期管理，且 host 侧要在段切换后正确复位（B 组兜底段也失败疑似 host 状态未恢复——这是要避的坑） |
+| 2 | **TURN REST 临时凭据（HMAC-SHA1 + use-auth-secret）是零用户表的防白嫖成本控制**，6h TTL | 实测落地（同栈 coturn+Supabase Edge Function，代码可直接抄：`devanywhere-website/supabase/functions/turn-credentials/index.ts`） | 无额外条件；注意坑：`use-auth-secret` 与 `lt-cred-mech` 并存行为依版本不定，切换要显式删旧行（`docs/coturn-relay-ops.md:472-473`） |
+| 3 | **每并发 TURN relay 会话 ≈ 1 个 UDP 端口 → min/max-port 段宽 = 硬并发上限**（spike 20 端口 ≈ 20 并发） | 实测配置 + coturn 语义 | 直接适用；容量规划用「并发 × ~1.2」；p2p-net 压测时这是第一个会撞到的墙 |
+| 4 | **ordered reliable 单 DataChannel 会让小消息排在大流量后面（队头阻塞）**：ping/pong 必须走带外 `unordered + maxRetransmits:0` 通道，否则"RTT"测的是排队延迟（曾显示 78176ms） | 实测（修复后同链路大流量期 189→…→18ms） | werift/浏览器均支持 unordered 通道；**p2p-net 二期的 host done 时延/stall 指标测量必须用带外通道，否则传输期指标全失真** |
+| 5 | **werift 的 addIce 因 ufrag 不匹配静默丢候选会导致"连接活着但数据面周期性黑洞"**（ICE generation 40s 内 18 次）；`addIceTolerant()` 后降到 2 | 实测（真机日志 34 次/轮 + CDP 对照实验 + 修复后回归） | **与 p2p-net v0.1.0 基线"~15min 周期死亡"高度疑似同族**——werift host 侧直接移植 `cores/devanywhere-p2p/src/peer.ts` 的 `addIceTolerant()`（去 ufrag 重试一次 + 隔离不上抛） |
+| 6 | **getStats candidate-pair 可可靠判定 p2p/relay 状态灯**（werift 无 `selected` 字段，用 `state==='succeeded'`；浏览器用 `selected===true`） | 实测落地 | 同栈直接复用 `cores/devanywhere-p2p/src/status.ts:12-25` 纯函数 |
+| 7 | **iPhone 蜂窝数据面会走 TURN/TCP**，3478/tcp 必须开（udp+tcp 双放） | 实测（coturn journal 复盘） | 直接适用 coturn 安全组与配置 |
+| 8 | **中继限速分级 + 按档计费**（免费档限速 256kbps 示例） | 文档推断（占位到 M3，**未实施**，有效性未验证） | coturn 侧可用 `max-bps`/按用户分 secret；p2p-net 二期若要落地需先验证 coturn per-allocation 限速语义并自测——不能引用该仓当"已验证方案" |
+| 9 | **扩容公式：中继带宽（Mbps) ≈ 在线数 × 中继率 × 0.5；单节点 70% 水位告警加机** | 文档推断（老线 EasyTier 画像 50–100kbps/会话，新线未复测） | 需要先有采集体：coturn Prometheus exporter 或日志/字节计数（该仓为零，p2p-net 需自建）；画像数字必须用 p2p-net 自己的字节量实测校准 |
+| 10 | **PWA 静态壳走免费 CDN、绝不挤 relay 数据面带宽**（3Mbps 节点 2.7MB 首屏要 10-20s） | 实测 + 决策落地 | 直接适用（p2p-net 的 PWA 托管与 TURN 节点分离） |
+| 11 | **蜂窝直连率参考值 ≈ 1/3**（联通 LTE；TURN 兜底后总连通率 3/3） | 实测（N=3 小样本 + 死 STUN 节点污染） | **只能当下限参照，不能当基数**；p2p-net 二期需大样本多运营商实测，且先清理死 STUN 节点（该仓遗留坑） |
+
+**给 p2p-net 二期的三句话总结**：① 成本控制上该仓只交了「临时凭据防白嫖 + 级联兜底顺序 + 端口段容量公式」三样实测成果，限速/计费/监控告警全是占位——容量方程的中继率、字节因子都要 p2p-net 自己测；② 最有迁移价值的硬货是 #4（带外测延迟）和 #5（addIce ufrag 修复，疑似就是 ~15min 周期死亡的同族根因）；③ 蜂窝直连率 1/3 的实测暗示"先 STUN 直连、10s 白等"的策略下 TURN 仍是多数派，第一杠杆（直连率）在该仓同样没有撬动。</subagent>
+<subagent agent_id="agent-60" item="横跨三个仓做【直连率杠杆 + 信令成本】专题：①三个仓里所有影响打洞成功率/直连率的手段与证据（IPv6 直连、UPnP、NAT 类型检测与引导、STUN 服务配置、ICE 候选优先级、TURN 凭据单 transport 对连通率的影响）——/Users/separationofconcerns/Documents/TryEverything/DevAnyWhere-v3/cores/devanywhere-net、/Users/separationofconcerns/Documents/money/DevAnyWhere、/Users/separationofconcerns/Documents/stripe/DevAnyWhere 各查一遍；②信令成本随规模的形状：Supabase Realtime/PostgREST 轮询 vs WebSocket 长连的账（已知 v3 有「ws 信令长连是 10 万级才成立的账」的说法，找原文与数字）；Supabase 免费/付费档的连接数/消息量限额有没有被实测或引用过；③手机蜂窝（对称 NAT/CGNAT）下直连率的任何实测数字。" outcome="completed">探索完成。以下为三仓专题报告。
+
+---
+
+# 直连率杠杆 + 信令成本：三仓证据报告
+
+仓别名（下文引用均用别名 + 仓内相对路径 + 行号）：
+
+- **v3net** = `~/Documents/TryEverything/DevAnyWhere-v3/cores/devanywhere-net`（werift WebRTC + coturn + Supabase，最新、实测最多）
+- **v2** = `~/Documents/money/DevAnyWhere`（p2p 包 v0.1.0 出处，`cores/devanywhere-p2p`，werift ^0.24.4 + Supabase 轮询信令）
+- **legacy** = `~/Documents/stripe/DevAnyWhere`（0.9.x EasyTier 线 + WebRTC POC）
+
+证据分级照 v3net 仓纪律：【实测】= 该仓真跑过并有数据 /【文档推断】= 写了但没跑 /【未验证】= 纯假说。
+
+---
+
+## ① 影响打洞成功率/直连率的手段与证据
+
+### A. TURN 凭据只下发单 transport —— 三仓里唯一直接改变连通率的实测杠杆
+
+**【实测】** v3net `docs/field-acceptance/2026-09-17-full-matrix-and-baseline.md:105-141`：实体机蜂窝三臂对照实验（n=6 × 3，唯一变量 = TURN transport）：
+
+| 臂 | 配置 | 成功率 |
+|---|---|---|
+| A | UDP only（`?transport=udp`） | **6/6 = 100%** |
+| B | TCP only（`?transport=tcp`） | **5/6 = 83%** |
+| C | both（udp+tcp 同一下发，修复前生产配置） | **2/6 = 33%** |
+
+原文结论（:113-116）："**不是 UDP 有问题，也不是多出口 NAT——而是同时下发两个 TURN URL（UDP + TCP）时，ICE agent 在两条 relay 路径间竞争，导致 TURN allocation 冲突与 15s 超时**。（若真是 UDP 被 NAT 破坏，臂 A 应当失败；实测臂 A 6/6 全过，假设被推翻。）"失败形态：SDP/ICE 交换正常但 `pc.state` 停在 `connecting`；coturn 侧记 `reason: allocation timeout` / `allocation watchdog determined stale session state`（:96-100）。
+
+修复已落地（2026-09-17）：`v3net/supabase/functions/turn-credentials/index.ts:40-58` 默认只发 `?transport=udp`，TCP 走显式参数，注释全文记录实验。修复验证：both 2/6（33%）→ 单 UDP **5/6（83%）**（:129-134）；残留 1/6 归因为**蜂窝出口 IP 漂移**（coturn 侧观察到同一会话两个出口 IP `36.112.201.175` 与 `106.37.77.38`，中国电信多出口 NAT），定性为运营商侧行为，缓解手段 = ICE-restart 重试（:136-139）。
+
+**跨仓警讯**：v2 仓的同名函数至今仍是双 transport 下发——`v2/devanywhere-website/supabase/functions/turn-credentials/index.ts` 返回 `turn:…?transport=udp` + `turn:…?transport=tcp` 两条 urls（该文件倒数第 12-8 行 `iceServers` 数组）。v2 已进维护模式，此修复未回填。**这给 v2 蜂窝 A/B 实验 B 变体 0/3 提供了一个事后候选解释【推断】**：B 变体（full ICE）用的正是 v2 双 transport 凭据。
+
+### B. 首段 ICE 策略：STUN-only 分段级联 vs full ICE 合并 —— 蜂窝实测定夺
+
+**【实测】** v2 `docs/superpowers/specs/2026-09-09-p0-ice-ab-decision.md:21-47`（Xiaomi + 中国联通 LTE、Wi-Fi 关、N=3×2）：
+
+| 指标 | A（STUN-only 分段） | B（full ICE 合并，policy all） |
+|---|---|---|
+| 连通 | **3/3** | **0/3** |
+| 成功路径 | **1/3 p2p 直连；2/3 经 TURN relay（50009/50019）** | — |
+| 建连耗时 | 直连约 5s；TURN 路径约 15s（p2p 10s 超时 + TURN 5s 内） | full 15s 超时 + turn 兜底 15s 超时 |
+| 观察 RTT | 39–109ms | — |
+
+原始数据：`v2/devanywhere-client/pwa/dev/smoke-evidence/ice-ab-cellular/summary-a.json:43`（"A（显式分段 STUN-only + TURN-only）在本蜂窝环境 3/3 可用；p2p 直连 1/3，TURN 兜底 2/3"）、`summary-b.json:32`（B 0/3，"full 段之后的 turn-only 兜底段也 0/3（疑似 full 段失败后 daemon host 状态/时序未及时恢复）"）。
+
+决策（:33-39）：保留显式级联分段（P2P 段仅 STUN + 10s 超时 → tunnel → TURN-only policy relay）；B 方案关闭，仅留 dev 钩子。**这是"级联分段"对"单 PC 全候选"的实测胜利，但样本仅 n=3、单运营商单手机。**
+
+### C. STUN 服务配置：死节点教训与 fleet 化
+
+- **【实测】死节点事实**：v2 生产 STUN 清单三节点里两台是死的——`v2/devanywhere-client/pwa/src/config.ts:26-30`（`stun:39.106.59.183 / 14.103.82.152 / 118.145.226.60:3478`），实验计划环境快照证实"relay-sh / relay-gz 只有 easytier 11010；**无 coturn**——现产 STUN 三节点里两台是死节点"（`v2/docs/superpowers/plans/2026-09-09-p0-ice-ab-cellular-android.md:36`）。决策文档把"死 STUN 节点是否移除（会影响直连成功率与 10s 超时内的候选质量）"列为待办（`2026-09-09-p0-ice-ab-decision.md:44`）。用自建 coturn 做 STUN 而不用谷歌公共 STUN 的理由写在 config.ts:25（"谷歌公共 STUN 在国内不可靠"）【文档推断】。
+- **fleet 化（v3net）**：8 台 relay 全部 `roles: [turn, tunnel, static]`（`v3net/relay-iac/nodes.yaml:61,76,90,104,120,135,151`），coturn 全部 REST 短时凭证（`use-auth-secret`）+ `external-ip=公网/内网` 成对（`relay-iac/RUNBOOK.md:171,474`）。v3 浏览器端 STUN 默认值仍是同 3 台（`v3net/packages/browser/src/defaults.ts:35-38`）。
+- **relay 端口段**：coturn `min/max-port=50000-50019`，每并发会话约 1 端口，生产按「并发 × ~1.2」估（`legacy/docs/coturn-relay-ops.md:55-57,216-218`）。
+- **打洞相关配置坑（实测）**：云端 host 即兴 UDP 端口不在防火墙白名单 → srflx 不可达；绑定到放行段（`--ice-port-range 50000-50019`）恢复（`v3net/docs/benchmark/tc-cost-2026-09-15.md:200`）。**host 侧候选端口必须落在安全组放行段内，否则打洞必败。**
+
+### D. 打洞的环境杀手：VPN/代理对 UDP 的破坏（全部【实测】，v3net T-C 系列实验）
+
+- 现象：Mac 操作机 p2p 腿 **0/5**，host 侧 tcpdump 零入站检查（`tc-cost-2026-09-15.md:163-176`）。
+- 机制钉死：VPN（utun6）使**单 socket 多目的地 UDP 被钉流到首个目标**或整体丢失；werift 恰好是单 socket 多目的地形态（同 socket 先发内网候选 `10.0.0.3:50000` 再发公网候选）（:178-194）。
+- 判决性对照：同机 VPN off → 打洞 **0/5 → 5/5**（setup 5.7–7.2s、下行 9.97 MiB/s）（:215-221）；干净云机 peer 对照 **10/10 直连**（:207-213）。
+- 不关 VPN 的四个绕过方案全部实测有效（`vpn-bypass-matrix-2026-09-16.md:24-30`）：`IP_BOUND_IF=en0`（Darwin）、绑定源地址、**每目标独立 socket**、host 路由例外；其中路由例外完成端到端验证"直连 5/5、下行 6.48 MiB/s"（:60-63）。
+
+**迁移含义最大的工程事实**：ICE agent 的 socket 结构（单 socket 多目的地 vs 每目的地 socket）在带 VPN/代理的桌面环境里直接决定打洞成败。
+
+### E. IPv6 直连 / UPnP / NAT 类型检测与引导 —— 只存在于 EasyTier 线
+
+- **v2/v3 WebRTC 栈：三项全无**。v3net 全部 packages 里 IPv6 仅出现于 bridge 本机回环回退测试（`packages/node/tests/bridge.test.ts:391`）；UPnP 与 NAT 类型检测零命中（唯一例外是 bench README 把"NAT 类型"列为未来劣化注入项，`packages/bench/README.md:23`）。**T-D（严格 NAT/CGNAT 双命名空间仿真，测打洞率）至今是扩展位**——`packages/bench/src/topology.ts:92-99` 写明 runner 见到 T-D 要明确报错，装置（iptables MASQUERADE / 锥形与对称 NAT 规则）未建。
+- **legacy EasyTier 线（机制存在，对 WebRTC 栈只能作假设来源）**：
+  - NAT 类型检测：`cores/PeerToPeer/easytier/src/common/stun.rs:482-539`（OpenInternet/FullCone/PortRestricted/Symmetric/SymmetricEasyInc/SymmetricEasyDec 六类 + extra bind test）。
+  - 用户侧引导：`cli/lib/doctor.js:108-134`——对称型提示"打洞大概率失败，走自建中继属于预期行为"，非对称提示"P2P 打洞成功率高"。
+  - 杠杆清单【文档推断】：`docs/capacity-plan-100k.md:37`"提升打洞率（每 +10% 打洞率 ≈ 中继成本 -40%）：启用 IPv6 直连、UPnP、引导用户路由器配置"——**写了但没在该仓实测过这些手段对直连率的提升幅度**；产品代码（desktop/cli/mobile）未找到 IPv6 直连/UPnP 开关的实际使用。
+  - EasyTier 的"先生中继、后台打洞、分钟级升级"【实测】：`docs/first-live-run-report.md:36`——Sym↔PortRestricted 组合给足时间后台打穿并自动升级 DIRECT（relay 424ms → p2p 551ms）；且"p2p 不一定更快"（:37）。
+
+### F. ICE 候选优先级
+
+三仓**均无**任何显式候选优先级操控代码（无 priority 调整、无 candidate 过滤策略）。实际机制是**级联分段**代替优先级：p2p 段只用 STUN 自收集（不含 TURN 候选，"直连失败不悄悄滑进 TURN"，`v3net/docs/architecture.md:88`），TURN 段 `policy=relay`"不做无谓打洞"（:90）。段超时即预算：v2 `CASCADE_TIMEOUT_MS = { p2p: 10s, tunnel: 6s, turn: 15s }`（`v2/.../config.ts:36`）。
+
+---
+
+## ② 信令成本随规模的形状
+
+### "ws 信令长连是 10 万级才成立的账"——原文与数字
+
+最完整表述在 `v3net/docs/signaling-longconn-design.md`（Stage 0.4 设计稿，2026-09-14，状态"待裁决"）：
+
+- 现状（:11）：每端每 800ms 一次 PostgREST `poll(room, cursor)`，发送走 POST 同表。
+- 量化（:15-20）：**轮询暗成本 = 1 万在线 3.3 万 QPS（plan-g 口径）；10 万在线 ≈ 12.5-33 万 QPS**；建链时延里"**T_dc_open 里 0.8-1.2s 是纯轮询等待**"（每跳白等 pollMs/2 = 400ms，一次建链 2-3 跳）；`signaling_qps_per_online ≤0.01` 在轮询制下"物理上不可达（轮询制 = 1.25-3.3）"；"Supabase Pro（$25/mo）的 PostgREST 计算量与 Realtime 并发配额都撑不到 1 万在线，遑论 10 万"。
+- 结论原文（:22）："**轮询制不是「慢一点」，是在 10 万用户目标下直接不成立。这是 Stage 0.4 存在的理由。**"
+- 三案成本账（:50-58）：现状轮询 = **不可行**；A 案 Supabase Realtime = 10 万并发 × $10/千 + 基础档 ≈ **$1000+（￥7000+）/mo，线性无杠杆**；B/C 案 relay 自建 ws = 10 台 4C8G ≈ **￥2000-4000/mo**（"边际成本是固定服务器租金（量级 ￥200-400/台/月），无 per-connection 抽成"）。
+- plan-g 原始出处：`TryEverything/DevAnyWhere-v3/docs/proposals/plan-g-staged-evolution.html:217`"改造后信令成本 ≈ 单台 4C8G 可承载 1 万长连接，**月成本 < 500 元**"；:216 账单 >5 万元/月 = 门禁。
+- **口径注意**：3.3 万 QPS 对应 **300ms** 轮询（plan-f/plan-g 原文"1 万在线 × 300ms 轮询 = 3.3 万 QPS"，`plan-f-measurement-first.html:242`），而 v2 实际实现默认 **pollMs=800ms**（`v2/cores/devanywhere-p2p/src/signaling/client.ts:16-17`）→ 即 1.25 QPS/在线。引用时按 1.25–3.3 QPS/在线的区间口径才稳。
+- 附带论点【文档推断】：plan-b 称"轮询延迟本身就在毒害打洞成功率（offer/answer 晚 150ms，NAT 映射可能已老化）"（`plan-b-go-pion-sidecar.html:138`）——**无对照实验**。
+
+### Supabase 限额：引用 vs 实测
+
+- Realtime 定价只有**一处引用，且自我标注为量级估算**【文档推断】：`signaling-longconn-design.md:30`"公开定价量级为 Pro 含 ~500 并发、超出约 $10/千连接/月（以官网当期价为准，此处为量级估算）"。**三仓均未实测过 Realtime 并发连接数或消息量限额。**
+- 唯一实测撞过的 Supabase 限额是 **Auth token 端点 429**【实测】：`v2/docs/handover-2026-09-09-mobile-pwa.md` §3.3——daemon 续期失败无退避，"800ms 轮询打令牌端点 → **429 永久限流**"；修复 = daemon 专用会话 + 60s 退避。与 Realtime/PostgREST 无关，但证明 Supabase 各面都有 rate limit 且会被客户端轮询行为打爆。
+
+### ws 长连容量：已实测（v3net Stage 0.4 门禁）
+
+- 门禁定义：`docs/stage-charter.md:43`——单机 4C8G **≥1 万并发长连接**；`signaling_qps_per_online ≤0.01`。
+- 首测（2C/1.9G relay-sh，2026-09-14，`docs/benchmark/signaling-load-relay-sh-2026-09-14.md`）：累计开通 6k 无压力；投递时延含真实 PostgREST 双写 **p50 189–250ms、p95 237–621ms**（:97）；逼出设计级缺陷"心跳一拍即割（5s）在 WAN 拥塞下批量收割健康连接"（对照实验 100/100 → 失速后 100/100 被割，:107-113），修为 `deadAfterMs = 3×heartbeatMs = 15s`、任意入站帧刷新存活；修正后 1958 开通 → 1956 存活（99.9%）、timewait 3292→17（:170-173）。分布式 4 driver 网格把 2C 机顶到 **4113 并发真值**（:336-344）。
+- 门禁机复测（4C/7G relay-sh2，2026-09-17，`signaling-10000-rerun-2026-09-17.md`）：**10000 并发 3/3 次全存活**（closedAfterOpen 0/0/1），healthz 连续四拍稳定 10000（:20-31）。
+- QPS 读数：`signaling-gate-sh2-2026-09-14.md:17-18`——`signaling_qps_per_online ≈ 0.0099`（msgsReceived 11900 ÷ 万级在线 × 稳态窗，mailboxFailures=0），达成 ≤0.01 门禁【实测，但该值是发送方每秒 1 条消息的负载模型下的读数】。
+- **成本形状结论**：信令帧 KB 级、仅建链期，长连后 QPS/在线 ≈ 0.01（事件驱动），10 万在线 = 10 台 4C8G 量级、成本与 relay 流量费合并计提——**从"随在线数线性增长的 per-request 云账单"变成"固定服务器租金"**。
+
+---
+
+## ③ 手机蜂窝（对称 NAT/CGNAT）直连率实测数字汇总
+
+| 日期 | 栈/环境 | 直连率 | 出处 | 级别 |
+|---|---|---|---|---|
+| 2026-07-27 | EasyTier，Mac=iPhone 热点（**Symmetric**）× Android=酒店 WiFi（**PortRestrictedCone**） | **0/1 打洞未穿 → relay 兜底**（中继 145ms/0% 丢包） | legacy `docs/p2p-experiment-2.1-report.md:17` | 【实测】 |
+| 2026-07-28 | 同上组合，给足时间 | **后台分钟级打穿，relay(419ms)→DIRECT p2p(551ms) 自动升级** | legacy `docs/first-live-run-report.md:22,36` | 【实测】 |
+| 2026-09-06 | WebRTC POC，iPhone 5G Safari（出口 1.202.124.232）→ relay-bj coturn | 未测直连（强制 relay）：4×allocate 成功，实际数据走 **TURN/TCP**，会话 relay 流量约 1MB | legacy `docs/coturn-relay-ops.md:281-283,424-435` | 【实测】 |
+| 2026-09-09 | v2 WebRTC，Xiaomi + 联通 LTE | **p2p 直连 1/3**（STUN-only 段；另 2/3 落 TURN）；直连 RTT 39–109ms | v2 `2026-09-09-p0-ice-ab-decision.md:23-29` | 【实测】 |
+| 2026-09-17 | v3net 24 格矩阵，中国电信蜂窝（多出口 NAT，两出口 IP 实锤） | **p2p 档全部落到 relay**（facts："选定候选对为 relay（直连候选对 2 条未成功）"）；TURN 档 both 33% → 单 UDP 83% | v3net `2026-09-17-full-matrix-and-baseline.md:82,144-151,129-139` | 【实测】 |
+| — | 行业锚 | STUN 可解 ~80%（BlogGeek S13）；Tailscale ">90% 直连"（S11） | v3net `docs/metrics-baseline.md:51,53` | 【文档推断·引用】 |
+| — | 生产真实蜂窝直连占比 | **待测**（"无线上 facts 面"，Stage 1 facts 上线后 30 天） | v3net `docs/metrics-baseline.md:239` | 【未验证】 |
+
+要点：蜂窝下 WebRTC 直连率实测只有两个小样本点——**联通 LTE 1/3、电信蜂窝 0/n（全部落 relay）**；v3net 自己写的判断是"蜂窝 + 家庭 NAT 的双向打洞成功率本就低（v2 时代实测 1/3）【推断】"（`2026-09-17-full-matrix-and-baseline.md:150`）。**没有任何仓有过 N≥20 的蜂窝直连率统计**；metrics-baseline 的 ≥75%/85%/92% 达标线是按行业引用定的，不是实测。
+
+---
+
+## 可迁移假设清单（→ p2p-net：WebRTC/werift/coturn/Supabase 栈）
+
+| # | 假设 | 证据强度 | 迁移条件 |
+|---|---|---|---|
+| H1 | **TURN 凭据只下发单 transport（默认 UDP），TCP 走显式重试/级联**；同时下发 udp+tcp 会把 TURN 建链成功率从 ~100% 拉到 ~33% | 【实测】n=6×3 三臂对照 + 修复后复测（v3net，电信蜂窝 + werift/flutter_webrtc 两侧） | p2p-net 的 turn-credentials（或等价签发处）改为单 URL；客户端需有"UDP 失败 → ICE-restart/下一段换 TCP"的重试语义。若 p2p-net 当前也是双 transport 下发，这是**零成本最高收益**的一条 |
+| H2 | **分段级联（STUN-only p2p 段 + 显式超时 → TURN-only 段）优于单 PC full-ICE 合并**（蜂窝 3/3 vs 0/3） | 【实测】但 n=3、单运营商、单手机；且 B 失败可能混杂 H1 的双 transport 因素 | p2p-net 级联器分段 + 段超时（参考值 p2p 10s / turn 15s）；复测时把 H1 先修掉再 A/B，否则两变量混杂 |
+| H3 | **host 侧 ICE 端口必须落在云防火墙/安全组放行段**（`--ice-port-range` 对齐 coturn relay 段 50000-50019），否则 srflx 不可达、打洞必败 | 【实测】tcpdump 正负对照（v3net T-C） | p2p-net host 配置项暴露 ICE 端口范围并与 coturn/安全组三处一致；relay 段按「并发 × ~1.2」估端口数 |
+| H4 | **桌面 VPN/代理会杀死打洞**（单 socket 多目的地 UDP 被钉流/丢弃）；绕过手段：每目的地独立 socket、绑定物理口源地址、host 路由例外 | 【实测】A-B-A 反转 + 四方案矩阵（v3net，macOS + 某 VPN 客户端） | p2p-net 依赖 werift——需确认 werift 版本/配置的 socket 结构；用户侧兜底 = 打洞失败率遥测 + doctor 式引导（"关掉 VPN 或加路由例外"）。windows/其他 VPN 客户端行为未测，属外推 |
+| H5 | **蜂窝 + 家宽组合的真实直连率约 1/3 甚至更低**，远低于行业 ~80% 引用值；成本模型应按"蜂窝场景以中继/隧道为主"做悲观档 | 【实测】两个独立小样本（联通 1/3、电信 0/n）一致指向低位；但 N 小、无线上 facts | p2p-net 容量方程的中继率假设应含"接入方式分布"变量；建 7 日滚动 facts（pairType 上报）前不要相信 ≥75% |
+| H6 | **中国电信蜂窝存在多出口 NAT（同会话多出口 IP），TURN allocation 会因此 stale/timeout**，残留 ~1/6 失败；缓解 = ICE-restart 重试 | 【实测】coturn 侧两出口 IP + 修复后残留 1/6 | p2p-net control 面需要把"建链超时"自动接 ICE-restart/级联下一段；把出口漂移观测做进 facts |
+| H7 | **信令轮询成本 = 在线数 ÷ poll 间隔（1.25–3.3 QPS/在线），10 万级不成立；ws 长连后 ≈0.01 QPS/在线，4C8G 单机实测扛 1 万并发长连** | 轮询成本【文档推断】（算术）；ws 容量【实测】3 次独立复跑 | p2p-net 若继续 Supabase PostgREST 轮询，10 万在线 ≈ 12.5–33 万 QPS——Supabase 任一档打不住；ws 长连可复用 v3net 设计（relay 自带 ws + 邮箱表重连拉齐 + 心跳 deadAfterMs=3×interval） |
+| H8 | **Supabase Realtime 按并发连接计费（量级 ~$10/千连接/月），10 万常驻 ≈ $1000+/mo** | 【文档推断】原文自标"量级估算，以官网当期价为准"；**从未实测** | 迁移前必须查 Supabase 当期官方定价页核实；不要引用该数字做正式成本方程 |
+| H9 | **ws 长连心跳"一拍即割"在 WAN 拥塞下批量收割连接**；正确语义 = 连续 N 拍（3×5s=15s）无任何入站帧才 terminate，任意入站帧刷新存活 | 【实测】对照实验 + 压测指纹（timewait 3292→17） | p2p-net 任何自建长连组件（含信令）都要采用此心跳语义；这条与传输栈无关，直接可搬 |
+| H10 | **"先中继暖场、后台打洞、分钟级升级 DIRECT"可把中继从"终身通道"变"暖场通道"**（EasyTier 实测）；WebRTC 侧对应物 = ICE-restart / 级联升级段 | 【实测】EasyTier（legacy）；WebRTC 侧【未验证】（v3 级联有 upgrade 段设计但无打洞升级实测） | p2p-net 若要吃到这一杠杆，需要周期性的后台直连重试（upgrade 轮），并埋点 relay→p2p 切换时刻；legacy 还实测过"p2p 不一定更快（551 vs 424ms）"，升级策略要带延迟比较 |
+| H11 | **IPv6 直连 / UPnP / NAT 类型检测与用户引导**可提升直连率 | 【未验证~文档推断】仅 capacity-plan 列为杠杆；EasyTier 有 stun.rs NAT 检测与 upnp.rs 机制，但三仓均无"启用后直连率变化"的实测 | p2p-net 栈内无现成机制：NAT 类型可经 STUN binding 多地址探测自实现（werift 有 STUN client 可借力）；UPnP 对浏览器端不可行（PWA 无法做 UPnP），只对 host 桌面端有意义；IPv6 host 候选 werift 已会自收集（tc-cost 抓包见过 IPv6 host 候选）但无成功率数据。建议先上 NAT 类型 facts 再决定是否投入 |
+| H12 | **base64 帧协议税 = 载荷 ×4/3**（TURN 实测字节因子 1.68、隧道 desktop 腿 1.17）；改二进制帧可回收 ~25% 中继成本 | 【实测】v3net T-C 字节账 | 若 p2p-net v0.1.0 帧层也是 base64 JSON 帧（v2 血统即如此，`chunkB64`），这是直连率之外第二杠杆，直接作用于成本方程的"字节因子"项 |
+
+**一句话给二期**：三仓对直连率最硬的两个实测结论是 H1（单 transport，33%→83~100%）和 H5（蜂窝直连率实测仅 ~1/3、电信样本为 0）；信令侧最硬的账是 H7（轮询 1.25–3.3 QPS/在线 vs 长连 0.0099 QPS/在线实测 + 4C8G×10 台扛 10 万）。Supabase Realtime 限额只有自标"量级估算"的引用，无实测；IPv6/UPnP/候选优先级在 WebRTC 栈里尚无任何实现与数据。
+
+（说明：p2p-net 自身的 v0.1.0 基线文档——host done p90=53ms、stall、~15min 周期死亡——不在这三个仓内，本报告未覆盖；以上全部为三仓证据。）</subagent>
+</agent_swarm_result>
