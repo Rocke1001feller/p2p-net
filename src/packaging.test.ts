@@ -21,7 +21,8 @@ test('npm pack 内容包含 dist/node-init/pwa-dist/supabase/contracts', () => {
 
 test('README 含三件准备 + 快速开始 + 安全组端口清单', () => {
   const md = readFileSync('README.md', 'utf8');
-  for (const s of ['Supabase Access Token', 'npx p2p-net init', 'npx p2p-net start', '3478', '50000']) {
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+  for (const s of ['Supabase Access Token', `npx ${pkg.name} init`, `npx ${pkg.name} start`, '3478', '50000']) {
     assert.ok(md.includes(s), `README 缺 ${s}`);
   }
 });
