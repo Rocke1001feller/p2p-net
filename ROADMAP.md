@@ -38,8 +38,8 @@
 
 ## 发布当日 checklist（一期收尾）
 1. [x] 真机 E2E + 真人实测（本目录两份报告）
-2. [ ] 确认 npm 名字 `p2p-net` 可用
-3. [ ] `gh repo create p2p-net --public --source=. --push`
-4. [ ] `npm publish --access public`
-5. [ ] `git tag v0.1.0 && git push origin main --tags`
-6. [ ] T9 env-gated 真 sshd 测试补跑（今日验收已真实走通 VPS init/deploy，可视情合并认定）
+2. [x] ~~确认 npm 名字 `p2p-net` 可用~~ → 裸名被占位保护拦截（与 p2pnet 相似），更名 `@rocke1001feller/p2p-net`（bin 仍为 p2p-net）
+3. [x] `gh repo create p2p-net --public --source=. --push` → https://github.com/Rocke1001feller/p2p-net
+4. [x] `npm publish --access public` → **@rocke1001feller/p2p-net@0.1.0 已发布**（2026-09-23，注册表传播 ~8min，npx 冒烟通过）
+5. [x] `git tag v0.1.0 && git push origin main --tags`
+6. [x] T9 env-gated 真 sshd 测试——已由当日真 VPS init/deploy/验收合并认定
