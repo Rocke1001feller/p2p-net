@@ -15,6 +15,11 @@ import {
   isWsClose,
   isPing,
   isPong,
+  encodeResChunkBin,
+  encodeWsMsgBin,
+  decodeBinFrame,
+  isBinFrame,
+  chunkU8,
 } from '../frames.js';
 
 test('encodeFrame/decodeFrame 往返一致（全部帧型）', () => {
@@ -80,4 +85,35 @@ test('type guards 收窄', () => {
   assert.equal(isPing({ k: 'ping', t: 1 }), true);
   assert.equal(isPong({ k: 'pong', t: 1 }), true);
   assert.equal(isPing({ k: 'pong', t: 1 }), false);
+});
+
+test('二进制 res-chunk 往返：含 payload / 仅 done', () => {
+  const payload = new Uint8Array([1, 2, 3, 250]);
+  assert.deepEqual(decodeBinFrame(encodeResChunkBin(42, payload, false)), { k: 'res-chunk', id: 42, data: payload });
+  assert.deepEqual(decodeBinFrame(encodeResChunkBin(42, null, true)), { k: 'res-chunk', id: 42, done: true });
+});
+
+test('二进制 ws-msg 往返 + 大 id 无符号（>2^31）', () => {
+  const payload = new Uint8Array([0, 159, 146, 150]);
+  assert.deepEqual(decodeBinFrame(encodeWsMsgBin(7, payload)), { k: 'ws-msg', wid: 7, data: payload });
+  const f = decodeBinFrame(encodeResChunkBin(0xf0000001, null, true));
+  assert.equal(f?.k, 'res-chunk');
+  assert.equal((f as { id: number }).id, 0xf0000001);
+});
+
+test('decodeBinFrame 拒垃圾：JSON 文本 / 短帧 / 未知 kind → null', () => {
+  assert.equal(decodeBinFrame(new TextEncoder().encode('{"k":"res-chunk","id":1}')), null);
+  assert.equal(decodeBinFrame(new Uint8Array([1, 2])), null);
+  assert.equal(decodeBinFrame(new Uint8Array([9, 0, 0, 0, 1, 0])), null);
+  assert.equal(isBinFrame(new TextEncoder().encode('{"k":"ping"}')), false);
+});
+
+test('chunkU8 边界：16384 / 16385 字节，原始字节不经过 base64', () => {
+  const exact = new Uint8Array(16384).fill(7);
+  assert.equal(chunkU8(exact).length, 1);
+  const over = new Uint8Array(16385).fill(9);
+  const pieces = chunkU8(over);
+  assert.equal(pieces.length, 2);
+  assert.equal(pieces[0].length, 16384);
+  assert.equal(pieces[1].length, 1);
 });

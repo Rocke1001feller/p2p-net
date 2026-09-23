@@ -3,7 +3,7 @@
  *
  * 与老仓 POC host（poc/webrtc-pwa/host/index.html ws 段）逐字对齐：
  * - ws-open{wid,path} → 连接本地 → ws-open-ok / ws-open-err；
- * - 服务器→客户端：text 帧 → ws-msg{wid,text}，binary 帧 → ws-msg{wid,dataB64}；
+ * - 服务器→客户端：text 帧 → ws-msg{wid,text}，binary 帧 → 帧协议 v2 二进制帧（binaryOk）或 ws-msg{wid,dataB64}（legacy）；
  * - 关闭透传：ws-close{wid,code,reason}；
  * - 客户端→服务器：ws-msg{text|dataB64} → ws.send；ws-close{wid,code?,reason?} → ws.close。
  *
@@ -11,8 +11,8 @@
  * bridge 构造参数 port；两处皆无 → ws-open-err，不静默。
  */
 import WebSocket from 'ws';
-import { isWsClose, isWsMsg, isWsOpen, type TunnelFrame, type WsOpenFrame } from '../frames.js';
-import { dcSend, type DcLike } from './http.js';
+import { encodeWsMsgBin, isWsClose, isWsMsg, isWsOpen, type TunnelFrame, type WsOpenFrame } from '../frames.js';
+import { dcSend, dcSendBin, type DcLike } from './http.js';
 
 /**
  * ws 只接受 **1000 或 3000–4999** 作为可发送的关闭码；其余一律非法。
@@ -47,6 +47,7 @@ export class WsBridge {
       if (ws && ws.readyState === WebSocket.OPEN) {
         if (frame.text !== undefined) ws.send(frame.text);
         else if (frame.dataB64 !== undefined) ws.send(Buffer.from(frame.dataB64, 'base64'));
+        else if (frame.dataBin !== undefined) ws.send(Buffer.from(frame.dataBin.buffer, frame.dataBin.byteOffset, frame.dataBin.byteLength));
       }
       return;
     }
@@ -86,6 +87,7 @@ export class WsBridge {
     ws.on('error', () => { void dcSend(dc, { k: 'ws-open-err', wid: frame.wid }); });
     ws.on('message', (data: Buffer, isBinary: boolean) => {
       if (!isBinary) void dcSend(dc, { k: 'ws-msg', wid: frame.wid, text: data.toString('utf8') });
+      else if (dc.binaryOk) void dcSendBin(dc, encodeWsMsgBin(frame.wid, data));
       else void dcSend(dc, { k: 'ws-msg', wid: frame.wid, dataB64: data.toString('base64') });
     });
     ws.on('close', (code: number, reason: Buffer) => {

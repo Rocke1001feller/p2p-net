@@ -18,7 +18,7 @@ import { Peer, type LinkStatus } from './peer.js';
 import { dcSend, HttpBridge, type DcLike } from './bridge/http.js';
 import { WsBridge } from './bridge/ws.js';
 import { assertPortAllowed, PortNotAllowedError } from './bridge/guard.js';
-import { decodeFrame, isPing, isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen, type TunnelFrame } from './frames.js';
+import { decodeFrame, decodeBinFrame, isBinFrame, isPing, isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen, type TunnelFrame } from './frames.js';
 import { SignalingClient, type PollResult } from './signaling/client.js';
 import { isSigMessage, roomFor, type SigMessage } from './signaling/protocol.js';
 
@@ -90,6 +90,16 @@ export function sessionDisposition(state: LinkStatus['state']): 'keep' | 'grace'
   return 'grace'; // connecting | disconnected | failed
 }
 
+/** 数据面 DC 适配：标记二进制能力（桥据此走帧协议 v2），背压读数透传。 */
+export function asDataPlaneDc(dc: RTCDataChannel): DcLike {
+  return {
+    binaryOk: true,
+    get bufferedAmount() { return dc.bufferedAmount; },
+    get readyState() { return dc.readyState; },
+    send(data) { dc.send(typeof data === 'string' ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength)); },
+  };
+}
+
 /**
  * 单客户端会话：一个 Peer + 独立 HttpBridge/WsBridge（桥键空间按会话隔离，不串响应）。
  * 同 deviceId 新 offer → replace()（POC「最新 offer 换绑」保留在单设备内）；dispose() 释放。
@@ -131,35 +141,43 @@ export class PeerSession {
       return;
     }
     if (label.startsWith('proxy')) {
+      const bdc = asDataPlaneDc(dc);
       dc.onmessage = (ev) => {
-        const m = decodeFrame(ev.data);
+        const raw = ev.data;
+        if (typeof raw !== 'string' && isBinFrame(raw as Buffer)) {
+          const bf = decodeBinFrame(raw as Buffer);
+          // host 只消费二进制 ws-msg（浏览器上行）；res-chunk 方向为协议异常，丢弃。
+          if (bf?.k === 'ws-msg') void this.wsBridge.handle(bdc, { k: 'ws-msg', wid: bf.wid, dataBin: bf.data });
+          return;
+        }
+        const m = decodeFrame(raw);
         if (!m) return;
         if (isReq(m)) {
           // §5.3 白名单强制：先校验再触达 localhost——PWA 不得借 host 打任意端口。
           // 403 后补 done 帧收尾（与 http.ts 400/502 错误路径同约定），否则客户端 SW 挂到 30s 超时。
           if (!this.portAllowed(m.port)) {
             console.error(`[p2p-net] req 拒绝：端口 ${m.port} 不在白名单（id=${m.id} ${m.method} ${m.path}）`);
-            void dcSend(dc, { k: 'res-head', id: m.id, status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } });
-            void dcSend(dc, { k: 'res-chunk', id: m.id, dataB64: Buffer.from(`bridge error: port ${m.port} not in allowlist`, 'utf8').toString('base64'), done: true });
+            void dcSend(bdc, { k: 'res-head', id: m.id, status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+            void dcSend(bdc, { k: 'res-chunk', id: m.id, dataB64: Buffer.from(`bridge error: port ${m.port} not in allowlist`, 'utf8').toString('base64'), done: true });
             return;
           }
           dbg('req', m.method, 'port=' + m.port, m.path);
-          void this.httpBridge.handle(dc, m);
+          void this.httpBridge.handle(bdc, m);
           return;
         }
-        if (isReqAbort(m)) { dbg('req-abort', m.id); void this.httpBridge.handle(dc, m); return; }
+        if (isReqAbort(m)) { dbg('req-abort', m.id); void this.httpBridge.handle(bdc, m); return; }
         if (isWsOpen(m)) {
           // 校验解析后的目标端口（帧可自带 port 覆盖，缺省回落 wsPort；两处皆无交桥回 open-err）
           const port = m.port ?? this.wsPort;
           if (typeof port === 'number' && !this.portAllowed(port)) {
             console.error(`[p2p-net] ws-open 拒绝：端口 ${port} 不在白名单（wid=${m.wid} ${m.path}）`);
-            void dcSend(dc, { k: 'ws-close', wid: m.wid, code: 4403, reason: `port ${port} not in allowlist` });
+            void dcSend(bdc, { k: 'ws-close', wid: m.wid, code: 4403, reason: `port ${port} not in allowlist` });
             return;
           }
-          void this.wsBridge.handle(dc, m);
+          void this.wsBridge.handle(bdc, m);
           return;
         }
-        if (isWsMsg(m) || isWsClose(m)) { void this.wsBridge.handle(dc, m); return; }
+        if (isWsMsg(m) || isWsClose(m)) { void this.wsBridge.handle(bdc, m); return; }
         onServiceFrame?.(dc, m);
       };
       return;

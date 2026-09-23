@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { WebSocketServer, WebSocket } from 'ws';
 import { HttpBridge, dcSend, type DcLike } from '../bridge/http.js';
 import { WsBridge } from '../bridge/ws.js';
-import { decodeFrame, encodeFrame } from '../frames.js';
+import { decodeFrame, encodeFrame, decodeBinFrame } from '../frames.js';
 
 // ---- FakeDc：收集出站帧 ----
 
@@ -356,4 +356,44 @@ test('HttpBridge：仅监听 ::1 的服务也可达（IPv6 回环回退）', asy
   const chunk = await dc.waitFor((f) => f.k === 'res-chunk' && f.id === 9, 3000, 'res-chunk(v6)');
   assert.equal(Buffer.from((chunk as { dataB64: string }).dataB64, 'base64').toString(), 'v6-only');
   closeServer(srv);
+});
+
+// ---- 帧协议 v2：二进制通道 ----
+
+class FakeBinDc implements DcLike {
+  binaryOk = true;
+  frames: Array<any | Uint8Array> = [];
+  bufferedAmount = 0;
+  readyState = 'open';
+  send(data: string | Buffer | Uint8Array): void {
+    this.frames.push(typeof data === 'string' ? JSON.parse(data) : new Uint8Array(data.buffer ?? data, (data as Buffer).byteOffset ?? 0, (data as Buffer).byteLength ?? (data as Uint8Array).length));
+  }
+}
+
+test('binaryOk 通道：res-chunk 走二进制帧（无 base64 税），拼接还原原始字节', async () => {
+  const big = Buffer.alloc(40000, 0xab); // 多片（>16384）
+  const { server, port } = await startHttpServer();
+  // startHttpServer 的 /echo 回显：POST 40000B → 原样返回
+  const dc = new FakeBinDc();
+  const bridge = new HttpBridge();
+  await bridge.handle(dc, { k: 'req', id: 1, port, method: 'POST', path: '/echo', headers: {}, bodyB64: big.toString('base64') });
+  closeServer(server);
+  const head = dc.frames.find((f) => !(f instanceof Uint8Array) && f.k === 'res-head');
+  assert.ok(head, 'res-head 仍是 JSON 文本帧');
+  const chunks = dc.frames.filter((f): f is Uint8Array => f instanceof Uint8Array).map((u8) => decodeBinFrame(u8)!);
+  assert.ok(chunks.length >= 3, '40000B 至少 2 数据片 + 1 done');
+  assert.ok(chunks.every((c) => c.k === 'res-chunk' && c.id === 1));
+  const body = Buffer.concat(chunks.filter((c) => c.data).map((c) => Buffer.from(c.data!)));
+  assert.deepEqual(body, big);
+  assert.equal(chunks.at(-1)!.done, true);
+});
+
+test('无 binaryOk 的通道（tunnel 形态）：仍走 legacy base64 JSON（向后兼容）', async () => {
+  const { server, port } = await startHttpServer();
+  const dc = new FakeDc(); // 既有 stub：send JSON.parse(String(data))
+  const bridge = new HttpBridge();
+  await bridge.handle(dc, { k: 'req', id: 2, port, method: 'GET', path: '/', headers: {} });
+  closeServer(server);
+  const chunk = dc.frame((f: any) => f.k === 'res-chunk' && f.dataB64);
+  assert.ok(chunk, 'legacy 通道必须仍是 base64 文本帧');
 });

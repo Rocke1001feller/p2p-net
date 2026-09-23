@@ -13,6 +13,7 @@ import { WebSocketServer } from 'ws';
 import { HostAgent, PeerSession } from './host.js';
 import type { SigMessage } from './signaling/protocol.js';
 import type { PollResult } from './signaling/client.js';
+import { decodeBinFrame } from './frames.js';
 
 // ---- 内存信令 stub（照 host.integration.test.ts 模式）----
 
@@ -50,13 +51,20 @@ function closeServer(server: http.Server): void {
   (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
 }
 
-/** stub DataChannel（DcLike）：send 捕获出站帧到 sent。 */
+/** stub DataChannel（DcLike）：send 捕获出站帧到 sent。
+ *  帧协议 v2：模拟 v2 客户端——二进制帧经共享解码器还原为 legacy JSON 形状（断言面 dataB64/done 不变）。 */
 function mkDc(sent: any[]): any {
   return {
     label: 'proxy',
     bufferedAmount: 0,
     readyState: 'open',
-    send: (data: string) => sent.push(JSON.parse(data)),
+    send: (data: string | Buffer | Uint8Array) => {
+      if (typeof data === 'string') { sent.push(JSON.parse(data)); return; }
+      const bf = decodeBinFrame(data as Uint8Array);
+      if (!bf) return;
+      if (bf.k === 'res-chunk') sent.push({ k: 'res-chunk', id: bf.id, ...(bf.data ? { dataB64: Buffer.from(bf.data).toString('base64') } : {}), ...(bf.done ? { done: true } : {}) });
+      else sent.push({ k: 'ws-msg', wid: bf.wid, dataB64: Buffer.from(bf.data).toString('base64') });
+    },
     onmessage: null as null | ((ev: { data: string }) => void),
   };
 }

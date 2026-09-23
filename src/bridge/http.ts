@@ -5,20 +5,23 @@
  * - 请求头剥离清单：host/content-length/accept-encoding/connection/origin/referer；
  * - 响应头剥离清单：content-encoding/content-length/transfer-encoding/connection；
  * - location 头去掉本机 origin 前缀（http(s)://127.0.0.1:<port> / localhost:<port> → ''）；
- * - 16384B 分块 base64，done 帧收尾；101/204/205/304 无 body 特判（res-head 即收尾）；
+ * - 16384B 分块 + done 帧收尾：binaryOk 通道走帧协议 v2 二进制帧，否则 legacy base64 JSON；
+ *   101/204/205/304 无 body 特判（res-head 即收尾）；
  * - req-abort → AbortController 中止，服务器侧可见连接中止，对端静默（POC AbortError 同语义）；
  * - 老 POC 帧（无 port）→ 400 错误帧，不静默；本地连接失败 → 502 错误帧。
  * 背压：DataChannel bufferedAmount > 8MiB 时等待（POC dcSend 同语义）。
  * SW 侧 30s 超时语义不在 bridge（归 PWA SW）。
  */
 import http from 'node:http';
-import { chunkB64, isReq, isReqAbort, type ReqFrame, type TunnelFrame } from '../frames.js';
+import { chunkU8, encodeResChunkBin, isReq, isReqAbort, type ReqFrame, type TunnelFrame } from '../frames.js';
 
 /** DataChannel 最小结构（werift RTCDataChannel / 测试 stub 均满足）。 */
 export interface DcLike {
-  send(data: string | Buffer): void;
+  send(data: string | Buffer | Uint8Array): void;
   readonly bufferedAmount: number;
   readonly readyState?: string;
+  /** 数据面能力标记：true = 对端会解二进制帧（WebRTC 双端同批）；缺省 = legacy base64 JSON（tunnel）。 */
+  binaryOk?: boolean;
 }
 
 // 512KiB（2026-09-23 由 8MiB 下调）：有序通道里后发请求的 res-head 排在积压 chunk 之后，
@@ -41,16 +44,27 @@ export async function dcSend(dc: DcLike, frame: TunnelFrame): Promise<void> {
   await new Promise<void>((r) => setImmediate(r));
 }
 
+/** 二进制帧出站：背压与让出语义同 dcSend。 */
+export async function dcSendBin(dc: DcLike, u8: Uint8Array): Promise<void> {
+  if (dc.readyState !== undefined && dc.readyState !== 'open') return;
+  while (dc.bufferedAmount > BACKPRESSURE_BYTES) await sleep(10);
+  dc.send(u8);
+  await new Promise<void>((r) => setImmediate(r));
+}
+
+/** res-chunk 统一出口：binaryOk 走二进制帧，否则 legacy base64 JSON（tunnel/旧端）。 */
+async function sendChunk(dc: DcLike, id: number, data: Buffer | null, done: boolean): Promise<void> {
+  if (dc.binaryOk) return dcSendBin(dc, encodeResChunkBin(id, data, done));
+  if (data !== null) await dcSend(dc, { k: 'res-chunk', id, dataB64: data.toString('base64'), ...(done ? { done: true } : {}) });
+  else await dcSend(dc, { k: 'res-chunk', id, done: true });
+}
+
 function rewriteLocation(value: string, port: number): string {
   let v = value;
   for (const prefix of [`http://127.0.0.1:${port}`, `http://localhost:${port}`, `https://127.0.0.1:${port}`, `https://localhost:${port}`]) {
     v = v.split(prefix).join('');
   }
   return v;
-}
-
-function b64(text: string): string {
-  return Buffer.from(text, 'utf8').toString('base64');
 }
 
 export class HttpBridge {
@@ -73,7 +87,7 @@ export class HttpBridge {
     if (typeof frame.port !== 'number' || !Number.isInteger(frame.port) || frame.port <= 0 || frame.port > 65535) {
       // 老 POC 帧无 port：显式报错帧，不静默
       await dcSend(dc, { k: 'res-head', id, status: 400, headers: { 'content-type': 'text/plain; charset=utf-8' } });
-      await dcSend(dc, { k: 'res-chunk', id, dataB64: b64('bridge error: req.port missing (old POC frame not supported)'), done: true });
+      await sendChunk(dc, id, Buffer.from('bridge error: req.port missing (old POC frame not supported)', 'utf8'), true);
       return;
     }
 
@@ -112,30 +126,30 @@ export class HttpBridge {
       if (NO_BODY_STATUS.includes(res.statusCode ?? 0)) {
         this.ctrls.delete(id);
         res.resume();
-        await dcSend(dc, { k: 'res-chunk', id, done: true });
+        await sendChunk(dc, id, null, true);
         return;
       }
 
       let sentBytes = 0;
       for await (const chunk of res) {
-        for (const piece of chunkB64(chunk as Buffer)) {
+        for (const piece of chunkU8(chunk as Buffer)) {
           sentBytes += piece.length;
-          await dcSend(dc, { k: 'res-chunk', id, dataB64: piece });
+          await sendChunk(dc, id, Buffer.from(piece.buffer, piece.byteOffset, piece.byteLength), false);
         }
       }
       this.ctrls.delete(id);
-      await dcSend(dc, { k: 'res-chunk', id, done: true });
-      if (process.env.P2P_NET_DEBUG) console.error('[p2p-net] done#%d :%d%s %dB(b64) +%dms', id, frame.port, frame.path, sentBytes, Date.now() - t0);
+      await sendChunk(dc, id, null, true);
+      if (process.env.P2P_NET_DEBUG) console.error('[p2p-net] done#%d :%d%s %dB +%dms', id, frame.port, frame.path, sentBytes, Date.now() - t0);
     } catch (e) {
       this.ctrls.delete(id);
       const msg = e instanceof Error ? e.message : String(e);
       if (ctrl.signal.aborted) return; // 客户端取消：静默丢弃（POC AbortError 同语义）
       if (!headSent) {
         await dcSend(dc, { k: 'res-head', id, status: 502, headers: { 'content-type': 'text/plain; charset=utf-8' } });
-        await dcSend(dc, { k: 'res-chunk', id, dataB64: b64('host fetch error: ' + msg), done: true });
+        await sendChunk(dc, id, Buffer.from('host fetch error: ' + msg, 'utf8'), true);
       } else {
         // 头已发出、中途断流：以 done 帧干净收尾（body 截断）
-        await dcSend(dc, { k: 'res-chunk', id, done: true });
+        await sendChunk(dc, id, null, true);
       }
     }
   }

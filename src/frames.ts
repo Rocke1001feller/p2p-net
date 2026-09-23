@@ -34,7 +34,7 @@ export interface ResChunkFrame {
 export interface WsOpenFrame { k: 'ws-open'; wid: number; path: string; port?: number }
 export interface WsOpenOkFrame { k: 'ws-open-ok'; wid: number }
 export interface WsOpenErrFrame { k: 'ws-open-err'; wid: number }
-export interface WsMsgFrame { k: 'ws-msg'; wid: number; text?: string; dataB64?: string }
+export interface WsMsgFrame { k: 'ws-msg'; wid: number; text?: string; dataB64?: string; dataBin?: Uint8Array }
 export interface WsCloseFrame { k: 'ws-close'; wid: number; code?: number; reason?: string }
 export interface PingFrame { k: 'ping'; t: number }
 export interface PongFrame { k: 'pong'; t: number }
@@ -97,7 +97,8 @@ export function isWsOpenErr(x: unknown): x is WsOpenErrFrame {
   return shape(x, 'ws-open-err') && hasNum(x, 'wid');
 }
 export function isWsMsg(x: unknown): x is WsMsgFrame {
-  return shape(x, 'ws-msg') && hasNum(x, 'wid') && (hasStr(x, 'text') || hasStr(x, 'dataB64'));
+  return shape(x, 'ws-msg') && hasNum(x, 'wid') &&
+    (hasStr(x, 'text') || hasStr(x, 'dataB64') || (x as { dataBin?: unknown }).dataBin instanceof Uint8Array);
 }
 export function isWsClose(x: unknown): x is WsCloseFrame {
   return shape(x, 'ws-close') && hasNum(x, 'wid');
@@ -107,4 +108,56 @@ export function isPing(x: unknown): x is PingFrame {
 }
 export function isPong(x: unknown): x is PongFrame {
   return shape(x, 'pong') && hasNum(x, 't');
+}
+
+/** ---- 帧协议 v2：二进制数据帧（控制帧仍 JSON；双端同批发布，spec D1） ----
+ * 砍 base64 33% 字节税 + 双端编解码 CPU（v3 tc-cost 实测 TURN 字节因子 1.68：线字即成本）。
+ * 二进制 kind 与 JSON 的区分：JSON 文本首字节恒为 '{'(0x7B)。
+ */
+export const BIN_RES_CHUNK = 0x01;
+export const BIN_WS_MSG = 0x02;
+
+export interface ResChunkBinFrame { k: 'res-chunk'; id: number; data?: Uint8Array; done?: boolean }
+export interface WsMsgBinFrame { k: 'ws-msg'; wid: number; data: Uint8Array }
+
+export function encodeResChunkBin(id: number, data: Uint8Array | null, done: boolean): Uint8Array {
+  const body = data ?? new Uint8Array(0);
+  const out = new Uint8Array(6 + body.length);
+  out[0] = BIN_RES_CHUNK;
+  out[1] = (id >>> 24) & 0xff; out[2] = (id >>> 16) & 0xff; out[3] = (id >>> 8) & 0xff; out[4] = id & 0xff;
+  out[5] = done ? 1 : 0;
+  out.set(body, 6);
+  return out;
+}
+
+export function encodeWsMsgBin(wid: number, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(5 + data.length);
+  out[0] = BIN_WS_MSG;
+  out[1] = (wid >>> 24) & 0xff; out[2] = (wid >>> 16) & 0xff; out[3] = (wid >>> 8) & 0xff; out[4] = wid & 0xff;
+  out.set(data, 5);
+  return out;
+}
+
+/** 首字节判别：是否二进制数据帧（不够长/未知 kind → false，调用方走 JSON 路径）。 */
+export function isBinFrame(buf: Uint8Array): boolean {
+  return buf.length >= 5 && (buf[0] === BIN_RES_CHUNK || buf[0] === BIN_WS_MSG);
+}
+
+export function decodeBinFrame(buf: Uint8Array): ResChunkBinFrame | WsMsgBinFrame | null {
+  if (!isBinFrame(buf)) return null;
+  const id = ((buf[1] * 0x1000000) + (buf[2] << 16) + (buf[3] << 8) + buf[4]) >>> 0;
+  if (buf[0] === BIN_RES_CHUNK) {
+    if (buf.length < 6) return null;
+    const done = (buf[5] & 1) === 1;
+    const data = buf.length > 6 ? buf.subarray(6) : undefined;
+    return { k: 'res-chunk', id, ...(data ? { data } : {}), ...(done ? { done: true } : {}) };
+  }
+  return { k: 'ws-msg', wid: id, data: buf.subarray(5) };
+}
+
+/** 大 buffer → ≤16384B 原始字节分片（二进制帧用；顺序拼接可还原）。 */
+export function chunkU8(buf: Uint8Array): Uint8Array[] {
+  const out: Uint8Array[] = [];
+  for (let i = 0; i < buf.length; i += CHUNK_SIZE) out.push(buf.subarray(i, i + CHUNK_SIZE));
+  return out;
 }

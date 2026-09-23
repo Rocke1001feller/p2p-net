@@ -7,6 +7,17 @@ import { Peer, type LinkStatus } from '../peer.js';
 import { roomFor, type SigMessage } from '../signaling/protocol.js';
 import type { PollResult } from '../signaling/client.js';
 import type { IceCandidateLike } from '../signaling/protocol.js';
+import { decodeBinFrame } from '../frames.js';
+
+/** 帧协议 v2 模拟客户端入站归一化：JSON 文本直收；二进制帧经共享解码器（与 Task 3 PWA 同源）
+ * 还原为 legacy JSON 形状——本文件的旧断言面（dataB64/done）因此逐字不变。 */
+function pushInbound(msgs: any[], data: unknown): void {
+  if (typeof data === 'string') { msgs.push(JSON.parse(data)); return; }
+  const bf = decodeBinFrame(data as Uint8Array);
+  if (!bf) return;
+  if (bf.k === 'res-chunk') msgs.push({ k: 'res-chunk', id: bf.id, ...(bf.data ? { dataB64: Buffer.from(bf.data).toString('base64') } : {}), ...(bf.done ? { done: true } : {}) });
+  else msgs.push({ k: 'ws-msg', wid: bf.wid, dataB64: Buffer.from(bf.data).toString('base64') });
+}
 
 // ---- 内存信令 stub（SignalingClientLike）----
 
@@ -118,7 +129,7 @@ test('HostAgent 集成：werift↔werift offer→DC→req→res→ctrl ping/pong
   pump.unref?.();
 
   const { proxy, ctrl } = offer.channels;
-  proxy.onmessage = (ev) => { proxyMsgs.push(JSON.parse(String(ev.data))); };
+  proxy.onmessage = (ev) => pushInbound(proxyMsgs, ev.data);
   ctrl.onmessage = (ev) => { ctrlMsgs.push(JSON.parse(String(ev.data))); };
 
   try {
@@ -299,7 +310,7 @@ test('HostAgent：两个客户端（不同 deviceId）同时在线，host 必须
     }, 20);
     pump.unref?.();
     const { proxy } = offer.channels;
-    proxy.onmessage = (ev) => { proxyMsgs.push(JSON.parse(String(ev.data))); };
+    proxy.onmessage = (ev) => pushInbound(proxyMsgs, ev.data);
     await until(() => proxy.readyState === 'open', 20000, `${dev} dc open`);
     return { client, proxy, proxyMsgs, dev };
   };
