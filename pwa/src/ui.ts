@@ -67,6 +67,25 @@ const MODE_BADGE: Record<string, string> = { p2p: 'p2p', tunnel: 'relay', turn: 
 /** 心跳 pong 的状态帧不带 mode——记住最后一次真实落点，别把中继谎报成"直连"。 */
 let lastMode: string | null = null;
 
+/** stall 黄灯（spec D5）：徽章照常诚实落点，圆点转琥珀——"疑似卡顿"与"模式"两个维度并存。 */
+let stallOn = false;
+
+export function setStall(on: boolean): void {
+  if (on === stallOn) return; // 3s 一拍重入：状态没变就不重绘
+  stallOn = on;
+  if (on) {
+    const dot = $('connDot');
+    dot.style.background = '#B26A00'; // 琥珀：绿（健康）与红（断）之间的「疑似卡顿」
+    dot.className = 'dot breath';
+  }
+  // 熄灭不在这里画色：恢复由下一次 setStatus（pong 到达即触发 connected）全权重建
+}
+
+/** setStatus 内部读取：connected 分支画完模式色后，stallOn 覆盖为琥珀。 */
+export function isStallOn(): boolean {
+  return stallOn;
+}
+
 export function setStatus(s: CascadeStatus, deviceName: string): void {
   const dot = $('connDot');
   const title = $('connTitle');
@@ -85,6 +104,7 @@ export function setStatus(s: CascadeStatus, deviceName: string): void {
     badge.textContent = MODE_LABEL[mode] ?? '已连接';
     title.append(b, ' ', badge);
     rtt.textContent = s.rttMs !== undefined ? `${Math.round(s.rttMs)} ms` : '';
+    if (stallOn) dot.style.background = '#B26A00'; // stall 示警优先级高于模式色（双驱动交汇点）
     $('btnDisconnect').classList.remove('hidden');
   } else if (s.state === 'connecting') {
     dot.style.background = 'var(--conn)';

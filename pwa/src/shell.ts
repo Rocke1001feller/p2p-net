@@ -39,9 +39,10 @@ import { DataPlaneLiveness, WEDGE_MS } from './dataPlaneLiveness.js';
 import {
   hideConnecting, hideSheets, log, renderDevices, setMe, setStatus, showConnecting,
   showOfflineSheet, showPasteSheet, showScreen, showTab, setWorkspaceEnabled, toast,
-  connectingStage, wechatGuard, showBrowserHint,
+  connectingStage, wechatGuard, showBrowserHint, setStall,
   type SavedDevice,
 } from './ui.js';
+import { stallSuspect } from './stall.js';
 
 const Q = new URLSearchParams(location.search);
 const DEV_MODE = Q.get('dev') === '1';
@@ -338,7 +339,17 @@ function dataPlaneWedged(): boolean {
   return liveness.wedged(inflightSw.size);
 }
 
+/** stall 示警（spec D5）：tunnel 段 ctrlAlive 恒 false——隧道无 dc 静默概念，SW 超时兜底。 */
+function checkStall(): boolean {
+  return stallSuspect({
+    ctrlAlive: cascade?.mode !== 'tunnel' && (cascade?.isOpen ?? false),
+    inFlight: inflightSw.size,
+    silentMs: liveness.silentFor(),
+  });
+}
+
 setInterval(() => {
+  setStall(checkStall());
   if (cascade && cascade.mode !== 'tunnel' && inflightSw.size > 0) {
     log(`[pulse] 在途 ${inflightSw.size} 条；累计回帧 ${frameLedger.res}；静默 ${Math.round(liveness.silentFor() / 1000)}s`);
   }
@@ -1035,6 +1046,7 @@ $id('btnPastePair2').onclick = openPaste;
   // 排障用（2026-09-12）：gen 用于识别僵尸会话，inflight 用于识别数据面黑洞
   gen: cascadeGen,
   inflightSw: inflightSw.size,
+  stall: checkStall(),
   // 帧账本：sent/res 差距大 = 回程丢帧；lastHung 直接给出是哪些路径没回来
   frames: {
     sent: frameLedger.sent,
