@@ -35,6 +35,8 @@ export interface CascadeOptions {
   onStatus: (s: CascadeStatus) => void;
   /** 仅 WebRTC 段产生隧道帧（tunnel 段的 HTTP/WS 由 shell 直接走网关）。 */
   onFrame: (frame: any) => void;
+  /** getStats 展平行透传（5s 节拍，spec D9 帧账本 wire 采样用；仅 WebRTC 段产生）。 */
+  onStatsRows?: (rows: Record<string, any>[]) => void;
   /** 从信令学到的隧道网关公告（host Task 11；现在主要靠二维码 u= 携带）。 */
   onTunnelUrl?: (u: string) => void;
   /** p2p 段 STUN 服务器（由运行时配置 relays 推导，shell 在 boot 时注入）。 */
@@ -180,6 +182,7 @@ export class CascadeSession {
         this.emit({ ...s, mode: undefined });
       },
       onFrame: this.opts.onFrame,
+      onStatsRows: this.opts.onStatsRows,
     });
     const done = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`webrc_timeout_${timeoutMs}`)), timeoutMs);

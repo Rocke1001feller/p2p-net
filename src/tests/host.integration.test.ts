@@ -203,6 +203,52 @@ test('HostAgent：同设备重绑必须换新会话——替换后 disconnected 
   agent.stop();
 });
 
+test('HostAgent：同设备重绑先发终结帧（带账本快照）再摘除——replace 不丢会话成本（Task 5 修复轮）', async () => {
+  // 修复前：replace 分支 `existing.dispose(); sessions.delete()` 静默丢账——被换会话的累计
+  // 字节永远到不了 session_end/events.jsonl，而手机重连是主导生命周期（每换一次绑丢一整段）。
+  const statuses: HostStatus[] = [];
+  const agent = new HostAgent({
+    supabaseUrl: 'http://unused.invalid', publishableKey: 'pk', accessToken: () => null,
+    deviceId: 'd', uid: 'u', turnFetcher: async () => ({ iceServers: [] }),
+    signaling: new MemSignaling(), pollMs: 30,
+    onStatus: (s) => statuses.push(s),
+  });
+  const onSignal = (agent as unknown as { onSignal: (m: unknown) => Promise<void> }).onSignal.bind(agent);
+  const sessions = (agent as unknown as { sessions: Map<string, PeerSession> }).sessions;
+  const bogusSdp = { type: 'offer', sdp: 'v=0 bogus' };
+  await onSignal({ type: 'offer', sid: 's1', from: 'phone-1', sdp: bogusSdp }).catch(() => {});
+  const first = sessions.get('phone-1');
+  assert.ok(first, '首个 offer 后应登记会话');
+  // 旧会话已累计成本（手机重连前跑了一段流量）
+  first.lastStatus = { state: 'connected', pairType: 'p2p' };
+  first.ledger.req = 5; first.ledger.resDone = 4;
+  first.ledger.bytesSent = 1234; first.ledger.bytesRecv = 567;
+  first.ledger.pathType = 'relay';
+  first.ledger.wireBytesSent = 2000; first.ledger.wireBytesRecv = 900;
+
+  await onSignal({ type: 'offer', sid: 's2', from: 'phone-1', sdp: bogusSdp }).catch(() => {});
+
+  const terms = statuses.filter((s) => s.endReason === 'replaced');
+  assert.equal(terms.length, 1, '重绑必须恰好发一次终结帧（修复前零次：静默 dispose 成本全丢）');
+  const t = terms[0];
+  assert.equal(t.state, 'closed');
+  assert.equal(t.clientKey, 'phone-1');
+  assert.equal(t.pairType, 'p2p', '终结帧保留 lastStatus 链路信息');
+  assert.deepEqual(t.ledger, {
+    req: 5, resDone: 4, bytesSent: 1234, bytesRecv: 567,
+    pathType: 'relay', wireBytesSent: 2000, wireBytesRecv: 900,
+  }, '终结帧带被换会话的最终账本快照');
+  // 快照是拷贝：旧会话账本后续变化不得污染已发事件
+  first.ledger.req = 999;
+  assert.equal(t.ledger!.req, 5);
+  // 出表守卫：旧会话的残余状态回声（dispose → pc.close() 的异步 closed）不得再发第二份终态
+  (agent as unknown as { onSessionStatus: (k: string, s: PeerSession, st: LinkStatus) => void })
+    .onSessionStatus('phone-1', first, { state: 'closed', pairType: null });
+  const allTerms = statuses.filter((s) => s.clientKey === 'phone-1' && (s.state === 'closed' || s.state === 'failed'));
+  assert.equal(allTerms.length, 1, '终态只发一次（回声被出表守卫拦截）');
+  agent.stop();
+});
+
 test('HostAgent：ws-open 在未配置 wsPort 时回 open-err（不静默）', async () => {
   const agent = new HostAgent({
     supabaseUrl: 'http://unused.invalid',

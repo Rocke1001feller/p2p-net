@@ -29,7 +29,7 @@ import { HttpBridge, dcSend, type DcLike } from '../bridge/http.js';
 import { WsBridge } from '../bridge/ws.js';
 import { PORTS } from '../contracts.js';
 import { isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen } from '../frames.js';
-import { HostAgent, type HostAgentOptions, type HostStatus } from '../host.js';
+import { HostAgent, type HostAgentOptions, type HostStatus, type SessionLedger } from '../host.js';
 import { createLogger, type Logger } from '../log/logger.js';
 import { ensureFreshToken, type AuthState } from '../server/auth.js';
 import { startControlPlane, startDiscovery } from '../server/control.js';
@@ -48,6 +48,8 @@ export interface ServerLike {
 export interface HostAgentLike {
   start(): void;
   stop(): void;
+  /** 数据面计量快照（Task 5，spec D5/D8+D9）：假 agent/旧装配可无此方法（/status 容错为 null）。 */
+  dataPlaneSnapshot?(): { totals: SessionLedger; sessions: number; byPath: Record<string, number> };
 }
 
 /** TunnelClient 的最小装配面（含数据面接线所需的 send/isOpen）。 */
@@ -233,7 +235,19 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
       } else if (s.state === 'closed' || s.state === 'failed') {
         if (openSids.delete(sid)) {
           lastCascade.delete(sid);
-          record({ name: 'session_end', sid, reason: s.state });
+          // bytesUp/bytesDown 视角 = host 进程：bytesSent=host→客户端（下行）记 bytesUp，
+          // bytesRecv=客户端→host（上行）记 bytesDown（events.ts :27-28 既有字段，语义注释对齐）。
+          // wireBytes/pathType 同视角（getStats 选定对增量，spec D9；wireBytesUp=wireBytesSent）。
+          record({
+            name: 'session_end', sid, reason: s.endReason ?? s.state,
+            ...(s.ledger
+              ? {
+                bytesUp: s.ledger.bytesSent, bytesDown: s.ledger.bytesRecv,
+                wireBytesUp: s.ledger.wireBytesSent, wireBytesDown: s.ledger.wireBytesRecv,
+                pathType: s.ledger.pathType,
+              }
+              : {}),
+          });
         }
       }
     };
@@ -246,6 +260,7 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
         sessions: aggregateSessions(eventRing),
         services: scanner.list().length,
         mode: 'foreground',
+        dataPlane: host?.dataPlaneSnapshot?.() ?? null, // 旧进程/启动早期为 null，status.ts 容错省略
       }),
     });
     teardowns.push(() => closeServer(control));

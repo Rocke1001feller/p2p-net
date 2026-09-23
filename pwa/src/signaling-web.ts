@@ -29,6 +29,8 @@ export interface SessionOptions {
   onStatus: (s: LightStatus) => void;
   /** proxy 通道上的隧道帧（req 响应帧由 shell 消费；ws-* 转发进对应 tab iframe）。 */
   onFrame: (frame: any) => void;
+  /** getStats 展平行（5s 既有节拍，spec D9）：shell 据此喂帧账本 wire 采样（只写内存）。 */
+  onStatsRows?: (rows: Record<string, any>[]) => void;
 }
 
 const POLL_MS = 800;          // plan Task 4：800ms 增量轮询
@@ -216,6 +218,7 @@ export class WebRtcSession {
     if (!this.pc) return;
     try {
       const rows = this.statsToRows(await this.pc.getStats());
+      this.opts.onStatsRows?.(rows); // 帧账本 wire 采样（spec D9）：与状态灯共用同一拍，不新增 getStats 调用
       this.lastPairType = pairTypeFromStats(rows);
       const rtt = rttFromStats(rows);
       const relayAddr = relayAddrFromStats(rows);

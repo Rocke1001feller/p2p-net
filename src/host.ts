@@ -22,6 +22,7 @@ import { assertPortAllowed, PortNotAllowedError } from './bridge/guard.js';
 import { decodeFrame, decodeBinFrame, isPing, isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen, type TunnelFrame } from './frames.js';
 import { SignalingClient, type PollResult } from './signaling/client.js';
 import { isSigMessage, roomFor, type SigMessage } from './signaling/protocol.js';
+import { selectedPairStats, type PathType } from './pathType.js';
 
 export interface TurnCredentials {
   iceServers: RTCIceServer[];
@@ -39,6 +40,11 @@ export type HostStatus = LinkStatus & {
   deviceId: string;
   /** 会话归属的客户端 deviceId（SigMessage.from）——事件流 sid 的事实来源（Task 19 ruling #1）。 */
   clientKey: string;
+  /** 会话帧账本快照（Wave 1，spec D5/D8）：终态事件带最终字节量。 */
+  ledger?: SessionLedger;
+  /** 终结原因细分（Task 5 修复轮）：'replaced' = 同设备新 offer 换绑合成的终态，
+   *  与正常 closed / 宽限到期 failed 区分（start.ts 记为 session_end 的 reason）。 */
+  endReason?: string;
 };
 
 export interface HostAgentOptions {
@@ -105,6 +111,25 @@ export function asDataPlaneDc(dc: RTCDataChannel): DcLike {
  * 单客户端会话：一个 Peer + 独立 HttpBridge/WsBridge（桥键空间按会话隔离，不串响应）。
  * 同 deviceId 新 offer → replace()（POC「最新 offer 换绑」保留在单设备内）；dispose() 释放。
  */
+
+/** 会话帧账本（spec D5/D8，成本一等指标）：req 计数 / 完成计数 / 双向线字节。
+ *  Wave 1 增补（spec D9）：pathType（getStats 选定对推导）+ wire 字节（选定对累计增量，
+ *  字节因子 = wire 增量 ÷ 应用字节增量的分子）。 */
+export interface SessionLedger {
+  req: number;
+  resDone: number;
+  bytesSent: number;
+  bytesRecv: number;
+  /** 传输路径：direct/relay 来自 getStats 采样；tunnel 由帧级 via 归类；未判定 = unknown。 */
+  pathType: PathType;
+  wireBytesSent: number;
+  wireBytesRecv: number;
+}
+
+export function makeLedger(): SessionLedger {
+  return { req: 0, resDone: 0, bytesSent: 0, bytesRecv: 0, pathType: 'unknown', wireBytesSent: 0, wireBytesRecv: 0 };
+}
+
 export class PeerSession {
   readonly peer = new Peer([], { transport: 'all' });
   readonly httpBridge = new HttpBridge();
@@ -123,12 +148,19 @@ export class PeerSession {
   private readonly pool: DcLike[] = [];
   private readonly reqDc = new Map<number, DcLike>();
   private readonly widDc = new Map<number, DcLike>();
+  readonly ledger = makeLedger();
+  private wireTimer?: ReturnType<typeof setInterval>;
 
   constructor(wsPort?: number, isPortAllowed?: (port: number) => boolean) {
     this.wsPort = wsPort;
     this.isPortAllowed = isPortAllowed;
     this.wsBridge = new WsBridge({ port: wsPort });
-    this.httpBridge.onSettled = (id) => this.reqDc.delete(id);
+    this.httpBridge.onSettled = (id) => {
+      // 注意（Task 4 评审留存）：settle 早于最终 done 帧发送（http.ts 三路殊途同归），
+      // 但 done 帧走 doReq 闭包捕获的 dc 参数（即 meterDc 包装），字节计量不依赖 reqDc 回查，不丢。
+      this.reqDc.delete(id);
+      this.ledger.resDone += 1;
+    };
   }
 
   /** §5.3 白名单校验：true=放行；仅 PortNotAllowedError 折成 false（拒绝），其余异常上抛。 */
@@ -148,6 +180,23 @@ export class PeerSession {
     return (idx >= 0 ? this.pool[idx] : undefined) ?? fallback;
   }
 
+  /** 出站计量包装：asDataPlaneDc 之上叠 bytesSent 累计（每会话独立账本；DcLike.binaryOk 透传）。
+   *  注意：不得用 {...base} 展开——spread 会把 bufferedAmount/readyState 的活 getter 固化成
+   *  包装瞬间的值，背压/选路读数随即失真（pool-host.test.ts 实锤）。 */
+  private meterDc(dc: RTCDataChannel): DcLike {
+    const base = asDataPlaneDc(dc);
+    const ledger = this.ledger;
+    return {
+      binaryOk: base.binaryOk,
+      get bufferedAmount() { return base.bufferedAmount; },
+      get readyState() { return base.readyState; },
+      send: (data) => {
+        ledger.bytesSent += typeof data === 'string' ? Buffer.byteLength(data) : data.byteLength;
+        base.send(data);
+      },
+    };
+  }
+
   wireChannel(dc: RTCDataChannel, label: string, onServiceFrame?: (dc: RTCDataChannel, frame: unknown) => void): void {
     if (label === 'ctrl') {
       dc.onmessage = (ev) => {
@@ -158,10 +207,12 @@ export class PeerSession {
     }
     const poolIdx = proxyLabelIdx(label);
     if (poolIdx >= 0) {
-      const bdc = asDataPlaneDc(dc);
+      const bdc = this.meterDc(dc);
       this.pool[poolIdx] = bdc;
+      this.startWireSampler(); // 会话建池后启动 wire 采样（spec D9；幂等）
       dc.onmessage = (ev) => {
         const raw = ev.data;
+        this.ledger.bytesRecv += typeof raw === 'string' ? Buffer.byteLength(raw) : (raw as Buffer).byteLength;
         if (raw instanceof Buffer || raw instanceof Uint8Array) {
           // Task 2 二进制入站：PWA ws 上行（encodeWsMsgBin）——跟随 wid 粘滞通道。
           const bf = decodeBinFrame(raw instanceof Uint8Array && !Buffer.isBuffer(raw) ? Buffer.from(raw) : raw as Buffer);
@@ -182,6 +233,7 @@ export class PeerSession {
             return;
           }
           dbg('req', m.method, 'port=' + m.port, m.path);
+          this.ledger.req += 1;
           const out = this.pickDc(bdc);
           this.reqDc.set(m.id, out);
           void this.httpBridge.handle(out, m);
@@ -217,10 +269,36 @@ export class PeerSession {
     };
   }
 
+  /** wire 采样（spec D9，默认 5s 节拍）：getStats 选定对累计值→增量累进账本。
+   *  纪律：只写内存账本，采样失败零副作用；/status 快照与 events.jsonl 走既有路径，不新增 I/O。
+   *  intervalMs 为测试缝（生产恒默认）。 */
+  startWireSampler(intervalMs = 5_000): void {
+    if (this.wireTimer) return;
+    let prevWire: { wireSent: number; wireRecv: number } | undefined;
+    this.wireTimer = setInterval(() => {
+      void (async () => {
+        const pc = this.peer.pc;
+        if (!pc) return;
+        try {
+          const stats = await pc.getStats();
+          const cur = selectedPairStats([...stats.values()]);
+          if (prevWire) {
+            this.ledger.wireBytesSent += Math.max(0, cur.wireSent - prevWire.wireSent);
+            this.ledger.wireBytesRecv += Math.max(0, cur.wireRecv - prevWire.wireRecv);
+          }
+          if (cur.pathType !== 'unknown') this.ledger.pathType = cur.pathType;
+          prevWire = { wireSent: cur.wireSent, wireRecv: cur.wireRecv };
+        } catch { /* 采样失败零副作用，下拍再来 */ }
+      })();
+    }, intervalMs);
+    this.wireTimer.unref?.();
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.clearGrace();
+    if (this.wireTimer) { clearInterval(this.wireTimer); this.wireTimer = undefined; }
     try { this.peer.close(); } catch { /* 已关闭 */ }
     this.httpBridge.abortAll();
     this.wsBridge.closeAll();
@@ -328,7 +406,19 @@ export class HostAgent {
       const existing = this.sessions.get(clientKey);
       // 同设备换绑：dispose 旧会话并新建 PeerSession（POC「最新 offer 优先」语义限定在单设备内）。
       // dispose 不可逆（disposed 永久置位），复用旧对象会挡死宽限回调并让后续 dispose 早退。
-      if (existing) { dbg('session replace', clientKey); existing.dispose(); this.sessions.delete(clientKey); }
+      if (existing) {
+        dbg('session replace', clientKey);
+        // 换绑终结帧（Task 5 修复轮）：旧语义是静默 dispose，被换会话的累计字节永远到不了
+        // session_end/events.jsonl——手机重连是主导生命周期，每换一次绑丢一整段成本数据。
+        // 必须先在表内发终结帧（带账本快照，endReason='replaced' 与正常 closed 区分），
+        // 再摘除释放；此后旧会话的残余回声由 onSessionStatus 出表守卫拦截，终态只发一次。
+        this.opts.onStatus?.({
+          ...existing.lastStatus, state: 'closed', endReason: 'replaced',
+          deviceId: this.opts.deviceId, clientKey, ledger: { ...existing.ledger },
+        });
+        existing.dispose();
+        this.sessions.delete(clientKey);
+      }
       const session = new PeerSession(this.opts.wsPort, this.opts.isPortAllowed);
       this.sessions.set(clientKey, session);
       dbg('offer accepted', 'from=' + clientKey);
@@ -380,7 +470,7 @@ export class HostAgent {
     if (verdict === 'keep') session.clearGrace();
     else if (verdict === 'drop') this.dropSession(clientKey, session);
     else session.startGrace(this.opts.sessionGraceMs ?? SESSION_GRACE_MS, () => this.expireSession(clientKey, session));
-    this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId, clientKey });
+    this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId, clientKey, ledger: { ...session.ledger } });
   }
 
   /**
@@ -389,13 +479,30 @@ export class HostAgent {
    * 活跃会话（静默 drop 无终态事件，环形缓冲里的 session_start 永远配不了对）。
    */
   private expireSession(clientKey: string, session: PeerSession): void {
-    this.opts.onStatus?.({ ...session.lastStatus, state: 'failed', deviceId: this.opts.deviceId, clientKey });
+    this.opts.onStatus?.({ ...session.lastStatus, state: 'failed', deviceId: this.opts.deviceId, clientKey, ledger: { ...session.ledger } });
     this.dropSession(clientKey, session);
   }
 
   /** 单测/排障用：当前会话数。 */
   get sessionCount(): number {
     return this.sessions.size;
+  }
+
+  /** 数据面计量快照（/status 与成本观测，spec D5/D8 + D9）：全部活跃会话账本求和 + 会话级路径分布。
+   *  totals.pathType 无求和语义（恒 'unknown'），逐会话路径占比看 byPath。 */
+  dataPlaneSnapshot(): { totals: SessionLedger; sessions: number; byPath: Record<PathType, number> } {
+    const totals = makeLedger();
+    const byPath: Record<PathType, number> = { direct: 0, relay: 0, tunnel: 0, unknown: 0 };
+    for (const s of this.sessions.values()) {
+      totals.req += s.ledger.req;
+      totals.resDone += s.ledger.resDone;
+      totals.bytesSent += s.ledger.bytesSent;
+      totals.bytesRecv += s.ledger.bytesRecv;
+      totals.wireBytesSent += s.ledger.wireBytesSent;
+      totals.wireBytesRecv += s.ledger.wireBytesRecv;
+      byPath[s.ledger.pathType] += 1;
+    }
+    return { totals, sessions: this.sessions.size, byPath };
   }
 
   private async getIceServers(): Promise<RTCIceServer[]> {

@@ -34,6 +34,7 @@ import {
   HEALTH_CHECK_DELAYS_MS, bootGateDecision, dataPlaneAlive, healthDecision, looksBooted,
 } from './workbenchRecovery.js';
 import { CascadeSession, type LinkMode } from './session.js';
+import { FrameLedger, type HungEntry } from './frameLedger.js';
 import { DataPlaneLiveness, WEDGE_MS } from './dataPlaneLiveness.js';
 import {
   hideConnecting, hideSheets, log, renderDevices, setMe, setStatus, showConnecting,
@@ -90,33 +91,17 @@ let dcSeq = 0;
  * 这里记录 ①发出 ②回帧 ③超过 9s 仍无回帧（含 path），并随 __p2pNetDebug() 暴露，
  * 于是这类问题下次**不需要 SSH、不需要 CDP**：手机上看一眼就知道死在哪一环。
  */
-const frameLedger = {
-  sent: 0, res: 0, hung: 0,
-  inFlight: new Map<number, { port?: number; path: string; at: number }>(),
-  lastHung: [] as { port?: number; path: string; ms: number }[],
-};
-function trackReq(gid: number, port: number | undefined, path: string): void {
-  frameLedger.sent += 1;
-  frameLedger.inFlight.set(gid, { port, path, at: Date.now() });
+const frameLedger = new FrameLedger();
+/** 帧账本（语义同 2026-09-12 内联版；字节计量为 Wave 1 增量，spec D5/D8）。 */
+function trackReq(gid: number, port: number | undefined, path: string, outFrame?: unknown): void {
+  frameLedger.trackReq(gid, port, path, outFrame);
 }
-function settleReq(gid: number): void {
-  if (frameLedger.inFlight.delete(gid)) frameLedger.res += 1;
+function settleReq(gid: number, inFrame?: unknown): void {
+  frameLedger.settleReq(gid, inFrame);
 }
 /** 把"挂了多久还没回帧"的请求摘出来（watchdog 与诊断共用） */
-function harvestHung(now = Date.now()): { port?: number; path: string; ms: number }[] {
-  const out: { port?: number; path: string; ms: number }[] = [];
-  for (const [gid, f] of frameLedger.inFlight) {
-    if (now - f.at > SW_HANG_MS) {
-      out.push({ port: f.port, path: f.path, ms: now - f.at });
-      frameLedger.inFlight.delete(gid);
-    }
-  }
-  if (out.length) {
-    frameLedger.hung += out.length;
-    frameLedger.lastHung = out.slice(0, 8);
-    for (const h of out) log(`[frame] 无回帧 ${Math.round(h.ms / 1000)}s：:${h.port ?? '?'}${h.path}`);
-  }
-  return out;
+function harvestHung(): HungEntry[] {
+  return frameLedger.harvestHung(Date.now(), SW_HANG_MS, log);
 }
 let cascade: CascadeSession | null = null;
 /** 会话代号：重连后旧实例的 onStatus/onFrame 迟到事件一律作废（2026-09-12 假直连根因修复）。 */
@@ -253,17 +238,19 @@ async function onSwReq(m: { id: number; port?: number; method: string; path: str
   const timer = setTimeout(() => pendingSw.delete(gid), 90_000); // 慢链路大文件传输可超 31s；90s 兜底 GC
   pendingSw.set(gid, { swPort, origId: m.id, timer });
   inflightSw.set(gid, Date.now()); // 看门狗计时（回帧时清）
-  trackReq(gid, m.port, m.path);   // 帧账本：发出记一笔，回帧销账
   if (cascade.mode === 'tunnel') {
-    // 隧道模式：SW req 分流到网关 HTTP（流式回帧后清理）
+    // 隧道模式：SW req 分流到网关 HTTP（流式回帧后清理）——隧道段走网关 HTTP，不进 dc 账本；
+    // 但 spec D9 路径归类：响应帧计 wire 桶且 pathType 记 'tunnel'（隧道段无 ICE 对，getStats 判不到）。
     const finish = (frame: any): void => {
       swPort.postMessage({ ...frame, id: m.id });
       if (frame.k === 'res-chunk' && frame.done) clearTimeout(timer);
     };
-    await cascade.tunnelProxy({ ...m, port: m.port ?? 0 }, (frame) => finish({ ...frame, id: gid }));
+    await cascade.tunnelProxy({ ...m, port: m.port ?? 0 }, (frame) => { frameLedger.noteTunnelFrame(frame); finish({ ...frame, id: gid }); });
     return;
   }
-  await cascade.send({ k: 'req', id: gid, port: m.port, method: m.method, path: m.path, headers: m.headers, bodyB64: m.bodyB64 ?? null });
+  const frame = { k: 'req' as const, id: gid, port: m.port, method: m.method, path: m.path, headers: m.headers, bodyB64: m.bodyB64 ?? null };
+  trackReq(gid, m.port, m.path, frame);   // 帧账本：发出记一笔（含线字节），回帧销账
+  await cascade.send(frame);
 }
 
 function onSwAbort(m: { id: number }): void {
@@ -286,6 +273,7 @@ function b64(s: string): string {
 /** shell 自身请求（服务发现 / 控制台免登）：按模式分流。 */
 async function fetchVia(port: number, path: string, timeoutMs = 30_000): Promise<{ status: number; body: Uint8Array }> {
   if (cascade?.mode === 'tunnel' && cascade.tunnelUrl) {
+    frameLedger.noteTunnelFrame(); // 路径归类（spec D9）：本分支为裸 fetch 无帧，只记 pathType
     const gw = cascade.tunnelUrl.replace(/\/+$/, '');
     const res = await fetch(`${gw}/s/${port}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
     return { status: res.status, body: new Uint8Array(await res.arrayBuffer()) };
@@ -296,15 +284,16 @@ async function fetchVia(port: number, path: string, timeoutMs = 30_000): Promise
     const entry = { resolve, chunks: [] as Uint8Array[], status: 200, timer: setTimeout(() => { pendingFetch.delete(gid); resolve({ status: 504, body: new Uint8Array() }); }, timeoutMs) };
     pendingFetch.set(gid, entry);
   });
-  trackReq(gid, port, path);
-  await cascade.send({ k: 'req', id: gid, port, method: 'GET', path, headers: { accept: 'application/json' }, bodyB64: null });
+  const frame = { k: 'req' as const, id: gid, port, method: 'GET', path, headers: { accept: 'application/json' }, bodyB64: null };
+  trackReq(gid, port, path, frame);
+  await cascade.send(frame);
   return p;
 }
 
 function onDcFrame(m: any): void {
   liveness.noteFrame(); // 任何数据面回帧都是活性证明（含 ws-* / pong）
   if (m.k === 'res-head' || m.k === 'res-chunk') {
-    settleReq(m.id); // 帧账本：回帧销账（无论是 SW 请求还是 shell 自身请求）
+    settleReq(m.id, m); // 帧账本：回帧销账（无论是 SW 请求还是 shell 自身请求；含线字节）
     const sw = pendingSw.get(m.id);
     if (sw) {
       if (m.k === 'res-chunk' && m.done) { clearTimeout(sw.timer); pendingSw.delete(m.id); }
@@ -435,6 +424,7 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
     servicesPort: activeDiscoveryPort,
     onStatus: (s) => { if (gen === cascadeGen) onCascadeStatus(s); },
     onFrame: (m) => { if (gen === cascadeGen) onDcFrame(m); },
+    onStatsRows: (rows) => { if (gen === cascadeGen) frameLedger.sampleWireStats(rows); }, // wire 采样（spec D9；僵尸会话作废）
     onTunnelUrl: (u) => { desk.tunnelUrl = u; },
   });
   // dev 覆盖：?ice= 注入两段 WebRTC 的 iceServers；?transport=relay 只跑 TURN 段
@@ -1050,6 +1040,11 @@ $id('btnPastePair2').onclick = openPaste;
     sent: frameLedger.sent,
     res: frameLedger.res,
     hung: frameLedger.hung,
+    bytesSent: frameLedger.bytesSent,
+    bytesRecv: frameLedger.bytesRecv,
+    pathType: frameLedger.pathType,
+    wireBytesSent: frameLedger.wireBytesSent,
+    wireBytesRecv: frameLedger.wireBytesRecv,
     lastHung: frameLedger.lastHung,
   },
 });
