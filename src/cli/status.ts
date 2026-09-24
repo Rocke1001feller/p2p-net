@@ -28,6 +28,8 @@ interface StatusBody {
   mode?: string;
   /** Wave 1（spec D8）：数据面计量快照；旧进程无此字段 → 容错省略该行。 */
   dataPlane?: { totals?: { req?: number; resDone?: number; bytesSent?: number; bytesRecv?: number }; sessions?: number } | null;
+  /** F4 信令黑洞治理：信令面健康；旧进程无此字段 → 容错省略该行。 */
+  signaling?: { consecutiveFailures?: number; firstFailureAt?: number; lastError?: string; recovering?: boolean } | null;
 }
 
 const HINT = 'p2p-net service status';
@@ -81,6 +83,16 @@ export async function runStatus(deps: StatusDeps = {}): Promise<number> {
   if (typeof sent === 'number' && typeof recv === 'number') {
     // 视角 = 本机（host）：bytesSent=发往客户端=上行；与 events.jsonl 的 bytesUp 同义
     out(`数据面流量：上行 ${fmtBytes(sent)} / 下行 ${fmtBytes(recv)}（${dp?.sessions ?? 0} 活跃会话累计）`);
+  }
+  const sig = body.signaling;
+  if (sig) {
+    const n = sig.consecutiveFailures ?? 0;
+    if (n > 0) {
+      const secs = typeof sig.firstFailureAt === 'number' ? Math.max(0, Math.round((Date.now() - sig.firstFailureAt) / 1000)) : null;
+      out(`信令：连续 ${n} 次轮询失败${secs !== null ? `（已 ${fmtUptime(secs)}）` : ''}——手机端可能连不上，持续不愈将自动重启`);
+    } else {
+      out('信令：正常');
+    }
   }
   return 0;
 }

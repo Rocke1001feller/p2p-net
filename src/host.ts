@@ -71,6 +71,15 @@ export interface HostAgentOptions {
   isPortAllowed?: (port: number) => boolean;
   /** 测试缝：覆盖会话宽限期（默认 SESSION_GRACE_MS=20s；测试注入小值驱动宽限到期路径）。 */
   sessionGraceMs?: number;
+  /**
+   * 信令看门狗阈值（连续 poll 失败次数）。2026-09-24 真机门禁 F4：轮询黑洞 9min/20+min
+   * 两次不自愈、/status 假正常。三段楼梯：recoverAfter 起标记 recovering（日志+状态面可见）；
+   * recreateAfter 重建自有信令客户端一次（注入实现不重建）；exitAfter 调 onSignalingBlackHole。
+   */
+  signalingWatchdog?: { recoverAfter?: number; recreateAfter?: number; exitAfter?: number };
+  /** 持续黑洞的收尾动作（默认 process.exit(1)：常驻服务 launchd KeepAlive / systemd
+   *  Restart=always 崩溃自愈，与人工重启同效；测试注入替代）。每段黑洞 episode 只触发一次。 */
+  onSignalingBlackHole?: () => void;
 }
 
 // 调试日志（P2P_NET_DEBUG=1 启用）；错误类日志不受开关限制（轮询/onSignal 失败必须留痕）
@@ -330,14 +339,28 @@ export class HostAgent {
   private pollTimer?: ReturnType<typeof setInterval>;
   private purgeTimer?: ReturnType<typeof setInterval>;
   private iceCache?: { creds: TurnCredentials; fetchedAt: number };
+  // 信令看门狗状态（F4 黑洞治理）：连续失败计数/首败时间/末次错误/恢复态/已重建/黑洞已触发
+  private sigConsecFail = 0;
+  private sigFirstFailAt?: number;
+  private sigLastError?: string;
+  private sigOk = 0;
+  private sigFail = 0;
+  private sigRecovering = false;
+  private sigRecreated = false;
+  private sigBlackHoleFired = false;
 
   constructor(opts: HostAgentOptions) {
     this.opts = opts;
-    this.signaling = opts.signaling ?? new SignalingClient({
-      supabaseUrl: opts.supabaseUrl,
-      accessToken: opts.accessToken,
-      publishableKey: opts.publishableKey,
-      pollMs: opts.pollMs,
+    this.signaling = opts.signaling ?? this.makeDefaultSignaling();
+  }
+
+  /** 自有信令客户端的工厂（看门狗 recreateAfter 重建同参新实例；注入实现不重建）。 */
+  private makeDefaultSignaling(): SignalingClientLike {
+    return new SignalingClient({
+      supabaseUrl: this.opts.supabaseUrl,
+      accessToken: this.opts.accessToken,
+      publishableKey: this.opts.publishableKey,
+      pollMs: this.opts.pollMs,
     });
   }
 
@@ -375,6 +398,7 @@ export class HostAgent {
     this.polling = true;
     try {
       const { msgs, cursor } = await this.signaling.poll(this.room(), this.cursor);
+      this.notePollOk();
       this.cursor = cursor;
       for (const row of msgs) {
         dbg('signal', row.payload?.type, 'sid=' + (row.payload as { sid?: string })?.sid, 'from=' + (row.payload as { from?: string })?.from);
@@ -391,10 +415,73 @@ export class HostAgent {
       // 真正原因（ECONNRESET/ETIMEDOUT/EAI_AGAIN/EMFILE…）在 cause 里，旧日志把线索丢掉了。
       const cause = (e as { cause?: { code?: string; name?: string; message?: string } })?.cause;
       const detail = cause ? ` (cause=${cause.code ?? cause.name ?? ''}${cause.message ? ':' + cause.message : ''})` : '';
-      console.error('[p2p-net] poll failed:', (e instanceof Error ? e.message : String(e)) + detail);
+      const msg = (e instanceof Error ? e.message : String(e)) + detail;
+      console.error('[p2p-net] poll failed:', msg);
+      this.notePollFail(msg);
     } finally {
       this.polling = false;
     }
+  }
+
+  /** poll 成功：看门狗计数清零；若刚走出一段失败 episode，留恢复痕（带历时与连败数）。 */
+  private notePollOk(): void {
+    this.sigOk++;
+    if (this.sigConsecFail > 0) {
+      const secs = this.sigFirstFailAt ? Math.round((Date.now() - this.sigFirstFailAt) / 1000) : 0;
+      console.error(`[p2p-net] 信令恢复：连续 ${this.sigConsecFail} 次失败、历时 ${secs}s 后重连成功`);
+    }
+    this.sigConsecFail = 0;
+    this.sigFirstFailAt = undefined;
+    this.sigLastError = undefined;
+    this.sigRecovering = false;
+    this.sigRecreated = false;
+    this.sigBlackHoleFired = false;
+  }
+
+  /** poll 失败：看门狗三段楼梯（F4 黑洞治理，阈值可用 opts.signalingWatchdog 覆盖）。 */
+  private notePollFail(msg: string): void {
+    this.sigFail++;
+    this.sigConsecFail++;
+    this.sigFirstFailAt ??= Date.now();
+    this.sigLastError = msg;
+    const n = this.sigConsecFail;
+    const wd = { recoverAfter: 3, recreateAfter: 15, exitAfter: 45, ...this.opts.signalingWatchdog };
+    const elapsed = Math.round((Date.now() - this.sigFirstFailAt) / 1000);
+    if (n >= wd.recoverAfter && !this.sigRecovering) {
+      this.sigRecovering = true;
+      console.error(`[p2p-net] 信令看门狗：连续 ${n} 次 poll 失败（已 ${elapsed}s），进入恢复观察态——信令面疑似黑洞中`);
+    }
+    if (n >= wd.recreateAfter && !this.sigRecreated && !this.opts.signaling) {
+      this.signaling = this.makeDefaultSignaling();
+      this.sigRecreated = true;
+      console.error(`[p2p-net] 信令看门狗：连续 ${n} 次失败，已重建信令客户端`);
+    }
+    if (n >= wd.exitAfter && !this.sigBlackHoleFired) {
+      this.sigBlackHoleFired = true;
+      console.error(`[p2p-net] 信令看门狗：连续 ${n} 次失败（已 ${elapsed}s）判定信令黑洞，交由常驻监管重启进程`);
+      (this.opts.onSignalingBlackHole ?? (() => process.exit(1)))();
+    }
+  }
+
+  /** 信令面健康快照（F4：黑洞期 /status 假正常的治理——此表进 getStatus，p2p-net status 渲染）。 */
+  signalingHealth(): {
+    consecutiveFailures: number;
+    firstFailureAt?: number;
+    lastError?: string;
+    recovering: boolean;
+    recreated: boolean;
+    pollsOk: number;
+    pollsFailed: number;
+  } {
+    return {
+      consecutiveFailures: this.sigConsecFail,
+      ...(this.sigFirstFailAt !== undefined ? { firstFailureAt: this.sigFirstFailAt } : {}),
+      ...(this.sigLastError !== undefined ? { lastError: this.sigLastError } : {}),
+      recovering: this.sigRecovering,
+      recreated: this.sigRecreated,
+      pollsOk: this.sigOk,
+      pollsFailed: this.sigFail,
+    };
   }
 
   private async onSignal(msg: unknown): Promise<void> {

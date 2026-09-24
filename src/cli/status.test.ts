@@ -122,3 +122,18 @@ test('status：真实回环——端口无人监听 → 服务未运行 exit 1�
   assert.equal(ctx.code, 1);
   assert.match(ctx.errLines.join('\n'), /服务未运行/);
 });
+
+test('status：signaling 健康字段渲染——正常与连续失败两态（F4 黑洞治理：/status 不得假正常）', async () => {
+  const ok = await run({ fetchImpl: fakeFetch({ ...BODY, signaling: { consecutiveFailures: 0, recovering: false } }) });
+  assert.match(ok.outLines.join('\n'), /信令：正常/);
+
+  const bad = await run({
+    fetchImpl: fakeFetch({
+      ...BODY,
+      signaling: { consecutiveFailures: 7, firstFailureAt: Date.now() - 90_000, recovering: true },
+    }),
+  });
+  const text = bad.outLines.join('\n');
+  assert.match(text, /信令：连续 7 次轮询失败/, `失败态必须如实亮出: ${text}`);
+  assert.match(text, /自动重启/, `必须给出后果预告: ${text}`);
+});

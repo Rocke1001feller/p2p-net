@@ -50,6 +50,8 @@ export interface HostAgentLike {
   stop(): void;
   /** 数据面计量快照（Task 5，spec D5/D8+D9）：假 agent/旧装配可无此方法（/status 容错为 null）。 */
   dataPlaneSnapshot?(): { totals: SessionLedger; sessions: number; byPath: Record<string, number> };
+  /** 信令面健康快照（F4 黑洞治理）：假 agent/旧装配可无此方法（/status 容错为 null）。 */
+  signalingHealth?(): { consecutiveFailures: number; firstFailureAt?: number; lastError?: string; recovering: boolean; recreated: boolean; pollsOk: number; pollsFailed: number };
 }
 
 /** TunnelClient 的最小装配面（含数据面接线所需的 send/isOpen）。 */
@@ -261,6 +263,7 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
         services: scanner.list().length,
         mode: 'foreground',
         dataPlane: host?.dataPlaneSnapshot?.() ?? null, // 旧进程/启动早期为 null，status.ts 容错省略
+        signaling: host?.signalingHealth?.() ?? null, // 信令面健康（F4 黑洞治理）；stub/旧进程为 null 容错省略
       }),
     });
     teardowns.push(() => closeServer(control));
