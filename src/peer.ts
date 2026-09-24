@@ -10,6 +10,7 @@
  */
 import { RTCPeerConnection, type RTCDataChannel, type RTCIceServer } from 'werift';
 import { pairTypeFromStats, relayAddrFromStats, rttFromStats, type StatsRow } from './status.js';
+import { attachConsentWatchdog, type ConsentWatchdogEvent, type IceTransportsOwner } from './consent-watchdog.js';
 import type { IceCandidateLike, SdpLike } from './signaling/protocol.js';
 
 export interface LinkStatus {
@@ -81,10 +82,11 @@ export class Peer {
   private statusCb?: (s: LinkStatus) => void;
   private statsTimer?: ReturnType<typeof setInterval>;
   private lastStats: { pairType: 'p2p' | 'relay' | null; rttMs?: number; relayAddr?: string } = { pairType: null };
+  private detachConsent?: () => void;
 
   constructor(
     private iceServers: RTCIceServer[] = [],
-    private opts: { transport?: 'all' | 'relay'; pcFactory?: () => PcLike } = {},
+    private opts: { transport?: 'all' | 'relay'; pcFactory?: () => PcLike; consent?: { intervalMs?: number; maxRevives?: number; healthyResetMs?: number } } = {},
   ) {}
 
   private newPc(): PcLike {
@@ -97,8 +99,31 @@ export class Peer {
   }
 
   private dispose(): void {
+    if (this.detachConsent) { this.detachConsent(); this.detachConsent = undefined; }
     if (this.statsTimer) { clearInterval(this.statsTimer); this.statsTimer = undefined; }
     if (this.pc) { try { void this.pc.close(); } catch { /* 已关闭 */ } }
+  }
+
+  /** ICE consent 看门狗（spec D3）：pc 建好即挂；stub pc 无 iceTransports → 看门狗内部零副作用。 */
+  private armConsentWatchdog(pc: PcLike): void {
+    this.detachConsent?.();
+    this.detachConsent = attachConsentWatchdog(pc as unknown as IceTransportsOwner, {
+      intervalMs: this.opts.consent?.intervalMs,
+      maxRevives: this.opts.consent?.maxRevives,
+      healthyResetMs: this.opts.consent?.healthyResetMs,
+      onEvent: (e) => this.onConsentEvent(e),
+    });
+  }
+
+  private onConsentEvent(e: ConsentWatchdogEvent): void {
+    if (e.kind === 'revive') {
+      // 复活是可观测的异常事件（正常链路永不触发），进 stderr 留证据
+      console.error(`[p2p-net] ICE consent 复活第 ${e.revives} 次（iceState=${e.iceState} consentFresh=${e.consentFresh}）——werift #69 兜底生效`);
+      return;
+    }
+    // give-up：复活上限已到，链路真的死了——走既有失败链路（宽限→expireSession→session_end）
+    console.error(`[p2p-net] ICE consent 复活 ${e.revives} 次仍死——上报 failed`);
+    this.statusCb?.({ state: 'failed', ...this.lastStats });
   }
 
   /** 规则3 sid 归属守卫的前半 + 规则2 最新 offer 优先换绑 */
@@ -111,6 +136,7 @@ export class Peer {
     this.lastStats = { pairType: null };
     this.statusCb = handlers.onStatus;
     const pc = this.pc = this.newPc();
+    this.armConsentWatchdog(pc);
     pc.ondatachannel = (ev) => handlers.onChannel(ev.channel, ev.channel.label);
     pc.onicecandidate = (ev) => {
       const c = ev.candidate as ( undefined | { toJSON?: () => IceCandidateLike });
@@ -243,6 +269,7 @@ export class Peer {
     this.lastStats = { pairType: null };
     this.statusCb = handlers.onStatus;
     const pc = this.pc = this.newPc();
+    this.armConsentWatchdog(pc);
     // proxy 通道池（spec D2）：label 与 PWA 对齐——首条恒 'proxy'（0.1.0 兼容），其后 'proxy1..N-1'
     const n = Math.max(1, Math.min(16, opts.poolSize ?? 1));
     const pool: RTCDataChannel[] = [];

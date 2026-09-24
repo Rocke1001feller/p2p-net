@@ -97,3 +97,33 @@ brief Step 2 的 Expected 行文「阶段 B 末 A→B 交付 ≈ 0（远小于�
 - `e2e/consent-expiry-baseline.jsonl`（340 拍）
 - `e2e/consent-expiry-fieldshape.jsonl`（590 拍）
 - 本报告
+
+## ⑤ 验证臂（--watchdog，Task 8 看门狗兜底生效【实测-注入】）
+
+同一脚本挂 `--watchdog`（动态 import `src/consent-watchdog.js`，interval 3000ms，生产默认值）复跑三阶段：
+
+```
+[watchdog] 已挂（interval 3000ms）
+[phase A 结束] A→B：发 98 帧 / 达 98 帧；B→A：发 98 帧 / 达 98 帧
+[phase B 开始] responder 丢弃入站 STUN（40000ms）
+[watchdog] revive 第 1 次（iceState=failed consentFresh=false）
+[phase B 结束] A.ice.state=connected A.consentFresh=true dcA.readyState=open buffered=0
+[phase C 结束] A.ice.state=connected A.consentFresh=true
+[判定] {"watchdog":true,"phaseB_iceState":"connected","phaseB_consentFresh":true,
+        "phaseB_dcOpen":true,"phaseB_aToB_delivered":789,"phaseB_aToB_sent":789,
+        "phaseC_iceState":"connected","phaseC_aToB_delivered":786,"phaseC_aToB_sent":786}
+```
+
+### 与基线臂对照
+
+| 指标（A→B） | 基线臂（无看门狗） | 验证臂（看门狗） |
+|---|---|---|
+| B 相末 iceState / consentFresh | failed / false | **connected / true** |
+| B 相交付 | 冻结 665（注入后 29s 起零增长） | **789/789（100% 交付）** |
+| C 相交付 | 0（不可自愈） | **786/786** |
+| dcA.readyState | open（假健康） | open（真健康：buffered=0） |
+| 用户体感 | 永久黑洞 | 一次 ~3s 抖动（revive 第 1 次即拉回） |
+
+预注册判定（Task 8 brief Step 7）：① B 相出现 `revive 第 1 次` ✓；② B/C 相 A→B 交付恢复增长 ✓；③ `phaseC_aToB_delivered` 显著大于 0（786 vs 基线 ≈0）✓——三项全成立【实测-注入】（2026-09-24 本仓 loopback，产物 `e2e/consent-expiry-watchdog.jsonl` 340 拍）。
+
+注：复活语义 = 就地 `setState('connected')` + `queryConsent()`（v3 实测：ICE restart 路径只 stop 不 start，不重开同意循环）。真机「无固定周期回收」终判归 Task 13。
