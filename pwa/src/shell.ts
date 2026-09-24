@@ -44,6 +44,7 @@ import {
   type SavedDevice,
 } from './ui.js';
 import { stallSuspect } from './stall.js';
+import { onConnectFailure } from './reconnectPolicy.js';
 
 const Q = new URLSearchParams(location.search);
 const DEV_MODE = Q.get('dev') === '1';
@@ -414,6 +415,10 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
   deskName = d.name || d.id.slice(0, 8) + '…';
   localStorage.setItem(LS_DESK_ID, d.id);
 
+  // 2026-09-24 F3 修复：手动重试不得杀死自动重连循环——!isRetry 分支随即清零这些状态，
+  // 先捕获上下文，失败时据此恢复 scheduleReconnect（reconnectPolicy.ts 裁决）。
+  const autoCtx = { isRetry, wasConnected, reconnectAttempt, timerPending: reconnectTimer !== null };
+
   if (!isRetry) {
     wasConnected = false;
     reconnectAttempt = 0;
@@ -475,8 +480,9 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
     log(`[conn] 级联失败：${msg}`);
     hideConnecting();
     setStatus({ state: 'failed', pairType: null }, deskName);
-    if (isRetry) scheduleReconnect();
-    else showOfflineSheet(d.name || `桌面 ${d.id.slice(0, 8)}…`, `三种通道均不可达：${msg}`, () => void startConnect(d));
+    const act = onConnectFailure(autoCtx);
+    if (act.reconnect) scheduleReconnect(); // F3：带自动重连上下文的手动失败必须恢复循环
+    if (act.sheet) showOfflineSheet(d.name || `桌面 ${d.id.slice(0, 8)}…`, `三种通道均不可达：${msg}`, () => void startConnect(d));
   }
 }
 
