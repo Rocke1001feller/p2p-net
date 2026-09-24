@@ -22,6 +22,8 @@ export interface ResHeadFrame {
   id: number;
   status: number;
   headers: Record<string, string>;
+  /** Wave 1 实验（spec D6）：body 经 gzip 流式压缩（双端协商：req 带 x-p2p-gzip:1 且 env P2P_NET_GZIP=1）。 */
+  enc?: 'gzip';
 }
 
 export interface ResChunkFrame {

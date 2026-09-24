@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { gunzipSync } from 'node:zlib';
 import { WebSocketServer, WebSocket } from 'ws';
 import { HttpBridge, dcSend, type DcLike } from '../bridge/http.js';
 import { WsBridge } from '../bridge/ws.js';
@@ -40,9 +41,10 @@ interface ServerHooks {
   method?: string;
 }
 
-function startHttpServer(hooks: ServerHooks = {}): Promise<{ server: http.Server; port: number }> {
+function startHttpServer(hooks: ServerHooks | http.RequestListener = {}): Promise<{ server: http.Server; port: number }> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
+      if (typeof hooks === 'function') { hooks(req, res); return; } // gzip 实验等自定义响应：直接挂裸 handler
       if (hooks.path && req.url !== hooks.path) { res.writeHead(404); res.end(); return; }
       if (req.url === '/echo') {
         const chunks: Buffer[] = [];
@@ -396,4 +398,61 @@ test('无 binaryOk 的通道（tunnel 形态）：仍走 legacy base64 JSON（�
   closeServer(server);
   const chunk = dc.frame((f: any) => f.k === 'res-chunk' && f.dataB64);
   assert.ok(chunk, 'legacy 通道必须仍是 base64 文本帧');
+});
+
+// ---- gzip 实验（spec D6：P2P_NET_GZIP 双端协商，预注册 e2e/compression-ab-prereg.md）----
+
+test('gzip 实验：flag on + 声明头 + 大 JSON → enc:gzip 且可还原；flag off 恒等不压', async () => {
+  const big = JSON.stringify({ data: 'x'.repeat(40 * 1024) });
+  const server = await startHttpServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(big)) });
+    res.end(big);
+  });
+  try {
+    // flag on + req 带 x-p2p-gzip: 1 → 压缩
+    process.env.P2P_NET_GZIP = '1';
+    const dc = new FakeDc();
+    const bridge = new HttpBridge();
+    await bridge.handle(dc, { k: 'req', id: 1, port: server.port, method: 'GET', path: '/', headers: { 'x-p2p-gzip': '1' } });
+    await dc.waitFor((f) => f.k === 'res-chunk' && f.done, 3000, 'done#1');
+    const head = dc.frames.find((f) => f.k === 'res-head');
+    assert.equal(head.enc, 'gzip');
+    const gz = Buffer.concat(dc.frames.filter((f) => f.k === 'res-chunk' && f.dataB64).map((f) => Buffer.from(f.dataB64, 'base64')));
+    assert.equal(gunzipSync(gz).toString('utf8'), big);
+
+    // 同 flag 但 req 无声明头 → 不压（双端协商，缺一不可）
+    const dc2 = new FakeDc();
+    await bridge.handle(dc2, { k: 'req', id: 2, port: server.port, method: 'GET', path: '/', headers: {} });
+    await dc2.waitFor((f) => f.k === 'res-chunk' && f.done, 3000, 'done#2');
+    assert.equal(dc2.frames.find((f) => f.k === 'res-head').enc, undefined);
+
+    // flag off → 恒等不压
+    delete process.env.P2P_NET_GZIP;
+    const dc3 = new FakeDc();
+    await bridge.handle(dc3, { k: 'req', id: 3, port: server.port, method: 'GET', path: '/', headers: { 'x-p2p-gzip': '1' } });
+    await dc3.waitFor((f) => f.k === 'res-chunk' && f.done, 3000, 'done#3');
+    assert.equal(dc3.frames.find((f) => f.k === 'res-head').enc, undefined);
+    const plain = Buffer.concat(dc3.frames.filter((f) => f.k === 'res-chunk' && f.dataB64).map((f) => Buffer.from(f.dataB64, 'base64')));
+    assert.equal(plain.toString('utf8'), big);
+  } finally {
+    delete process.env.P2P_NET_GZIP;
+    closeServer(server.server);
+  }
+});
+
+test('gzip 实验：小响应（<16KB）不压', async () => {
+  process.env.P2P_NET_GZIP = '1';
+  const server = await startHttpServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': '2' });
+    res.end('{}');
+  });
+  try {
+    const dc = new FakeDc();
+    await new HttpBridge().handle(dc, { k: 'req', id: 1, port: server.port, method: 'GET', path: '/', headers: { 'x-p2p-gzip': '1' } });
+    await dc.waitFor((f) => f.k === 'res-chunk' && f.done, 3000, 'done');
+    assert.equal(dc.frames.find((f) => f.k === 'res-head').enc, undefined);
+  } finally {
+    delete process.env.P2P_NET_GZIP;
+    closeServer(server.server);
+  }
 });

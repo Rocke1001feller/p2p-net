@@ -13,6 +13,7 @@
  * SW 侧 30s 超时语义不在 bridge（归 PWA SW）。
  */
 import http from 'node:http';
+import { createGzip } from 'node:zlib';
 import { chunkU8, encodeResChunkBin, isReq, isReqAbort, type ReqFrame, type TunnelFrame } from '../frames.js';
 
 /** DataChannel 最小结构（werift RTCDataChannel / 测试 stub 均满足）。 */
@@ -31,6 +32,25 @@ const BACKPRESSURE_BYTES = 512 * 1024;
 const NO_BODY_STATUS = [101, 204, 205, 304];
 const STRIP_REQ_HEADERS = new Set(['host', 'content-length', 'accept-encoding', 'connection', 'origin', 'referer']);
 const STRIP_RES_HEADERS = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection']);
+
+/**
+ * gzip 实验（spec D6，预注册 e2e/compression-ab-prereg.md）：P2P_NET_GZIP=1 且满足全部条件才压——
+ * >16KB（小响应不值当）、文本/wasm 类（二进制已压）、上游未自带 content-encoding、
+ * 且 req 帧带 x-p2p-gzip:1 声明（双端协商：SW 不支持 DecompressionStream 时绝不可压）。
+ */
+const GZIP_MIN_BYTES = 16 * 1024;
+const GZIP_TYPES = /^(text\/|application\/(json|javascript|xml|x-javascript|typescript|wasm)|image\/svg\+xml)/;
+
+function gzipEligible(resHeaders: http.IncomingHttpHeaders, reqHeaders: Record<string, string> | undefined): boolean {
+  if (process.env.P2P_NET_GZIP !== '1') return false;
+  const declared = Object.entries(reqHeaders ?? {}).some(([k, v]) => k.toLowerCase() === 'x-p2p-gzip' && v === '1');
+  if (!declared) return false;
+  const len = Number(resHeaders['content-length'] ?? 0);
+  if (!(len > GZIP_MIN_BYTES)) return false;
+  if (!GZIP_TYPES.test(String(resHeaders['content-type'] ?? ''))) return false;
+  if (resHeaders['content-encoding']) return false;
+  return true;
+}
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -124,6 +144,7 @@ export class HttpBridge {
         else req.end();
       });
 
+      const gz = gzipEligible(res.headers, frame.headers);
       const rh: Record<string, string> = {};
       for (const [k, v] of Object.entries(res.headers)) {
         if (STRIP_RES_HEADERS.has(k)) continue;
@@ -131,7 +152,7 @@ export class HttpBridge {
         if (k === 'location') val = rewriteLocation(val, frame.port);
         rh[k] = val;
       }
-      await dcSend(dc, { k: 'res-head', id, status: res.statusCode ?? 502, headers: rh });
+      await dcSend(dc, { k: 'res-head', id, status: res.statusCode ?? 502, headers: rh, ...(gz ? { enc: 'gzip' as const } : {}) });
       headSent = true;
 
       if (NO_BODY_STATUS.includes(res.statusCode ?? 0)) {
@@ -142,7 +163,8 @@ export class HttpBridge {
       }
 
       let sentBytes = 0;
-      for await (const chunk of res) {
+      const src: NodeJS.ReadableStream = gz ? res.pipe(createGzip()) : res;
+      for await (const chunk of src) {
         for (const piece of chunkU8(chunk as Buffer)) {
           sentBytes += piece.length;
           await sendChunk(dc, id, Buffer.from(piece.buffer, piece.byteOffset, piece.byteLength), false);

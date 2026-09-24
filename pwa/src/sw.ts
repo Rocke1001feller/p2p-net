@@ -23,6 +23,8 @@ let seq = 1;                              // 本实例 req id 序列（响应经
 interface PendingEntry {
   resolve: (r: Response) => void;
   ctrl?: ReadableStreamDefaultController<Uint8Array>;
+  /** gzip 解码支路（spec D6）：res-head.enc==='gzip' 且本地支持 DecompressionStream 时建立。 */
+  gz?: WritableStreamDefaultWriter<Uint8Array>;
   timer?: ReturnType<typeof setTimeout>;
 }
 const pending = new Map<number, PendingEntry>();
@@ -81,16 +83,49 @@ function onPortMsg(m: any): void {
     if (p.timer) clearTimeout(p.timer);
     const noBody = [101, 204, 205, 304].includes(m.status);
     if (noBody) { pending.delete(m.id); p.resolve(new Response(null, { status: m.status, headers: m.headers })); return; }
+    if (m.enc === 'gzip' && typeof DecompressionStream !== 'undefined') {
+      // gzip 流式解码（spec D6）：压缩字节写 ds.writable；解码后字节经 reader 逐段 enqueue
+      const ds = new DecompressionStream('gzip');
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) { p.ctrl = c; },
+        cancel() { try { port && port.postMessage({ k: 'req-abort', id: m.id }); } catch { /* port 已死 */ } },
+      });
+      p.gz = ds.writable.getWriter();
+      p.resolve(new Response(stream, { status: m.status, headers: m.headers }));
+      const reader = ds.readable.getReader();
+      void (async () => {
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value && value.length) p.ctrl?.enqueue(value);
+          }
+          p.ctrl?.close();
+          pending.delete(m.id);
+        } catch {
+          try { p.ctrl?.error(new Error('gzip decode failed')); } catch { /* 已终结 */ }
+          pending.delete(m.id);
+        }
+      })();
+      return;
+    }
     const stream = new ReadableStream<Uint8Array>({
       start(c) { p.ctrl = c; },
       cancel() { try { port && port.postMessage({ k: 'req-abort', id: m.id }); } catch { /* port 已死 */ } },
     });
     p.resolve(new Response(stream, { status: m.status, headers: m.headers }));
-  } else if (m.k === 'res-chunk' && p.ctrl) {
-    // 帧协议 v2 双形态：二进制帧 m.data（Uint8Array 视图）直 enqueue；旧 JSON 帧走 dataB64
-    if (m.data) p.ctrl.enqueue(m.data instanceof Uint8Array ? m.data : new Uint8Array(m.data));
-    else if (m.dataB64) p.ctrl.enqueue(b64u8(m.dataB64));
-    if (m.done) { p.ctrl.close(); pending.delete(m.id); }
+  } else if (m.k === 'res-chunk' && (p.ctrl || p.gz)) {
+    // 帧协议 v2 双形态 + gzip 支路（spec D6）：u8 统一解出后按支路分发
+    const u8 = m.data ? (m.data instanceof Uint8Array ? m.data : new Uint8Array(m.data))
+      : m.dataB64 ? b64u8(m.dataB64) : null;
+    if (p.gz) {
+      // writer 内部排队保序：write/close 顺序到达，无需 await
+      if (u8) void p.gz.write(u8);
+      if (m.done) void p.gz.close().catch(() => { /* 解码器自清理 */ });
+    } else if (p.ctrl) {
+      if (u8) p.ctrl.enqueue(u8);
+      if (m.done) { p.ctrl.close(); pending.delete(m.id); }
+    }
   }
 }
 
@@ -152,6 +187,7 @@ async function proxy(req: Request, u: URL): Promise<Response> {
   const path = scope.path + u.search;
   const headers: Record<string, string> = {};
   req.headers.forEach((v, k) => { headers[k] = v; });
+  if (typeof DecompressionStream !== 'undefined') headers['x-p2p-gzip'] = '1'; // spec D6 双端协商声明
   let bodyB64: string | null = null;
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     try { bodyB64 = u8b64(new Uint8Array(await req.arrayBuffer())); } catch { /* body 读取失败按空 body 发送 */ }
