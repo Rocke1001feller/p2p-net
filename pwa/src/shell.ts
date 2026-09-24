@@ -45,6 +45,7 @@ import {
 } from './ui.js';
 import { stallSuspect } from './stall.js';
 import { onConnectFailure } from './reconnectPolicy.js';
+import { bootConnectTarget } from './bootPolicy.js';
 
 const Q = new URLSearchParams(location.search);
 const DEV_MODE = Q.get('dev') === '1';
@@ -966,12 +967,15 @@ async function boot(): Promise<void> {
     localStorage.setItem(LS_UID, data.session.user.id);
     try { await ensureBindPhone(); } catch (e) { log(`[auth] 设备绑定失败：${(e as Error).message}`); }
     afterAuthUI();
-    // 已登录 + URL 直达：把 URL 里的 dsc 也带上（否则又退回"猜契约端口"）
-    if (desk.id) {
+    // 自动连接目标（bootPolicy）：票据直达优先；无票重进自动重连最近桌面（F6）。
+    // URL 里的 dsc 一并带上（否则又退回"猜契约端口"）。
+    const bootTarget = bootConnectTarget({ loggedIn: true, ticketDeskId: desk.id, lastDeskId: localStorage.getItem(LS_DESK_ID) });
+    if (bootTarget) {
+      const saved = loadDevices().find((d) => d.id === bootTarget);
       void startConnect({
-        id: desk.id,
-        tunnelUrl: desk.tunnelUrl,
-        discoveryPort: Number(Q.get('dsc')) || loadDevices().find((d) => d.id === desk.id)?.discoveryPort,
+        id: bootTarget,
+        tunnelUrl: desk.tunnelUrl ?? saved?.tunnelUrl,
+        discoveryPort: Number(Q.get('dsc')) || saved?.discoveryPort,
       });
     }
   } else {
