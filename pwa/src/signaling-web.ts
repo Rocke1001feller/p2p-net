@@ -12,6 +12,7 @@
  */
 import { pairTypeFromStats, roomFor, rttFromStats, relayAddrFromStats, SignalingClient, decodeBinFrame, encodeWsMsgBin, PROXY_POOL_SIZE } from 'p2p-net/browser';
 import { PoolRouter } from './poolRouter.js';
+import { DEFAULT_LIVENESS, type LivenessConfig } from './livenessConfig.js';
 
 export interface LightStatus {
   state: 'off' | 'connecting' | 'connected' | 'failed';
@@ -31,22 +32,13 @@ export interface SessionOptions {
   onFrame: (frame: any) => void;
   /** getStats 展平行（5s 既有节拍，spec D9）：shell 据此喂帧账本 wire 采样（只写内存）。 */
   onStatsRows?: (rows: Record<string, any>[]) => void;
+  /** N4 活性阈值（spec D7）：缺省 DEFAULT_LIVENESS；真机标定由 shell 经 URL 注入。 */
+  liveness?: Partial<Pick<LivenessConfig, 'pingMs' | 'livenessMs'>>;
 }
 
 const POLL_MS = 800;          // plan Task 4：800ms 增量轮询
 const PURGE_MS = 60_000;
 const STATS_MS = 5_000;
-const PING_MS = 5_000;
-/**
- * 去活判定窗口（2026-09-12 根因修复；2026-09-23 蜂窝浸泡放宽 15s→45s）：ctrl 通道心跳
- * 连续收不到 pong 超此窗口即判链路已死。15s 的代价：蜂窝 4G 的 RRC 切换/信号波动造成
- * 6-15s 丢包簇是常态（ctrl 为测真 RTT 用 unordered+零重传，丢包不重发），真机实测
- * 6630ms 尖峰频繁出现，15s 窗口把「蜂窝打嗝」误判成「P2P 黑洞」，每次误判都触发
- * 整页全量重下。45s ≈ 9 个心跳周期，真黑洞检测延迟仍在 SW 单请求超时（45s）量级内。
- * 真机实证背景（15s 版）：P2P 黑洞时 dc.readyState 仍是 'open'，isOpen 因此撒谎 →
- * 界面显示"直连"、不重连，请求只能干等 SW 超时（Android 直连下 Files/Source Control 全 504）。
- */
-const LIVENESS_MS = 45_000;
 
 /**
  * proxy 通道入站帧处理（抽成纯函数便于单测，2026-09-23 心跳误判整改）。
@@ -95,12 +87,17 @@ export class WebRtcSession {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private lastPongAt = 0;
+  private readonly pingMs: number;
+  private readonly livenessMs: number;
 
-  constructor(private readonly opts: SessionOptions) {}
+  constructor(private readonly opts: SessionOptions) {
+    this.pingMs = opts.liveness?.pingMs ?? DEFAULT_LIVENESS.pingMs;
+    this.livenessMs = opts.liveness?.livenessMs ?? DEFAULT_LIVENESS.livenessMs;
+  }
 
   get isOpen(): boolean {
     // 诚实版 isOpen：通道 open **且** 心跳新鲜。否则就是"假直连"，必须让上层走重连/降级。
-    return this.dc?.readyState === 'open' && Date.now() - this.lastPongAt < LIVENESS_MS;
+    return this.dc?.readyState === 'open' && Date.now() - this.lastPongAt < this.livenessMs;
   }
 
   /** 建连（可重复调用 = 重连，规则②：拆旧换新）。 */
@@ -183,11 +180,11 @@ export class WebRtcSession {
       const ch = (this.ctrlDc && this.ctrlDc.readyState === 'open') ? this.ctrlDc
         : (this.dc && this.dc.readyState === 'open' ? this.dc : null);
       if (ch) { try { ch.send(JSON.stringify({ k: 'ping', t: Date.now() })); } catch { /* 忽略 */ } }
-    }, PING_MS);
+    }, this.pingMs);
     // 看门狗：心跳断供即判死 → 通知上层（CascadeSession 会转发 off，shell 走重连/降级）
     this.watchdogTimer = setInterval(() => {
       if (this.dc?.readyState !== 'open') return;
-      if (Date.now() - this.lastPongAt < LIVENESS_MS) return;
+      if (Date.now() - this.lastPongAt < this.livenessMs) return;
       this.opts.onStatus({ state: 'off', pairType: null });
       this.teardown();
     }, 2_000);
@@ -201,7 +198,11 @@ export class WebRtcSession {
     if (st === 'connected') {
       await this.refreshStats();
     } else if (st === 'failed') {
-      this.opts.onStatus({ state: 'failed', pairType: null });
+      // N4 事件驱动硬失效（spec D7）：pc 自报 failed = ICE 层已判死，0ms 拆连上报 off，
+      // shell 立即走指数退避重连。旧行为只报 failed 不拆——没有任何人触发重连，
+      // 界面停在「连接失败」干等 SW 45s 超时（真黑洞恢复被拖一个数量级）。
+      this.opts.onStatus({ state: 'off', pairType: null });
+      this.teardown();
     } else if (st === 'connecting' || st === 'new' || st === 'disconnected') {
       // disconnected 是瞬时态：显式回落到"连接中"语义，别让界面继续假装已连接
       this.opts.onStatus({ state: 'connecting', pairType: this.lastPairType });

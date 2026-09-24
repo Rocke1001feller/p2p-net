@@ -17,6 +17,9 @@ export const WEDGE_MS = 60_000; // 全局无任何回帧多久算黑洞（建连
 export class DataPlaneLiveness {
   private lastProofAt = 0;
 
+  /** wedgeMs 入 constructor（N4，spec D7）：缺省 WEDGE_MS；URL ?wedge= 真机标定由 shell 注入。 */
+  constructor(private readonly wedgeMs: number = WEDGE_MS) {}
+
   /** 建连成功记一笔：新连接给完整宽限窗口。 */
   noteOpen(now = Date.now()): void {
     this.lastProofAt = now;
@@ -30,7 +33,7 @@ export class DataPlaneLiveness {
   /** 判死条件：有在途请求 且 全局静默超阈。无在途请求的空闲链路永不拆。 */
   wedged(inflight: number, now = Date.now()): boolean {
     if (inflight <= 0) return false;
-    return now - this.lastProofAt > WEDGE_MS;
+    return now - this.lastProofAt > this.wedgeMs;
   }
 
   /** 诊断：距上次活性证明多久（ms），供日志浮层/状态导出。 */

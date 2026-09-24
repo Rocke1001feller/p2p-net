@@ -39,3 +39,13 @@ test('任何数据面帧都算活性证明（res-head/res-chunk/ws-* 同权）',
   l.noteFrame(t0 + WEDGE_MS + 1); // 静默超阈后来一帧 → 活性刷新
   assert.equal(l.wedged(5, t0 + WEDGE_MS + 2), false);
 });
+
+test('constructor 自定义 wedgeMs（N4 真机标定）；缺省 = WEDGE_MS', () => {
+  const a = new DataPlaneLiveness(1_000);
+  a.noteFrame(0);
+  assert.equal(a.wedged(1, 1_500), true);
+  const b = new DataPlaneLiveness();
+  b.noteFrame(0);
+  assert.equal(b.wedged(1, 1_500), false);
+  assert.equal(b.wedged(1, 61_000), true);
+});

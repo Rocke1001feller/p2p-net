@@ -35,7 +35,8 @@ import {
 } from './workbenchRecovery.js';
 import { CascadeSession, type LinkMode } from './session.js';
 import { FrameLedger, type HungEntry } from './frameLedger.js';
-import { DataPlaneLiveness, WEDGE_MS } from './dataPlaneLiveness.js';
+import { DataPlaneLiveness } from './dataPlaneLiveness.js';
+import { livenessFromQuery } from './livenessConfig.js';
 import {
   hideConnecting, hideSheets, log, renderDevices, setMe, setStatus, showConnecting,
   showOfflineSheet, showPasteSheet, showScreen, showTab, setWorkspaceEnabled, toast,
@@ -81,7 +82,8 @@ const inflightSw = new Map<number, number>();
  * 现在：任何回帧（res-head/res-chunk/ws-*）都刷新活性证明；有在途请求且全局静默
  * 超 WEDGE_MS 才判死拆连。慢由 SW 超时与桥侧 512KiB 背压上限去兜。
  */
-const liveness = new DataPlaneLiveness();
+const LIVE = livenessFromQuery(Q); // N4 真机标定旋钮（?ping=&liveness=&wedge=）
+const liveness = new DataPlaneLiveness(LIVE.wedgeMs);
 const SW_HANG_MS = 9_000;   // 仅诊断日志口径：单请求无回帧超此值打 [frame] 日志（不再作为拆连依据）
 const pendingFetch = new Map<number, { resolve: (r: { status: number; body: Uint8Array }) => void; chunks: Uint8Array[]; status: number; timer: ReturnType<typeof setTimeout> }>();
 let dcSeq = 0;
@@ -355,7 +357,7 @@ setInterval(() => {
   }
   if (!dataPlaneWedged()) return;
   const hung = harvestHung();
-  log(`[watchdog] 数据面全局静默 >${WEDGE_MS / 1000}s（在途 ${inflightSw.size} 条无一回帧）→ 拆连重连`
+  log(`[watchdog] 数据面全局静默 >${LIVE.wedgeMs / 1000}s（在途 ${inflightSw.size} 条无一回帧）→ 拆连重连`
     + (hung.length ? `（例：:${hung[0].port ?? '?'}${hung[0].path}）` : ''));
   inflightSw.clear();
   cascade?.stop(); // emit off → onCascadeStatus 会走指数退避重连（新建 pc，等同重载效果）
@@ -437,6 +439,7 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
     onFrame: (m) => { if (gen === cascadeGen) onDcFrame(m); },
     onStatsRows: (rows) => { if (gen === cascadeGen) frameLedger.sampleWireStats(rows); }, // wire 采样（spec D9；僵尸会话作废）
     onTunnelUrl: (u) => { desk.tunnelUrl = u; },
+    liveness: LIVE,
   });
   // dev 覆盖：?ice= 注入两段 WebRTC 的 iceServers；?transport=relay 只跑 TURN 段
   const iceOverride = Q.get('ice');

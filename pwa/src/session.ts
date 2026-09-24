@@ -18,6 +18,7 @@ import { CASCADE_TIMEOUT_MS, DISCOVERY_PORT, isPlausibleTunnelUrl } from './cons
 import { fetchTurnCredentials } from './cloud.js';
 import { WebRtcSession, type LightStatus } from './signaling-web.js';
 import { planStageModes } from './cascadePlan.js';
+import type { LivenessConfig } from './livenessConfig.js';
 
 export type LinkMode = 'p2p' | 'tunnel' | 'turn';
 export type Stage = 'p2p' | 'tunnel' | 'turn' | 'done';
@@ -51,6 +52,8 @@ export interface CascadeOptions {
   forceTunnel?: boolean;
   /** 验收覆盖：daemon discovery 端口（?dsc=；默认 DISCOVERY_PORT 19728）。 */
   servicesPort?: number;
+  /** N4 活性阈值（spec D7）：透传进两段 WebRtcSession；缺省 DEFAULT_LIVENESS。 */
+  liveness?: Partial<Pick<LivenessConfig, 'pingMs' | 'livenessMs'>>;
 }
 
 const isOk = (s: LightStatus) => s.state === 'connected';
@@ -183,6 +186,7 @@ export class CascadeSession {
       },
       onFrame: this.opts.onFrame,
       onStatsRows: this.opts.onStatsRows,
+      liveness: this.opts.liveness,
     });
     const done = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`webrc_timeout_${timeoutMs}`)), timeoutMs);
