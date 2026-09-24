@@ -38,5 +38,7 @@ test('package.json exports 映射：. / ./browser / ./package.json', () => {
   assert.equal(pkg.exports['./browser'].default, './dist/browser.js');
   assert.equal(pkg.exports['./package.json'], './package.json');
   // 主套件同时覆盖 src/ 与 pwa/src/（2026-09-22 起：pwa 测试此前不在主 glob 里，bind 解析 bug 漏网）
-  assert.equal(pkg.scripts.test, 'tsx --test "src/**/*.test.ts" "pwa/src/**/*.test.ts"');
+  // 2026-09-24 起拆两段：并行套件（本 pin 守护的覆盖范围不变）+ 串行 HOL 门禁（CPU 竞争敏感，隔离单跑以保预注册判定口径——≥10 窗口探测/增量公式/粘滞断言——在常态负载下有效；阈值数值修订史见 hol-gate.serial.ts 头注释）
+  assert.equal(pkg.scripts['test:parallel'], 'tsx --test "src/**/*.test.ts" "pwa/src/**/*.test.ts"');
+  assert.equal(pkg.scripts.test, 'npm run test:parallel && npm run test:serial');
 });

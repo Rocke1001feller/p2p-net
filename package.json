@@ -45,7 +45,9 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsx --test \"src/**/*.test.ts\" \"pwa/src/**/*.test.ts\"",
+    "test": "npm run test:parallel && npm run test:serial",
+    "test:parallel": "tsx --test \"src/**/*.test.ts\" \"pwa/src/**/*.test.ts\"",
+    "test:serial": "tsx --test src/tests/hol-gate.serial.ts",
     "build:pwa": "npm run build && npm --prefix pwa run build && node -e \"const fs=require('fs');fs.rmSync('pwa-dist',{recursive:true,force:true});fs.cpSync('pwa/dist','pwa-dist',{recursive:true})\"",
     "prepack": "npm run build && npm run build:pwa"
   },
