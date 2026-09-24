@@ -73,7 +73,14 @@ export class FrameLedger {
     const pair = pairs.find((p) => p.selected === true) ?? pairs.find((p) => p.nominated) ?? pairs[0];
     if (!pair) return;
     const loc = rows.find((s) => s?.type === 'local-candidate' && s.id === pair.localCandidateId);
-    const pathType = classifyCandidateType(loc?.candidateType);
+    const rem = rows.find((s) => s?.type === 'remote-candidate' && s.id === pair.remoteCandidateId);
+    // 双侧规则（F8 真机实证，与 src/pathType.ts 孪生保持一致）：任一端 relay 即过 TURN——
+    // 只看本端会把「手机 prflx ↔ 桌面 relay」的同一条对误判成直连（门禁自然臂全程如此）。
+    const locType = classifyCandidateType(loc?.candidateType);
+    const remType = classifyCandidateType(rem?.candidateType);
+    const pathType = locType === 'relay' || remType === 'relay' ? 'relay'
+      : locType !== 'unknown' ? locType
+      : remType;
     const wireSent = pair.bytesSent ?? 0;
     const wireRecv = pair.bytesReceived ?? 0;
     if (this.prevWire) {

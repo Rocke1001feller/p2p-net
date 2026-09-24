@@ -4,6 +4,7 @@ import { classifyCandidateType, classifyVia, selectedPairStats } from '../pathTy
 
 const pair = (over: object) => ({ type: 'candidate-pair', id: 'p1', state: 'succeeded', localCandidateId: 'l1', bytesSent: 1000, bytesReceived: 2000, ...over });
 const local = (candidateType: string) => ({ type: 'local-candidate', id: 'l1', candidateType });
+const remote = (candidateType: string) => ({ type: 'remote-candidate', id: 'r1', candidateType });
 
 test('classifyCandidateType: relay→relay, host/srflx/prflx→direct, 其他→unknown', () => {
   assert.equal(classifyCandidateType('relay'), 'relay');
@@ -37,6 +38,29 @@ test('selectedPairStats: 无 succeeded 对 → unknown，不崩', () => {
   const r = selectedPairStats([{ type: 'candidate-pair', id: 'p1', state: 'in-progress' }]);
   assert.equal(r.pathType, 'unknown');
   assert.equal(r.wireSent, 0);
+});
+
+// 双侧规则（F8 真机实证，与 status.ts pairTypeFromStats 2026-09-22 同源语义）：
+// 手机 local=prflx / 桌面 local=relay 是同一条选定对的两端——只看本端会把中继误判为直连。
+test('selectedPairStats: 任一端 relay → relay（local srflx + remote relay 不再误判 direct）', () => {
+  const stats = [pair({ remoteCandidateId: 'r1' }), local('srflx'), remote('relay')];
+  assert.equal(selectedPairStats(stats).pathType, 'relay');
+});
+
+test('selectedPairStats: local relay + remote srflx → relay（既有行为保持）', () => {
+  const stats = [pair({ remoteCandidateId: 'r1' }), local('relay'), remote('srflx')];
+  assert.equal(selectedPairStats(stats).pathType, 'relay');
+});
+
+test('selectedPairStats: 两端均直连候选 → direct', () => {
+  const stats = [pair({ remoteCandidateId: 'r1' }), local('prflx'), remote('srflx')];
+  assert.equal(selectedPairStats(stats).pathType, 'direct');
+});
+
+test('selectedPairStats: remote 行缺失时回落本端判定（兼容旧 stats 形状）', () => {
+  assert.equal(selectedPairStats([pair({}), local('relay')]).pathType, 'relay');
+  assert.equal(selectedPairStats([pair({}), local('host')]).pathType, 'direct');
+  assert.equal(selectedPairStats([pair({})]).pathType, 'unknown');
 });
 
 test('tunnel 帧（via:tunnel）归类为 tunnel，不进 getStats 判定', () => {

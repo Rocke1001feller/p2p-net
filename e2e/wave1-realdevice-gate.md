@@ -26,14 +26,16 @@
 
 ### 2.1 路径占比——D9 中继率参数本仓首个实测点（N=1，禁止外推）
 
-自然级联窗口（不带 `?transport=relay`，10min，每 60s 采样）：**10/10 样本 pathType=direct**（手机侧 `frames.pathType`），全程 connected、零 stall、零重建。强制 relay 浸泡臂按构造 100% relay。
+自然级联窗口（不带 `?transport=relay`，10min，每 60s 采样）：手机侧 `frames.pathType` 10/10 样本报 direct，全程 connected、零 stall、零重建。强制 relay 浸泡臂按构造 100% relay。
 
 | 会话臂 | direct | relay | tunnel | 数据源 |
 |---|---|---|---|---|
 | 自然级联（N=1 会话，10 样本） | 100% | 0% | 0% | 手机 `__p2pNetDebug().frames.pathType`【实测-真机】 |
 | 强制 relay 浸泡臂（61 样本/60min） | 0% | 100% | 0% | 同上（构造如此） |
 
-约束：N=1 单会话、单运营商、单 desk 网络（Mac 所在宽带），**严禁外推为直连率结论**；Wave 2 直连率矩阵（N≥20）标定。host 侧旁证缺口见 F8。
+约束：N=1 单会话、单运营商、单 desk 网络（Mac 所在宽带），**严禁外推为直连率结论**；Wave 2 直连率矩阵（N≥20）标定。
+
+> **⚠️ 勘误（2026-09-25，F8 判别实验终裁）**：上表自然臂的手机读数**作废**。CDP 取证（`e2e/f8-pair-forensics.json`）显示该臂选定对实为 **手机 prflx ↔ 桌面 relay**——物理路径过 TURN，host 侧 `byPath=relay:1` 自始至终是对的；手机本地判据只看本端候选类型，把对端 relay 漏报成 direct。修复（双侧规则：任一端 relay 即 relay）已落 `src/pathType.ts` + `pwa/src/frameLedger.ts`（`wave1/fix-pathtype-both-ends`，语义与 `status.ts pairTypeFromStats` 2026-09-22 实锤同源）。**本臂真实读数应为 0% direct / 100% relay**；本蜂窝运营商+本 desk 网络组合下自然级联实际选中继（疑似对称型 NAT，待 Wave 2 矩阵确认）。
 
 ### 2.2 字节因子复测（tx/rx 合记与工况拆分）
 
@@ -66,7 +68,7 @@ coturn 侧字节对账边界标记：M_A1s/M_A1e/M_Bs/M_Be/M_A2s/M_A2e（epoch 1
 | F5 | 重建杀在飞请求：A2 相位中段 gen 30→31，在飞 fetch 全部悬挂至脚本超时 | 实录登记，Wave 2 评估在飞请求迁移/重放 |
 | F6 | boot 无票不自动连：`shell.ts:899 boot()` 仅 `desk.id`（来自 URL 票据）存在时自动 startConnect，普通重进停在设备页等人点卡——设计还是缺陷待用户裁决 | 登记独立裁决 ③ |
 | F7 | ~17min 会话回收周期 ×3（间隔 17/17/17min，健康→突然死、前兆微弱）：疑似运营商 NAT 绑定周期，非 v0.1.0 的 15min consent 固定回收（看门狗生效中：重建均由 ICE failed 驱动、无 hung）。恢复 <11s 用户无感，不阻塞发布 | 开放问题，判别实验建议：双运营商对照 + coturn 日志绑定计时 |
-| F8 | host 实时 pathType 归属滞后：手机已 direct 时 host `/status` totals.pathType=unknown、byPath 仍计 relay（session_end 才落账）——影响直连率北极星指标的实时性 | 登记独立修复（数据质量） |
+| F8 | ~~host 实时 pathType 归属滞后~~ **终裁：host 无缺陷，是手机判据漏报**。CDP 取证（`f8-pair-forensics.json`，劫持 RTCPeerConnection 抓选定对全表）：自然臂选定对 = 手机 prflx ↔ 桌面 relay，物理过 TURN；host `byPath=relay:1` 正确，手机「direct」为本地判据漏报对端。修复 = 分类语义改双侧规则（`src/pathType.ts` + `pwa/src/frameLedger.ts`，与 `status.ts pairTypeFromStats` 同源）；`totals.pathType=unknown` 为设计如此（无求和语义，实时占比看 byPath） | 已修（`wave1/fix-pathtype-both-ends`），§2.1 读数勘误 |
 
 ## 5. 发现节：独立 bounded 任务（均不进本分支）
 
@@ -74,11 +76,12 @@ coturn 侧字节对账边界标记：M_A1s/M_A1e/M_Bs/M_Be/M_A2s/M_A2e（epoch 1
 2. **手动重试杀自动重连修复**（治 F3，`shell.ts:478`）。
 3. **boot 无票不自动连裁决**（F6：设计确认 or 缺陷修复，需用户拍板）。
 4. **gzip DEFAULT 翻转为开**（H6 已判定「默认开」，下一版本窗口执行）。
-5. **host 实时 pathType 归属修复**（治 F8）。
+5. ~~**host 实时 pathType 归属修复**（治 F8）~~ → 已执行：F8 终裁为分类语义缺陷（本地判据漏报对端 relay），双侧规则修复已落（见 F8 行与 §2.1 勘误）。
 
 ## 6. 原始数据档案
 
 - 浸泡：`/tmp/p2p-soak.jsonl`（95 样本/60min 强制 TURN）；自然级联：`/tmp/p2p-natural.json`（10 样本）。
 - 冷启动：`/tmp/p2p-coldstart.json`（10 次）；A/B：`/tmp/p2p-ab-{A1,B,A2}.json`。
 - host 日志：`/tmp/p2p-gate.log`；host events：`~/.p2p-net/logs/events.jsonl`（session_end.pathType 落账）。
+- F8 判别实验：`e2e/f8-pair-forensics.json`（2026-09-25 CDP 抓手机选定对全表 × host /status 同刻对照，t+12s/t+42s 两拍）。
 - 真人实测覆盖 task-13-brief Step 4（用户第一波反馈，见 §0）。

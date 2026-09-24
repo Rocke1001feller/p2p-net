@@ -1,0 +1,126 @@
+[
+ {
+  "tag": "t+12s",
+  "phoneLedgerPath": "direct",
+  "phonePairs": [
+   {
+    "sel": {
+     "l": "prflx",
+     "r": "relay",
+     "bytesSent": 17695,
+     "bytesReceived": 27466
+    },
+    "pairCount": 8,
+    "table": [
+     {
+      "state": "in-progress",
+      "selected": false,
+      "nominated": false,
+      "l": "host",
+      "r": "srflx",
+      "bytes": 0
+     },
+     {
+      "state": "in-progress",
+      "selected": false,
+      "nominated": false,
+      "l": "host",
+      "r": "host",
+      "bytes": 0
+     },
+     {
+      "state": "in-progress",
+      "selected": false,
+      "nominated": false,
+      "l": "host",
+      "r": "host",
+      "bytes": 0
+     },
+     {
+      "state": "in-progress",
+      "selected": false,
+      "nominated": false,
+      "l": "host",
+      "r": "host",
+      "bytes": 0
+     },
+     {
+      "state": "in-progress",
+      "selected": false,
+      "nominated": false,
+      "l": "host",
+      "r": "host",
+      "bytes": 0
+     },
+     {
+      "state": "in-progress",
+      "selected": false,
+      "nominated": false,
+      "l": "host",
+      "r": "host",
+      "bytes": 0
+     },
+     {
+      "state": "in-progress",
+      "selected": false,
+      "nominated": false,
+      "l": "host",
+      "r": "host",
+      "bytes": 0
+     },
+     {
+      "state": "succeeded",
+      "selected": false,
+      "nominated": true,
+      "l": "prflx",
+      "r": "relay",
+      "bytes": 45161
+     }
+    ]
+   }
+  ],
+  "host": {
+   "byPath": {
+    "direct": 0,
+    "relay": 1,
+    "tunnel": 0,
+    "unknown": 0
+   },
+   "sessions": 1
+  }
+ },
+ {
+  "tag": "t+42s",
+  "phoneLedgerPath": "direct",
+  "phonePairs": [
+   {
+    "sel": {
+     "l": "prflx",
+     "r": "relay",
+     "bytesSent": 24358,
+     "bytesReceived": 32391
+    },
+    "pairCount": 1,
+    "table": [
+     {
+      "state": "succeeded",
+      "selected": false,
+      "nominated": true,
+      "l": "prflx",
+      "r": "relay",
+      "bytes": 56749
+     }
+    ]
+   }
+  ],
+  "host": {
+   "byPath": {
+    "direct": 0,
+    "relay": 1,
+    "tunnel": 0,
+    "unknown": 0
+   },
+   "sessions": 1
+  }
+ }
+]

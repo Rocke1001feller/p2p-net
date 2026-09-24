@@ -82,6 +82,15 @@ test('sampleWireStats：无选定对不污染；nominated 优先；计数回退�
   assert.equal(l.wireBytesSent, 0, 'pc 重置计数回退：负增量钳零');
 });
 
+test('sampleWireStats：双侧规则——local prflx + remote relay → relay（F8 真机实证形态）', () => {
+  const l = new FrameLedger();
+  const pair = { type: 'candidate-pair', id: 'p1', state: 'succeeded', nominated: true, localCandidateId: 'l1', remoteCandidateId: 'r1', bytesSent: 100, bytesReceived: 200 };
+  l.sampleWireStats([pair, { type: 'local-candidate', id: 'l1', candidateType: 'prflx' }, { type: 'remote-candidate', id: 'r1', candidateType: 'relay' }]);
+  assert.equal(l.pathType, 'relay', '任一端 relay 即中继，只看本端会漏报');
+  l.sampleWireStats([pair, { type: 'local-candidate', id: 'l1', candidateType: 'prflx' }, { type: 'remote-candidate', id: 'r1', candidateType: 'srflx' }]);
+  assert.equal(l.pathType, 'direct', '两端均直连候选才是 direct');
+});
+
 test('noteTunnelFrame：tunnel 响应帧计入 wire 桶且 pathType=tunnel', () => {
   const l = new FrameLedger();
   l.noteTunnelFrame({ k: 'res-chunk', id: 1, dataB64: 'AAAA' });
