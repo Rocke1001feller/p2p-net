@@ -8,6 +8,16 @@
 
 Mac/Linux Server + VPS(A类) 入口 + Supabase 全自动引导 + 扫码即登录 + 服务清单 + service 常驻 + 可观测性三件套。详见 spec §10 阶段 P0–P5。
 
+## Wave 1（0.2.0）性能与健康——已完成项核销
+
+> 2026-09-23 立项（spec/plan 见 `docs/superpowers/`），验收见 `e2e/wave1-realdevice-gate.md`（Go，四指标全过）。
+
+- [x] 队头阻塞优化（proxy 通道池 + 帧协议 v2 二进制 + TURN 端口收敛）
+- [x] 绿点假象治理（stallSuspect 黄灯 + pc failed 0ms 拆连 + N4 阈值收回 15s）
+- [x] TURN/NAT 路径回收（ICE consent 看门狗，werift #69 兜底）
+- [x] 帧账本 + 字节计量（成本一等指标；`docs/cost-model.md`，重载因子 ≈1.27【实测-本仓】）
+- [x] 隧道响应 gzip 实验（A/B 结论「默认开」，见 `e2e/compression-ab-results-2026-09-24.md`；DEFAULT 翻转已登记独立任务）
+
 ## 二期候选（已登记）
 
 ### R2-1 B类入口：Cloudflare Pages 托管 PWA
