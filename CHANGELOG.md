@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## 0.2.0（Unreleased）—— Wave 1 性能与健康
+## 0.2.0（2026-09-25）—— Wave 1 性能与健康
 
 ### 性能
 - proxy 4 通道池：req 恒 proxy0 保序，res/ws 按 id/wid 粘滞落最小 bufferedAmount 通道（HOL 门禁：大传输期 1KB 探测排队增量 p95≤500ms，loopback 跳线串行口径）
