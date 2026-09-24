@@ -402,15 +402,15 @@ test('无 binaryOk 的通道（tunnel 形态）：仍走 legacy base64 JSON（�
 
 // ---- gzip 实验（spec D6：P2P_NET_GZIP 双端协商，预注册 e2e/compression-ab-prereg.md）----
 
-test('gzip 实验：flag on + 声明头 + 大 JSON → enc:gzip 且可还原；flag off 恒等不压', async () => {
+test('gzip 实验：默认开（无 env）+ 声明头 + 大 JSON → enc:gzip 且可还原；P2P_NET_GZIP=0 恒等不压', async () => {
   const big = JSON.stringify({ data: 'x'.repeat(40 * 1024) });
   const server = await startHttpServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(big)) });
     res.end(big);
   });
   try {
-    // flag on + req 带 x-p2p-gzip: 1 → 压缩
-    process.env.P2P_NET_GZIP = '1';
+    // 默认开（env 缺失即开，H6 A/B 判定「默认开」落地）+ req 带 x-p2p-gzip: 1 → 压缩
+    delete process.env.P2P_NET_GZIP;
     const dc = new FakeDc();
     const bridge = new HttpBridge();
     await bridge.handle(dc, { k: 'req', id: 1, port: server.port, method: 'GET', path: '/', headers: { 'x-p2p-gzip': '1' } });
@@ -420,14 +420,21 @@ test('gzip 实验：flag on + 声明头 + 大 JSON → enc:gzip 且可还原；f
     const gz = Buffer.concat(dc.frames.filter((f) => f.k === 'res-chunk' && f.dataB64).map((f) => Buffer.from(f.dataB64, 'base64')));
     assert.equal(gunzipSync(gz).toString('utf8'), big);
 
-    // 同 flag 但 req 无声明头 → 不压（双端协商，缺一不可）
+    // 默认开但 req 无声明头 → 不压（双端协商，缺一不可）
     const dc2 = new FakeDc();
     await bridge.handle(dc2, { k: 'req', id: 2, port: server.port, method: 'GET', path: '/', headers: {} });
     await dc2.waitFor((f) => f.k === 'res-chunk' && f.done, 3000, 'done#2');
     assert.equal(dc2.frames.find((f) => f.k === 'res-head').enc, undefined);
 
-    // flag off → 恒等不压
-    delete process.env.P2P_NET_GZIP;
+    // 显式 '1' 与默认等价（旧配置不破坏）
+    process.env.P2P_NET_GZIP = '1';
+    const dc4 = new FakeDc();
+    await bridge.handle(dc4, { k: 'req', id: 4, port: server.port, method: 'GET', path: '/', headers: { 'x-p2p-gzip': '1' } });
+    await dc4.waitFor((f) => f.k === 'res-chunk' && f.done, 3000, 'done#4');
+    assert.equal(dc4.frames.find((f) => f.k === 'res-head').enc, 'gzip');
+
+    // P2P_NET_GZIP=0 紧急关闭开关 → 恒等不压
+    process.env.P2P_NET_GZIP = '0';
     const dc3 = new FakeDc();
     await bridge.handle(dc3, { k: 'req', id: 3, port: server.port, method: 'GET', path: '/', headers: { 'x-p2p-gzip': '1' } });
     await dc3.waitFor((f) => f.k === 'res-chunk' && f.done, 3000, 'done#3');

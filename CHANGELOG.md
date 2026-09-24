@@ -1,12 +1,22 @@
 # CHANGELOG
 
+## Unreleased（main 已合入，未发布）
+
+真机门禁（`e2e/wave1-realdevice-gate.md`）§5 登记的 5 项独立修复，均经独立分支 + squash 合并：
+
+- host 信令面看门狗：轮询连续失败三段楼梯（标记恢复中→重建客户端→`onSignalingBlackHole`，默认退出靠 launchd/systemd 自愈），`/status` 新增 `signaling`（治 F4 信令黑洞）
+- PWA 手动重试不再杀死自动重连循环（`reconnectPolicy` 裁决模块，治 F3）
+- PWA boot 无票重进自动重连最近桌面（`bootPolicy` 裁决模块，票据优先、否则 LS_DESK_ID 记忆，治 F6）
+- pathType 双侧规则：任一端 relay 候选即判中继（F8 终裁——host 无缺陷，本地判据漏报对端 relay；`src/pathType.ts` + `pwa/src/frameLedger.ts`，门禁 §2.1 自然臂读数勘误为 100% relay）
+- **gzip DEFAULT 翻转为开**（H6 A/B 判定落地）：隧道响应 gzip 默认开启，`P2P_NET_GZIP=0` 为紧急关闭开关；双端协商不变（SW 无 DecompressionStream 不声明 `x-p2p-gzip`，host 绝不压）
+
 ## 0.2.0（2026-09-25）—— Wave 1 性能与健康
 
 ### 性能
 - proxy 4 通道池：req 恒 proxy0 保序，res/ws 按 id/wid 粘滞落最小 bufferedAmount 通道（HOL 门禁：大传输期 1KB 探测排队增量 p95≤500ms，loopback 跳线串行口径）
 - 帧协议 v2：res-chunk/ws-msg 二进制出站（省 33% base64 线税 + 双端编解码 CPU），旧端自动回退
 - TURN 单 UDP 端口 3478 收敛（析取 coturn 实测：多端口段不增建连率）
-- 隧道响应 gzip 流式压缩（实验档 `P2P_NET_GZIP`，双端协商；真机 A/B 判定「默认开」，DEFAULT 翻转随下一版本窗口）
+- 隧道响应 gzip 流式压缩（实验档 `P2P_NET_GZIP`，双端协商；真机 A/B 判定「默认开」，翻转于 Unreleased 落地）
 
 ### 健康
 - ICE consent 看门狗：werift 0.24.4 #69 授权死信兜底（复活上限 5 次，give-up 走会话终态）

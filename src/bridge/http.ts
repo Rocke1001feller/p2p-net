@@ -34,7 +34,8 @@ const STRIP_REQ_HEADERS = new Set(['host', 'content-length', 'accept-encoding', 
 const STRIP_RES_HEADERS = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection']);
 
 /**
- * gzip 实验（spec D6，预注册 e2e/compression-ab-prereg.md）：P2P_NET_GZIP=1 且满足全部条件才压——
+ * gzip（spec D6，预注册 e2e/compression-ab-prereg.md，H6 A/B 判定「默认开」）：默认开启，
+ * P2P_NET_GZIP=0 为紧急关闭开关；且满足全部条件才压——
  * >16KB（小响应不值当）、文本/wasm 类（二进制已压）、上游未自带 content-encoding、
  * 且 req 帧带 x-p2p-gzip:1 声明（双端协商：SW 不支持 DecompressionStream 时绝不可压）。
  */
@@ -42,7 +43,7 @@ const GZIP_MIN_BYTES = 16 * 1024;
 const GZIP_TYPES = /^(text\/|application\/(json|javascript|xml|x-javascript|typescript|wasm)|image\/svg\+xml)/;
 
 function gzipEligible(resHeaders: http.IncomingHttpHeaders, reqHeaders: Record<string, string> | undefined): boolean {
-  if (process.env.P2P_NET_GZIP !== '1') return false;
+  if (process.env.P2P_NET_GZIP === '0') return false; // 默认开（H6 判定）；'0' = 显式关闭开关
   const declared = Object.entries(reqHeaders ?? {}).some(([k, v]) => k.toLowerCase() === 'x-p2p-gzip' && v === '1');
   if (!declared) return false;
   // 依赖 content-length 判大小：chunked/流式响应无此头，永不压缩（保守选择，避免边压边算的长连接 CPU 税）。

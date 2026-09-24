@@ -75,7 +75,7 @@ coturn 侧字节对账边界标记：M_A1s/M_A1e/M_Bs/M_Be/M_A2s/M_A2e（epoch 1
 1. **host 信令面看门狗**：poll failed 带时间戳+连续计数、N 次连续失败重建 poll 客户端、/status 暴露 signalingHealth（治 F4）。
 2. **手动重试杀自动重连修复**（治 F3，`shell.ts:478`）。
 3. **boot 无票不自动连裁决**（F6：设计确认 or 缺陷修复，需用户拍板）。
-4. **gzip DEFAULT 翻转为开**（H6 已判定「默认开」，下一版本窗口执行）。
+4. ~~**gzip DEFAULT 翻转为开**（H6 已判定「默认开」，下一版本窗口执行）~~ → 已执行：默认开，`P2P_NET_GZIP=0` 为紧急关闭开关（`wave1/fix-gzip-default-on`）。
 5. ~~**host 实时 pathType 归属修复**（治 F8）~~ → 已执行：F8 终裁为分类语义缺陷（本地判据漏报对端 relay），双侧规则修复已落（见 F8 行与 §2.1 勘误）。
 
 ## 6. 原始数据档案
