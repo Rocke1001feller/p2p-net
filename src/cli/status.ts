@@ -26,6 +26,8 @@ interface StatusBody {
   sessions?: { active?: number; byMode?: Record<string, number>; avgRttMs?: number | null } | number;
   services?: number;
   mode?: string;
+  /** Wave 1（spec D8）：数据面计量快照；旧进程无此字段 → 容错省略该行。 */
+  dataPlane?: { totals?: { req?: number; resDone?: number; bytesSent?: number; bytesRecv?: number }; sessions?: number } | null;
 }
 
 const HINT = 'p2p-net service status';
@@ -73,6 +75,13 @@ export async function runStatus(deps: StatusDeps = {}): Promise<number> {
   out(`设备：${body.deviceId ?? '未知'}`);
   out(`活跃会话：${active}${modes ? `（${modes}）` : ''}${rtt}`);
   out(`发现服务：${typeof body.services === 'number' ? body.services : 0} 个`);
+  const dp = body.dataPlane;
+  const sent = dp?.totals?.bytesSent;
+  const recv = dp?.totals?.bytesRecv;
+  if (typeof sent === 'number' && typeof recv === 'number') {
+    // 视角 = 本机（host）：bytesSent=发往客户端=上行；与 events.jsonl 的 bytesUp 同义
+    out(`数据面流量：上行 ${fmtBytes(sent)} / 下行 ${fmtBytes(recv)}（${dp?.sessions ?? 0} 活跃会话累计）`);
+  }
   return 0;
 }
 
@@ -85,4 +94,11 @@ function fmtUptime(sec: number): string {
   if (h > 0) return `${h} 小时 ${m} 分 ${r} 秒`;
   if (m > 0) return `${m} 分 ${r} 秒`;
   return `${r} 秒`;
+}
+
+/** 字节量人话化：≥1MiB → X.X MiB；≥1KiB → X.X KiB；否则 N B。 */
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MiB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${n} B`;
 }

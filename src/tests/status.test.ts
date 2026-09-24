@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pairTypeFromStats, rttFromStats, relayAddrFromStats, type StatsRow } from '../status.js';
+import { runStatus } from '../cli/status.js';
 
 function rowsWith(pair: StatsRow, local: StatsRow, remote: StatsRow): StatsRow[] {
   return [pair, local, remote];
@@ -75,4 +76,25 @@ test('relayAddrFromStats：local 非 relay → undefined', () => {
     { id: 'R', type: 'remote-candidate', candidateType: 'relay' },
   ];
   assert.equal(relayAddrFromStats(rows), undefined);
+});
+
+test('dataPlane 存在时打印数据面流量行；缺字段（旧进程）省略', async () => {
+  const lines: string[] = [];
+  const code = await runStatus({
+    fetchImpl: (async () => new Response(JSON.stringify({
+      uptime: 60, deviceId: 'desk-x', sessions: { active: 1, byMode: { relay: 1 }, avgRttMs: 53 },
+      services: 2, mode: 'foreground',
+      dataPlane: { totals: { req: 40, resDone: 40, bytesSent: 2 * 1024 * 1024, bytesRecv: 1024 * 1024 }, sessions: 1 },
+    }), { status: 200 })) as typeof fetch,
+    out: (l) => lines.push(l),
+  });
+  assert.equal(code, 0);
+  assert.ok(lines.some((l) => l.includes('数据面流量') && l.includes('上行 2.0 MiB') && l.includes('下行 1.0 MiB')), lines.join('\n'));
+
+  const lines2: string[] = [];
+  await runStatus({
+    fetchImpl: (async () => new Response(JSON.stringify({ uptime: 60, deviceId: 'd', sessions: 0, services: 0 }), { status: 200 })) as typeof fetch,
+    out: (l) => lines2.push(l),
+  });
+  assert.ok(!lines2.some((l) => l.includes('数据面流量')), '旧进程无 dataPlane → 不打该行');
 });
