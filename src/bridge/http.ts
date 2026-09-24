@@ -45,6 +45,7 @@ function gzipEligible(resHeaders: http.IncomingHttpHeaders, reqHeaders: Record<s
   if (process.env.P2P_NET_GZIP !== '1') return false;
   const declared = Object.entries(reqHeaders ?? {}).some(([k, v]) => k.toLowerCase() === 'x-p2p-gzip' && v === '1');
   if (!declared) return false;
+  // 依赖 content-length 判大小：chunked/流式响应无此头，永不压缩（保守选择，避免边压边算的长连接 CPU 税）。
   const len = Number(resHeaders['content-length'] ?? 0);
   if (!(len > GZIP_MIN_BYTES)) return false;
   if (!GZIP_TYPES.test(String(resHeaders['content-type'] ?? ''))) return false;
@@ -95,10 +96,9 @@ export class HttpBridge {
    */
   onSettled?: (id: number) => void;
 
-  /** ctrls 删除的唯一收口：任何路径终结都必须经此，漏一处就会泄漏粘滞映射。 */
+  /** ctrls 删除的唯一收口：任何路径终结都必须经此，漏一处就会泄漏粘滞映射。delete 守卫保证每 id 只结算一次（req-abort 与 AbortError catch 会先后到达）。 */
   private settle(id: number): void {
-    this.ctrls.delete(id);
-    this.onSettled?.(id);
+    if (this.ctrls.delete(id)) this.onSettled?.(id);
   }
 
   /** 帧入口：处理 req / req-abort；其余帧（ws 系列、ping）交还调用方路由。 */

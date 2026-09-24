@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dcSend, type DcLike } from './http.js';
+import http from 'node:http';
+import { AddressInfo } from 'node:net';
+import { dcSend, HttpBridge, type DcLike } from './http.js';
 
 function stubDc(buffered: number): DcLike & { sent: string[]; setBuffered: (n: number) => void } {
   return {
@@ -38,4 +40,25 @@ test('dcSend 每帧让出事件循环：setImmediate 回调能插入批量发送
   setImmediate(() => { ran = true; });
   await dcSend(dc, { k: 'res-chunk', id: 1, dataB64: 'x' });
   assert.equal(ran, true, 'dcSend 必须让出 macrotask，否则批量发送饿死全进程');
+});
+
+test('req-abort 终结只结算一次：abort 路径 onSettled 不得双发（resDone 指标准确性，全分支终审 Important #1）', async () => {
+  // 上游永不响应：保证 abort 落在 doReq 的 await 上，catch 与 abort 路径会先后各 settle 一次。
+  const srv = http.createServer(() => { /* 挂起不回复 */ });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as AddressInfo).port;
+  try {
+    const dc = stubDc(0);
+    const bridge = new HttpBridge();
+    let settled = 0;
+    bridge.onSettled = () => { settled++; };
+    const inflight = bridge.handle(dc, { k: 'req', id: 7, method: 'GET', path: '/hang', headers: {}, port });
+    await new Promise((r) => setTimeout(r, 50)); // 等 doReq 进入 await（ctrl 已注册）
+    await bridge.handle(dc, { k: 'req-abort', id: 7 });
+    await inflight.catch(() => {});
+    await new Promise((r) => setTimeout(r, 50)); // 给 catch 路径的二次 settle 机会（若存在）
+    assert.equal(settled, 1, '同一 id 的 req-abort + AbortError catch 双路径只能结算一次');
+  } finally {
+    srv.close();
+  }
 });

@@ -3,7 +3,7 @@
 ## 0.2.0（Unreleased）—— Wave 1 性能与健康
 
 ### 性能
-- proxy 4 通道池：req 恒 proxy0 保序，res/ws 按 id/wid 粘滞落最小 bufferedAmount 通道（HOL 门禁：大传输期 1KB 探测排队增量 p95≤50ms）
+- proxy 4 通道池：req 恒 proxy0 保序，res/ws 按 id/wid 粘滞落最小 bufferedAmount 通道（HOL 门禁：大传输期 1KB 探测排队增量 p95≤500ms，loopback 跳线串行口径）
 - 帧协议 v2：res-chunk/ws-msg 二进制出站（省 33% base64 线税 + 双端编解码 CPU），旧端自动回退
 - TURN 单 UDP 端口 3478 收敛（析取 coturn 实测：多端口段不增建连率）
 - 隧道响应 gzip 流式压缩（实验档 `P2P_NET_GZIP`，双端协商；真机 A/B 判定「默认开」，DEFAULT 翻转随下一版本窗口）
