@@ -29,8 +29,9 @@ interface StatusBody {
   /** Wave 1（spec D8）：数据面计量快照；旧进程无此字段 → 容错省略该行。
    *  F10 增补 tunnelLinks（隧道兜底腿在线/总数，字节已并入 totals）；旧进程无此字段 → 省略该行。 */
   dataPlane?: { totals?: { req?: number; resDone?: number; bytesSent?: number; bytesRecv?: number }; sessions?: number; tunnelLinks?: { open?: number; total?: number } } | null;
-  /** F4 信令黑洞治理：信令面健康；旧进程无此字段 → 容错省略该行。 */
-  signaling?: { consecutiveFailures?: number; firstFailureAt?: number; lastError?: string; recovering?: boolean } | null;
+  /** F4 信令黑洞治理：信令面健康；旧进程无此字段 → 容错省略该行。
+   *  authFailures（401/403 鉴权连败另账，2026-09-25 分类治理）：旧进程缺省按 0。 */
+  signaling?: { consecutiveFailures?: number; firstFailureAt?: number; lastError?: string; recovering?: boolean; authFailures?: number } | null;
 }
 
 const HINT = 'p2p-net service status';
@@ -93,7 +94,12 @@ export async function runStatus(deps: StatusDeps = {}): Promise<number> {
   const sig = body.signaling;
   if (sig) {
     const n = sig.consecutiveFailures ?? 0;
-    if (n > 0) {
+    const authN = sig.authFailures ?? 0;
+    if (authN > 0) {
+      // 401/403 鉴权连败（2026-09-25 分类治理）：与网络黑洞不同——服务器可达、令牌被拒，
+      // 自动续期进行中，隧道兜底腿（无需 JWT）不受影响
+      out(`信令：鉴权连续失败 ${authN} 次（令牌被拒）——自动续期进行中，隧道兜底不受影响；若持续不愈请重跑 p2p-net login`);
+    } else if (n > 0) {
       const secs = typeof sig.firstFailureAt === 'number' ? Math.max(0, Math.round((Date.now() - sig.firstFailureAt) / 1000)) : null;
       out(`信令：连续 ${n} 次轮询失败${secs !== null ? `（已 ${fmtUptime(secs)}）` : ''}——手机端可能连不上，持续不愈将自动重启`);
     } else {

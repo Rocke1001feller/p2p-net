@@ -52,8 +52,8 @@ export interface HostAgentLike {
   stop(): void;
   /** 数据面计量快照（Task 5，spec D5/D8+D9）：假 agent/旧装配可无此方法（/status 容错为 null）。 */
   dataPlaneSnapshot?(): { totals: SessionLedger; sessions: number; byPath: Record<string, number> };
-  /** 信令面健康快照（F4 黑洞治理 + 2026-09-25 lastPollMs）：假 agent/旧装配可无此方法（/status 容错为 null）。 */
-  signalingHealth?(): { consecutiveFailures: number; firstFailureAt?: number; lastError?: string; recovering: boolean; recreated: boolean; pollsOk: number; pollsFailed: number; lastPollMs?: number };
+  /** 信令面健康快照（F4 黑洞治理 + 2026-09-25 lastPollMs/authFailures）：假 agent/旧装配可无此方法（/status 容错为 null）。 */
+  signalingHealth?(): { consecutiveFailures: number; firstFailureAt?: number; lastError?: string; recovering: boolean; recreated: boolean; pollsOk: number; pollsFailed: number; lastPollMs?: number; authFailures?: number };
 }
 
 /** TunnelClient 的最小装配面（含数据面接线所需的 send/isOpen）。 */
@@ -298,6 +298,31 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
     teardowns.push(() => closeServer(discovery));
 
     // 7) HostAgent（WebRTC 主路径；构造后需 start() 才开始信令轮询）
+    //
+    // token 续期共用例程（周期 + 401 即时两路，防重入：GoTrue 刷新令牌轮换，并发续期会让
+    // 一路拿到已轮换的废令牌）。401 即时续期由 HostAgent 鉴权连败回调驱动（401/403 = 服务器
+    // 可达、令牌被拒，看门狗不撞黑洞楼梯——2026-09-25 真机事故：401 连败 199s 被误判黑洞杀进程）。
+    let refreshing = false;
+    const refreshNow = async (reason: 'periodic' | 'auth-failure'): Promise<void> => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const fresh = await ensureFreshTokenFn(cfg, auth);
+        if (stopped) return; // stop 后在途续期落定：不写盘、不重赋值
+        if (fresh !== auth) {
+          auth = fresh;
+          saveAuthFn(dir, auth);
+          log.info('auth', reason === 'periodic' ? '访问令牌已周期续期并重存' : '访问令牌已即时续期并重存（401/403 鉴权连败触发）');
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log.error('auth', msg); // AuthError 文案已含 p2p-net login 指引
+        log.event('auth_refresh_failed', { err: msg, reason });
+      } finally {
+        refreshing = false;
+      }
+    };
+
     const hostFactory = deps.hostAgentFactory ?? ((o: HostAgentOptions) => new HostAgent(o));
     host = hostFactory({
       supabaseUrl: cfg.supabaseUrl,
@@ -308,6 +333,9 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
       turnFetcher: () => fetchTurnCredentials(cfg, auth.accessToken, fetchImpl),
       isPortAllowed,
       onStatus: onHostStatus, // host_status 事件已折叠进会话事件流（session_start/cascade_choice/session_end）
+      onAuthFailure: () => {
+        void refreshNow('auth-failure');
+      },
     });
     host.start();
     teardowns.push(() => host.stop());
@@ -445,23 +473,9 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
 
     // 10) 运行期 token 周期续期：JWT ~1h 到期，10min 周期保证常驻进程（service install 场景）
     //     各 accessToken 闭包读到的永远新鲜。AuthError（冷却/硬失败）记人话日志保活进程
-    //     ——隧道无需 JWT 仍工作；绝不抛错、绝不甩堆栈、绝不记令牌。
+    //     ——隧道无需 JWT 仍工作；绝不抛错、绝不甩堆栈、绝不记令牌。与 401 即时续期共用 refreshNow。
     const refreshTimer = setInterval(() => {
-      void (async () => {
-        try {
-          const fresh = await ensureFreshTokenFn(cfg, auth);
-          if (stopped) return; // stop 后在途续期落定：不写盘、不重赋值
-          if (fresh !== auth) {
-            auth = fresh;
-            saveAuthFn(dir, auth);
-            log.info('auth', '访问令牌已周期续期并重存');
-          }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          log.error('auth', msg); // AuthError 文案已含 p2p-net login 指引
-          log.event('auth_refresh_failed', { err: msg });
-        }
-      })();
+      void refreshNow('periodic');
     }, deps.tokenRefreshIntervalMs ?? TOKEN_REFRESH_INTERVAL_MS);
     refreshTimer.unref?.();
     teardowns.push(() => clearInterval(refreshTimer));

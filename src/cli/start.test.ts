@@ -695,3 +695,24 @@ test('F10：隧道腿计量并入 /status 数据面（成本模型补最贵变�
     await new Promise<void>((r) => httpServer.close(() => r()));
   }
 });
+
+test('401 续期接线：onAuthFailure 触发即时续期（并发防重入），成功重存 auth.json', async () => {
+  const ctx = makeDeps({});
+  const handle = await runStart({ foreground: true }, ctx.deps);
+  try {
+    const cb = ctx.hostOpts().onAuthFailure;
+    assert.equal(typeof cb, 'function', '装配必须向 HostAgent 提供 onAuthFailure');
+    const n0 = ctx.ensureCallCount();
+    cb!();
+    cb!(); // 并发第二次必须被防重入吞掉
+    await flush();
+    assert.equal(ctx.ensureCallCount(), n0 + 1, '并发回调去重为一次续期');
+    assert.deepEqual(ctx.savedAuth(), FRESH, '续期成功必须重存 auth.json');
+    // 冷却窗过后（非并发）再次回调可再触发——防重入只管在途，不管冷却（冷却在 host.ts）
+    cb!();
+    await flush();
+    assert.equal(ctx.ensureCallCount(), n0 + 2, '非在途的再次回调应再次续期');
+  } finally {
+    await handle.stop();
+  }
+});

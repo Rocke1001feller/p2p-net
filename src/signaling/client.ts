@@ -28,6 +28,18 @@ export interface PollResult {
   cursor: number;
 }
 
+/** 信令 HTTP 层失败（结构化状态码，2026-09-25 401 分类治理）：401/403 = 服务器可达、令牌被拒，
+ *  与网络级失败（fetch throw / 超时）本质不同——host 看门狗据此分类，鉴权失败不撞黑洞楼梯。 */
+export class SignalingHttpError extends Error {
+  constructor(
+    action: 'poll' | 'send',
+    readonly status: number,
+  ) {
+    super(`signaling ${action} failed: ${status}`);
+    this.name = 'SignalingHttpError';
+  }
+}
+
 export class SignalingClient {
   constructor(private opts: SignalingClientOptions) {}
 
@@ -53,7 +65,7 @@ export class SignalingClient {
         expires_at: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
       }),
     });
-    if (!r.ok) throw new Error(`signaling send failed: ${r.status}`);
+    if (!r.ok) throw new SignalingHttpError('send', r.status);
   }
 
   async poll(room: string, cursor: number): Promise<PollResult> {
@@ -66,7 +78,7 @@ export class SignalingClient {
       select: 'id,sender,payload',
     });
     const r = await fetch(`${this.opts.supabaseUrl}/rest/v1/signaling_messages?${q}`, { headers: this.headers(), signal: AbortSignal.timeout(10_000) });
-    if (!r.ok) throw new Error(`signaling poll failed: ${r.status}`);
+    if (!r.ok) throw new SignalingHttpError('poll', r.status);
     const rows = (await r.json()) as SigRow[];
     return { msgs: rows, cursor: rows.length ? rows[rows.length - 1].id : cursor };
   }

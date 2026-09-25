@@ -121,3 +121,16 @@ test('F10：tunnelLinks 存在时打印隧道腿在线数；缺字段（旧进�
   });
   assert.ok(!lines2.some((l) => l.includes('隧道兜底腿')), '旧进程无 tunnelLinks → 不打该行');
 });
+
+test('401 分类：authFailures>0 渲染鉴权连败行（与网络黑洞行口径区分）', async () => {
+  const lines: string[] = [];
+  await runStatus({
+    fetchImpl: (async () => new Response(JSON.stringify({
+      uptime: 60, deviceId: 'd', sessions: 0, services: 0,
+      signaling: { consecutiveFailures: 0, authFailures: 4, lastError: 'signaling poll failed: 401', recovering: false },
+    }), { status: 200 })) as typeof fetch,
+    out: (l) => lines.push(l),
+  });
+  assert.ok(lines.some((l) => l.includes('鉴权') && l.includes('4') && l.includes('login')), lines.join('\n'));
+  assert.ok(!lines.some((l) => l.includes('轮询失败')), '鉴权连败不得谎报为网络轮询失败');
+});

@@ -215,3 +215,26 @@ test('stop() 后不再发射任何事件', async () => {
   await sleep(60);
   assert.equal(events.length, n, 'stop 后零发射');
 });
+
+test('信令鉴权连败（authFailures>0）同样触发翻转告警', async () => {
+  const { log, events } = fakeLogger();
+  let sig: SigSnapshot = { ...sigOk, authFailures: 0 };
+  const h = startSelfcheck({
+    log,
+    getServices: () => [],
+    signalingHealth: () => sig,
+    intervalMs: 15,
+    heartbeatCycles: 100,
+    fetchImpl: okFetch(),
+  });
+  try {
+    sig = { ...sigOk, authFailures: 3, lastError: 'signaling poll failed: 401' };
+    await until(() => events.some((e) => e.name === 'selfcheck_alert' && e.data.target === 'signaling'), 5000, '鉴权连败应告警');
+    const a = events.find((e) => e.name === 'selfcheck_alert' && e.data.target === 'signaling')!;
+    assert.equal(a.data.ok, false);
+    sig = { ...sigOk, authFailures: 0 };
+    await until(() => events.filter((e) => e.name === 'selfcheck_alert' && e.data.target === 'signaling').length === 2, 5000, '恢复应告警');
+  } finally {
+    h.stop();
+  }
+});

@@ -28,6 +28,8 @@ export interface SigSnapshot {
   pollsOk: number;
   pollsFailed: number;
   lastPollMs?: number;
+  /** 鉴权连败另账（401/403 分类治理）；stub/旧装配可缺省（按 0 计）。 */
+  authFailures?: number;
 }
 
 export interface SelfcheckTarget {
@@ -114,7 +116,8 @@ export function startSelfcheck(opts: SelfcheckOpts): SelfcheckHandle {
 
       const sig = opts.signalingHealth?.();
       if (sig) {
-        const failing = sig.consecutiveFailures > 0;
+        // 「信令病了」= 网络连败或鉴权连败（401/403 另账同样是故障 episode）
+        const failing = sig.consecutiveFailures > 0 || (sig.authFailures ?? 0) > 0;
         // 首样本即失败也告警（与目标 fail 的「起步即失联值得留痕」同口径）；
         // 健康首样本静默建基线；此后按翻转告警。
         if (failing !== sigFailing && (sigFailing !== undefined || failing)) {

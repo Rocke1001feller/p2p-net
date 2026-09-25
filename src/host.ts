@@ -20,7 +20,7 @@ import { pickLeastBufferedIdx, proxyLabelIdx } from './pool.js';
 import { WsBridge } from './bridge/ws.js';
 import { assertPortAllowed, PortNotAllowedError } from './bridge/guard.js';
 import { decodeFrame, decodeBinFrame, isPing, isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen, type TunnelFrame } from './frames.js';
-import { SignalingClient, type PollResult } from './signaling/client.js';
+import { SignalingClient, SignalingHttpError, type PollResult } from './signaling/client.js';
 import { isSigMessage, roomFor, type SigMessage } from './signaling/protocol.js';
 import { selectedPairStats, type PathType } from './pathType.js';
 
@@ -80,6 +80,12 @@ export interface HostAgentOptions {
   /** 持续黑洞的收尾动作（默认 process.exit(1)：常驻服务 launchd KeepAlive / systemd
    *  Restart=always 崩溃自愈，与人工重启同效；测试注入替代）。每段黑洞 episode 只触发一次。 */
   onSignalingBlackHole?: () => void;
+  /** 401/403 鉴权连败回调（2026-09-25 真机事故：401 连败 199s 被判黑洞误杀进程）——
+   *  鉴权失败 = 服务器可达、令牌被拒，不是黑洞：不撞三段楼梯，另账 authFailures，
+   *  由本回调促即时续期（装配层负责防重入；本侧按 authRetryMs 冷却节流）。 */
+  onAuthFailure?: () => void;
+  /** onAuthFailure 冷却期（默认 60s；测试注入小值）。 */
+  authRetryMs?: number;
 }
 
 // 调试日志（P2P_NET_DEBUG=1 启用）；错误类日志不受开关限制（轮询/onSignal 失败必须留痕）
@@ -87,6 +93,8 @@ const dbg = (...a: unknown[]) => { if (process.env.P2P_NET_DEBUG) console.error(
 
 const DEFAULT_POLL_MS = 800;
 const PURGE_INTERVAL_MS = 60_000;
+/** onAuthFailure 默认冷却期：poll 周期 800ms，不节流会把续期打成对 GoTrue 的锤击。 */
+const DEFAULT_AUTH_RETRY_MS = 60_000;
 const ICE_CACHE_MARGIN_MS = 60_000;
 const DEFAULT_TURN_TTL_MS = 3600_000;
 /** 会话宽限期：非 connected 且非 closed 的状态先在路由表里保留这么久（等自愈/等新 offer）。 */
@@ -346,6 +354,11 @@ export class HostAgent {
   private sigLastError?: string;
   private sigOk = 0;
   private sigFail = 0;
+  /** 鉴权连败另账（401/403 不撞黑洞楼梯）；首败时间戳供恢复行算历时。 */
+  private sigAuthFail = 0;
+  private sigAuthFirstFailAt?: number;
+  /** onAuthFailure 节流：上次回调时刻（0 = 从未回调）。 */
+  private sigLastAuthCbAt = 0;
   /** 最近一次 poll 耗时（2026-09-25 自检探针：信令 RTT 是黑洞归因的第一变量）。 */
   private sigLastPollMs?: number;
   private sigRecovering = false;
@@ -422,33 +435,51 @@ export class HostAgent {
       const detail = cause ? ` (cause=${cause.code ?? cause.name ?? ''}${cause.message ? ':' + cause.message : ''})` : '';
       const msg = (e instanceof Error ? e.message : String(e)) + detail;
       console.error('[p2p-net] poll failed:', msg);
-      this.notePollFail(msg);
+      this.notePollFail(msg, e);
     } finally {
       this.polling = false;
     }
   }
 
-  /** poll 成功：看门狗计数清零；若刚走出一段失败 episode，留恢复痕（带历时与连败数）。 */
+  /** poll 成功：看门狗计数清零；若刚走出一段失败 episode（网络或鉴权），留恢复痕（带历时与连败数）。 */
   private notePollOk(): void {
     this.sigOk++;
-    if (this.sigConsecFail > 0) {
-      const secs = this.sigFirstFailAt ? Math.round((Date.now() - this.sigFirstFailAt) / 1000) : 0;
-      console.error(`[p2p-net] 信令恢复：连续 ${this.sigConsecFail} 次失败、历时 ${secs}s 后重连成功`);
+    if (this.sigConsecFail > 0 || this.sigAuthFail > 0) {
+      const firstAt = this.sigFirstFailAt ?? this.sigAuthFirstFailAt;
+      const secs = firstAt ? Math.round((Date.now() - firstAt) / 1000) : 0;
+      console.error(`[p2p-net] 信令恢复：连败 网络 ${this.sigConsecFail} / 鉴权 ${this.sigAuthFail} 次、历时 ${secs}s 后重连成功`);
     }
     this.sigConsecFail = 0;
     this.sigFirstFailAt = undefined;
+    this.sigAuthFail = 0;
+    this.sigAuthFirstFailAt = undefined;
     this.sigLastError = undefined;
     this.sigRecovering = false;
     this.sigRecreated = false;
     this.sigBlackHoleFired = false;
   }
 
-  /** poll 失败：看门狗三段楼梯（F4 黑洞治理，阈值可用 opts.signalingWatchdog 覆盖）。 */
-  private notePollFail(msg: string): void {
+  /** poll 失败分类（2026-09-25 真机事故治理）：
+   *  401/403 = 服务器可达、令牌被拒——不是黑洞：另账 authFailures，按冷却节流促即时续期，
+   *  不垫也不拆网络楼梯（sigConsecFail 只量网络类失败，401 恰好证明服务器可达）。
+   *  网络类失败维持三段楼梯（F4 黑洞治理，阈值可用 opts.signalingWatchdog 覆盖）。 */
+  private notePollFail(msg: string, err?: unknown): void {
     this.sigFail++;
+    this.sigLastError = msg;
+    if (err instanceof SignalingHttpError && (err.status === 401 || err.status === 403)) {
+      this.sigAuthFail++;
+      this.sigAuthFirstFailAt ??= Date.now();
+      const cooldown = this.opts.authRetryMs ?? DEFAULT_AUTH_RETRY_MS;
+      const now = Date.now();
+      if (this.opts.onAuthFailure && now - this.sigLastAuthCbAt >= cooldown) {
+        this.sigLastAuthCbAt = now;
+        console.error(`[p2p-net] 信令鉴权连败（${msg}）：令牌被拒，触发即时续期（隧道腿无需 JWT 不受影响）；若持续请重跑 p2p-net login`);
+        this.opts.onAuthFailure();
+      }
+      return;
+    }
     this.sigConsecFail++;
     this.sigFirstFailAt ??= Date.now();
-    this.sigLastError = msg;
     const n = this.sigConsecFail;
     const wd = { recoverAfter: 3, recreateAfter: 15, exitAfter: 45, ...this.opts.signalingWatchdog };
     const elapsed = Math.round((Date.now() - this.sigFirstFailAt) / 1000);
@@ -478,6 +509,8 @@ export class HostAgent {
     pollsOk: number;
     pollsFailed: number;
     lastPollMs?: number;
+    /** 鉴权连败另账（401/403）：与 consecutiveFailures（网络类）分开计数，>0 同样是「信令病了」。 */
+    authFailures: number;
   } {
     return {
       consecutiveFailures: this.sigConsecFail,
@@ -488,6 +521,7 @@ export class HostAgent {
       pollsOk: this.sigOk,
       pollsFailed: this.sigFail,
       ...(this.sigLastPollMs !== undefined ? { lastPollMs: this.sigLastPollMs } : {}),
+      authFailures: this.sigAuthFail,
     };
   }
 
