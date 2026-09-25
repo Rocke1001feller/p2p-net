@@ -386,6 +386,39 @@ test('HostAgent：两个客户端（不同 deviceId）同时在线，host 必须
   }
 });
 
+test('HostAgent：offer meta.access 入会话条目并随 HostStatus 转发（W2-1 接入分桶链路）', async () => {
+  const statuses: HostStatus[] = [];
+  const agent = mkAgent(statuses, 10);
+  try {
+    const onSignal = (agent as unknown as { onSignal: (m: unknown) => Promise<void> }).onSignal.bind(agent);
+    const sessions = (agent as unknown as { sessions: Map<string, PeerSession> }).sessions;
+    await onSignal({ type: 'offer', sid: 's1', from: 'phone-ct', sdp: { type: 'offer', sdp: 'v=0 bogus' }, meta: { access: 'cellular-ct' } }).catch(() => {});
+    const session = sessions.get('phone-ct');
+    assert.ok(session, '带 meta 的 offer 后会话应已入表');
+    assert.equal(session.access, 'cellular-ct', 'offer meta.access 必须落到会话条目');
+    driveStatus(agent, 'phone-ct', session, 'connected');
+    const st = statuses.find((s) => s.clientKey === 'phone-ct' && s.state === 'connected');
+    assert.equal(st?.access, 'cellular-ct', 'HostStatus 必须带出来自 offer meta 的 access');
+  } finally {
+    agent.stop();
+  }
+});
+
+test('HostAgent：旧版 offer 无 meta —— 会话 access 为 undefined 不抛（Review Focus #1 兼容钉死）', async () => {
+  const statuses: HostStatus[] = [];
+  const agent = mkAgent(statuses, 10);
+  try {
+    const session = await seedBogusSession(agent, 'phone-legacy');
+    assert.equal(session.access, undefined, '无 meta 的 offer 不得在会话条目上编造 access');
+    driveStatus(agent, 'phone-legacy', session, 'connected');
+    const st = statuses.find((s) => s.clientKey === 'phone-legacy' && s.state === 'connected');
+    assert.ok(st, '旧版 offer 的会话状态事件照常，不得抛错或拒连');
+    assert.equal(st!.access, undefined, '无 meta 时 access 缺省为 undefined（下游落 unknown 桶）');
+  } finally {
+    agent.stop();
+  }
+});
+
 // ---- I1 会话会计：宽限到期必须合成一次终态 onStatus，否则 /status 长期谎报活跃会话 ----
 
 /** bogus offer 入表（acceptOffer 失败但会话已登记），返回会话对象与私有面句柄。 */

@@ -45,6 +45,8 @@ export type HostStatus = LinkStatus & {
   /** 终结原因细分（Task 5 修复轮）：'replaced' = 同设备新 offer 换绑合成的终态，
    *  与正常 closed / 宽限到期 failed 区分（start.ts 记为 session_end 的 reason）。 */
   endReason?: string;
+  /** 接入类型分桶（Wave 2 W2-1）：来自 offer meta.access，缺省/旧版 PWA 为 undefined。 */
+  access?: string;
 };
 
 export interface HostAgentOptions {
@@ -168,6 +170,8 @@ export class PeerSession {
   private readonly widDc = new Map<number, DcLike>();
   readonly ledger = makeLedger();
   private wireTimer?: ReturnType<typeof setInterval>;
+  /** 接入类型分桶（Wave 2 W2-1）：来自 offer meta.access；旧版 PWA 无 meta 时为 undefined。 */
+  access?: string;
 
   constructor(wsPort?: number, isPortAllowed?: (port: number) => boolean) {
     this.wsPort = wsPort;
@@ -548,6 +552,7 @@ export class HostAgent {
         this.sessions.delete(clientKey);
       }
       const session = new PeerSession(this.opts.wsPort, this.opts.isPortAllowed);
+      session.access = msg.meta?.access; // W2-1：offer meta → 会话条目（旧版无 meta 为 undefined，不拦）
       this.sessions.set(clientKey, session);
       dbg('offer accepted', 'from=' + clientKey);
       await session.peer.setIceServers(ice);
@@ -598,7 +603,7 @@ export class HostAgent {
     if (verdict === 'keep') session.clearGrace();
     else if (verdict === 'drop') this.dropSession(clientKey, session);
     else session.startGrace(this.opts.sessionGraceMs ?? SESSION_GRACE_MS, () => this.expireSession(clientKey, session));
-    this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId, clientKey, ledger: { ...session.ledger } });
+    this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId, clientKey, ledger: { ...session.ledger }, ...(session.access ? { access: session.access } : {}) });
   }
 
   /**

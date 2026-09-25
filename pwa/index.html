@@ -188,6 +188,20 @@ iframe.app{position:absolute;inset:0;width:100%;height:100%;border:0;display:non
       <div class="row" id="rowDiag"><span class="tx"><b>连接诊断</b><span id="diagInfo">—</span></span>
         <span style="color:var(--ink3)">›</span></div>
     </div>
+    <!-- 接入类型标注（Wave 2 W2-1）：写入 LS_ACCESS，下次 offer 起随 meta 上报供直连率矩阵分桶 -->
+    <div class="group" style="margin-top:14px">
+      <div class="row" id="rowAccess"><span class="tx"><b>当前网络标注</b><span>供连接质量统计分桶；不选则自动探测</span></span>
+        <select id="selAccess" style="border:none;background:rgba(120,120,128,.12);border-radius:8px;
+          font-size:13.5px;padding:8px 10px;color:var(--ink);max-width:136px">
+          <option value="">自动探测</option>
+          <option value="cellular-ct">蜂窝·电信</option>
+          <option value="cellular-cu">蜂窝·联通</option>
+          <option value="cellular-other">蜂窝·其他</option>
+          <option value="wifi-home">WiFi·家庭</option>
+          <option value="wifi-office">WiFi·办公</option>
+          <option value="other">其他</option>
+        </select></div>
+    </div>
     <div class="group" style="margin-top:14px">
       <div class="row" id="rowAbout"><span class="tx"><b>关于 p2p-net</b><span>PWA v0.1 · 数据面 p2p-net</span></span></div>
     </div>

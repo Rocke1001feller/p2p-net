@@ -31,6 +31,9 @@ export interface SessionEvent {
   pathType?: PathType;
   wireBytesUp?: number;
   wireBytesDown?: number;
+  /** 接入类型分桶（Wave 2 W2-1）：PWA 侧标注经 offer meta 流入；缺省/旧版 = 'unknown'。
+   *  取值域：'cellular-ct'|'cellular-cu'|'cellular-other'|'wifi-home'|'wifi-office'|'other'|'unknown'。 */
+  access?: string;
   reason?: string;
 }
 

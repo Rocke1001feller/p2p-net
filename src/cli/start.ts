@@ -228,7 +228,7 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
         };
         if (!openSids.has(sid)) {
           openSids.add(sid);
-          record({ name: 'session_start', sid });
+          record({ name: 'session_start', sid, ...(s.access ? { access: s.access } : {}) }); // W2-1：access 进事件流
           emitCascade(); // 首开必发：建立节流基线
           return;
         }

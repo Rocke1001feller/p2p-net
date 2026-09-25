@@ -27,7 +27,7 @@ import {
 } from './cloud.js';
 import { loadRuntimeConfig, type RuntimeConfig } from './config.js';
 import {
-  DISCOVERY_PORT, LS_DESK_ID, LS_DEVICE_ID, LS_DEVICES, LS_UID, stunServersFromRelays,
+  DISCOVERY_PORT, LS_ACCESS, LS_DESK_ID, LS_DEVICE_ID, LS_DEVICES, LS_UID, stunServersFromRelays,
 } from './constants.js';
 import { discoveryCandidates, pickDiscoveryPort } from './discovery.js';
 import {
@@ -1048,6 +1048,14 @@ $id('rowDiag').onclick = () => {
   setMe(null, loadDevices().length,
     `模式=${cascade?.mode ?? '—'} · 通道=${cascade?.isOpen ? '开' : '关'} · 网关=${desk.tunnelUrl ? '有' : '无'}`);
   toast(`模式=${cascade?.mode ?? '—'} 通道=${cascade?.isOpen ? '开' : '关'}`);
+};
+// 接入类型标注（Wave 2 W2-1）：写 LS_ACCESS，下一次 offer 起随 meta.access 上报；
+// 选「自动探测」则清除手动标注，回落 navigator.connection 探测（Safari 无 → unknown）。
+const selAccess = $id<HTMLSelectElement>('selAccess');
+selAccess.value = localStorage.getItem(LS_ACCESS) ?? '';
+selAccess.onchange = () => {
+  if (selAccess.value) localStorage.setItem(LS_ACCESS, selAccess.value);
+  else localStorage.removeItem(LS_ACCESS);
 };
 const openPaste = (): void => showPasteSheet((raw) => void handlePair(raw));
 $id('btnPastePair').onclick = openPaste;

@@ -504,6 +504,25 @@ test('会话事件映射：onStatus 序列 → 环形缓冲 → getStatus 聚合
   }
 });
 
+test('会话事件映射：session_start 带出 HostStatus.access（W2-1）；无 access 的旧版状态不编造该字段', async () => {
+  const ctx = makeDeps();
+  const handle = await runStart({}, ctx.deps);
+  try {
+    const ho = ctx.hostOpts();
+    ho.onStatus?.({ state: 'connected', pairType: 'p2p', rttMs: 10, deviceId: DEVICE_ID, clientKey: 'p-ct', access: 'cellular-ct' } as HostStatus);
+    const start = ctx.logLines.find((l) => l.event === 'session_start' && l.sid === 'p-ct');
+    assert.ok(start, '带 access 的会话 session_start 照常');
+    assert.equal(start!.access, 'cellular-ct', 'session_start 必须带出 HostStatus.access');
+
+    ho.onStatus?.({ state: 'connected', pairType: 'p2p', rttMs: 10, deviceId: DEVICE_ID, clientKey: 'p-old' } as HostStatus);
+    const legacy = ctx.logLines.find((l) => l.event === 'session_start' && l.sid === 'p-old');
+    assert.ok(legacy, '旧版无 access 的会话 session_start 照常');
+    assert.ok(!('access' in legacy!), '无 access 时事件不得编造该字段（下游落 unknown 桶）');
+  } finally {
+    await handle.stop();
+  }
+});
+
 test('会话事件环形缓冲：容量 2000 FIFO 丢最旧；events.jsonl 写透不受缓冲影响', async () => {
   const ctx = makeDeps();
   const handle = await runStart({}, ctx.deps);

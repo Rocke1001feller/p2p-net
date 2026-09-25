@@ -29,6 +29,9 @@ export interface SigMessage {
   from?: string;
   /** type='tunnel'（Task 11 兜底公告）时携带的公网 URL。 */
   tunnelUrl?: string;
+  /** offer 专用元数据（Wave 2 W2-1）：PWA 接入类型标注等随 offer 上报；其余消息不带。
+   *  可选且不进 isSigMessage 类型守卫——旧版 PWA 无 meta 的 offer 必须原样兼容。 */
+  meta?: { access?: string };
 }
 
 const ROOM_RE = /^sig:([^:]+):(.+)$/;

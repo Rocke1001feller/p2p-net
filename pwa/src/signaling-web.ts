@@ -13,6 +13,23 @@
 import { pairTypeFromStats, roomFor, rttFromStats, relayAddrFromStats, SignalingClient, decodeBinFrame, encodeWsMsgBin, PROXY_POOL_SIZE } from 'p2p-net/browser';
 import { PoolRouter } from './poolRouter.js';
 import { DEFAULT_LIVENESS, type LivenessConfig } from './livenessConfig.js';
+import { LS_ACCESS } from './constants.js';
+
+/**
+ * 接入类型自动探测（Wave 2 W2-1）：Navigator.connection 仅部分平台有
+ * （iPhone Safari 无 → 'unknown'，必须降级不得抛）。TS 无 NetworkInformation 类型，
+ * 用局部交叉类型，禁止 any。
+ */
+export function autoAccess(): string {
+  const nav = globalThis.navigator as (Navigator & { connection?: { type?: string } }) | undefined;
+  return nav?.connection?.type === 'cellular' ? 'cellular-other' : 'unknown';
+}
+
+/** offer meta.access 取值（W2-1）：手动标注（LS_ACCESS）优先，未标注回落 autoAccess 探测。 */
+export function offerAccess(): string {
+  const ls = (globalThis as { localStorage?: Pick<Storage, 'getItem'> }).localStorage;
+  return ls?.getItem(LS_ACCESS) ?? autoAccess();
+}
 
 export interface LightStatus {
   state: 'off' | 'connecting' | 'connected' | 'failed';
@@ -167,7 +184,7 @@ export class WebRtcSession {
     await this.opts.signaling.send(
       roomFor(this.opts.uid, deskDeviceId),
       this.opts.myDeviceId,
-      { type: 'offer', sid: this.sid, sdp: { type: pc.localDescription!.type, sdp: pc.localDescription!.sdp }, from: this.opts.myDeviceId },
+      { type: 'offer', sid: this.sid, sdp: { type: pc.localDescription!.type, sdp: pc.localDescription!.sdp }, from: this.opts.myDeviceId, meta: { access: offerAccess() } },
     );
 
     this.pollTimer = setInterval(() => void this.poll(), POLL_MS);

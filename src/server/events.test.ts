@@ -82,3 +82,19 @@ test('recordSessionEvent：直写 log.event（name 出列，其余字段原样�
   recordSessionEvent(log, e);
   assert.deepEqual(written, [{ name: 'cascade_choice', data: { sid: 'a', mode: 'relay', rttMs: 100 } }]);
 });
+
+// ---- Wave 2 W2-1：接入类型分桶——access 随 session_start 透传，旧版无 access 兼容 ----
+
+test('session_start 带 access 透传进 events.jsonl 数据', () => {
+  const lines: [string, any][] = [];
+  const log = { event: (n: string, d: any) => lines.push([n, d]) } as any;
+  recordSessionEvent(log, { name: 'session_start', sid: 'a', access: 'cellular-ct' });
+  assert.deepEqual(lines, [['session_start', { sid: 'a', access: 'cellular-ct' }]]);
+});
+
+test('无 access 的旧版会话事件不变（兼容）', () => {
+  const lines: [string, any][] = [];
+  const log = { event: (n: string, d: any) => lines.push([n, d]) } as any;
+  recordSessionEvent(log, { name: 'session_start', sid: 'b' });
+  assert.deepEqual(lines, [['session_start', { sid: 'b' }]]);
+});
