@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import crypto from 'node:crypto';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createTunnelRelay, type TunnelRelay } from '../tunnel/relay.js';
 import { TunnelClient, backoffDelayMs } from '../tunnel/client.js';
@@ -198,6 +199,42 @@ test('relay：GET 经隧道 → req 帧形状（port:0/via/path 带 search/头�
   assert.equal(frame.headers['x-probe'], 'p1');
   assert.equal(frame.headers.host, `127.0.0.1:${fx.port}`);
   assert.equal(typeof frame.id, 'number');
+  fx.close();
+});
+
+test('relay：enc:gzip 的 res-head → HTTP 响应补 content-encoding: gzip（帧 enc 字段 → HTTP 语义翻译）', async () => {
+  // 2026-09-25 iPhone 隧道腿 Chats/Files 空返回根因：host 桥按 D6 协商对 >16KB JSON gzip，
+  // 帧标记 enc:'gzip' 若被 relay 丢弃，浏览器收到无 content-encoding 的 gzip 字节 → 应用层 JSON.parse 乱码。
+  const fx = await startRelayServer(SECRET);
+  const desk = new FakeDesktop();
+  const plain = Buffer.from('{"ok":true,"pad":"' + 'x'.repeat(4096) + '"}');
+  const zipped = gzipSync(plain);
+  desk.onFrame = (f, d) => {
+    if (f.k === 'req') {
+      d.send({ k: 'res-head', id: f.id, status: 200, headers: { 'content-type': 'application/json; charset=utf-8' }, enc: 'gzip' });
+      d.send({ k: 'res-chunk', id: f.id, dataB64: zipped.toString('base64'), done: true });
+    }
+  };
+  await desk.connect(fx.port, SECRET, 'sid-gzip');
+
+  // 原始 HTTP 层：头必须声明 gzip，线上字节必须与桌面发出的 gzip 字节逐字节一致
+  const raw = await new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
+    http.get(`http://127.0.0.1:${fx.port}/tunnel/s/sid-gzip/api/big`, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+  assert.equal(raw.status, 200);
+  assert.equal(raw.headers['content-encoding'], 'gzip');
+  assert.deepEqual(raw.body, zipped);
+  assert.deepEqual(gunzipSync(raw.body), plain);
+
+  // 浏览器等价语义（undici fetch 按 content-encoding 透明解压）：应用层必须拿到明文 JSON
+  const res = await fetch(`http://127.0.0.1:${fx.port}/tunnel/s/sid-gzip/api/big2`);
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), plain.toString());
+  desk.terminate();
   fx.close();
 });
 

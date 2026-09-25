@@ -161,7 +161,9 @@ export function createTunnelRelay(opts: TunnelRelayOptions): TunnelRelay {
         const p = session.pend.get(frame.id);
         if (!p || p.headSent) return;
         clearTimeout(p.timer);
-        p.res.writeHead(frame.status, frame.headers);
+        // enc 帧字段 → HTTP content-encoding：gzip 字节过 HTTP 的协议义务。缺了它浏览器不自动解压，
+        // 应用层 JSON.parse 乱码（2026-09-25 iPhone 隧道腿 Chats/Files 空返回根因）。
+        p.res.writeHead(frame.status, frame.enc ? { ...frame.headers, 'content-encoding': frame.enc } : frame.headers);
         p.headSent = true;
         return;
       }
