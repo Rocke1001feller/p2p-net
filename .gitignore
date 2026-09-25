@@ -3,3 +3,4 @@ dist/
 pwa-dist/
 *.log
 *.tgz
+bench-samples-*.jsonl
