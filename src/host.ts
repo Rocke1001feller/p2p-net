@@ -47,6 +47,9 @@ export type HostStatus = LinkStatus & {
   endReason?: string;
   /** 接入类型分桶（Wave 2 W2-1）：来自 offer meta.access，缺省/旧版 PWA 为 undefined。 */
   access?: string;
+  /** NAT facts 紧凑串（Wave 2 W2-2）：来自 offer meta.nat（如 `m:ep-ind,servers:2`），
+   *  采集降级/旧版 PWA 为 undefined；只带聚合语义，绝不带 ip。 */
+  nat?: string;
 };
 
 export interface HostAgentOptions {
@@ -172,6 +175,8 @@ export class PeerSession {
   private wireTimer?: ReturnType<typeof setInterval>;
   /** 接入类型分桶（Wave 2 W2-1）：来自 offer meta.access；旧版 PWA 无 meta 时为 undefined。 */
   access?: string;
+  /** NAT facts 紧凑串（Wave 2 W2-2）：来自 offer meta.nat；采集降级/旧版为 undefined。 */
+  nat?: string;
 
   constructor(wsPort?: number, isPortAllowed?: (port: number) => boolean) {
     this.wsPort = wsPort;
@@ -553,6 +558,7 @@ export class HostAgent {
       }
       const session = new PeerSession(this.opts.wsPort, this.opts.isPortAllowed);
       session.access = msg.meta?.access; // W2-1：offer meta → 会话条目（旧版无 meta 为 undefined，不拦）
+      session.nat = msg.meta?.nat; // W2-2：NAT facts 紧凑串同链路透传（采集降级为 undefined，不拦）
       this.sessions.set(clientKey, session);
       dbg('offer accepted', 'from=' + clientKey);
       await session.peer.setIceServers(ice);
@@ -603,7 +609,7 @@ export class HostAgent {
     if (verdict === 'keep') session.clearGrace();
     else if (verdict === 'drop') this.dropSession(clientKey, session);
     else session.startGrace(this.opts.sessionGraceMs ?? SESSION_GRACE_MS, () => this.expireSession(clientKey, session));
-    this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId, clientKey, ledger: { ...session.ledger }, ...(session.access ? { access: session.access } : {}) });
+    this.opts.onStatus?.({ ...s, deviceId: this.opts.deviceId, clientKey, ledger: { ...session.ledger }, ...(session.access ? { access: session.access } : {}), ...(session.nat ? { nat: session.nat } : {}) });
   }
 
   /**

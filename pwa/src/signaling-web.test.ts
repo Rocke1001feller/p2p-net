@@ -133,6 +133,7 @@ test('offer 携带 meta.access 随信令发出（W2-1）：无标注 → unknown
     signaling: signaling as any,
     uid: 'uid-1', myDeviceId: 'phone-1', iceServers: [],
     onStatus: () => {}, onFrame: () => {},
+    natProbe: async () => undefined, // W2-2：本测试不关 NAT 采集，注入缝保持 hermetic
   });
   try {
     await withLocalStorage(undefined, () => session.connect('desk-1'));
@@ -148,5 +149,87 @@ test('offer 携带 meta.access 随信令发出（W2-1）：无标注 → unknown
     session.teardown();
     if (prevPc === undefined) delete g.RTCPeerConnection;
     else g.RTCPeerConnection = prevPc;
+  }
+});
+
+// ---- Wave 2 W2-2：NAT facts——meta.nat 随 offer 发出，采集失败静默降级 ----
+
+type SentMsg = { room: string; sender: string; msg: any };
+
+/** 假 PC/DC + 内存信令：跑 connect 抓 offer（natProbe 经注入缝控制采集结果）。 */
+async function captureOffer(natProbe: (() => Promise<string | undefined>) | undefined): Promise<{ offers: SentMsg[]; session: WebRtcSession }> {
+  class FakeDc {
+    binaryType = 'arraybuffer';
+    readyState = 'connecting';
+    bufferedAmount = 0;
+    onmessage: ((ev: { data: string | ArrayBuffer }) => void) | null = null;
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    send(): void {}
+    close(): void { this.readyState = 'closed'; }
+  }
+  class FakePc {
+    onicecandidate: ((ev: { candidate: null }) => void) | null = null;
+    onconnectionstatechange: (() => void) | null = null;
+    localDescription: { type: string; sdp: string } | null = null;
+    createDataChannel(): FakeDc { return new FakeDc(); }
+    async createOffer(): Promise<{ type: string; sdp: string }> { return { type: 'offer', sdp: 'v=0 fake' }; }
+    async setLocalDescription(d: { type: string; sdp: string }): Promise<void> { this.localDescription = d; }
+    close(): void {}
+  }
+  const g = globalThis as { RTCPeerConnection?: unknown };
+  const prevPc = g.RTCPeerConnection;
+  g.RTCPeerConnection = FakePc;
+  const sent: SentMsg[] = [];
+  const signaling = {
+    send: async (room: string, sender: string, msg: unknown) => { sent.push({ room, sender, msg }); },
+    poll: async (_room: string, cursor: number) => ({ msgs: [] as unknown[], cursor }),
+    purgeExpired: async () => {},
+  };
+  const session = new WebRtcSession({
+    signaling: signaling as any,
+    uid: 'uid-1', myDeviceId: 'phone-1', iceServers: [],
+    onStatus: () => {}, onFrame: () => {},
+    ...(natProbe ? { natProbe } : {}),
+  });
+  const restore = (): void => {
+    if (prevPc === undefined) delete g.RTCPeerConnection;
+    else g.RTCPeerConnection = prevPc;
+  };
+  try {
+    await withLocalStorage(undefined, () => session.connect('desk-1'));
+  } finally {
+    restore();
+  }
+  return { offers: sent.filter((m) => m.msg?.type === 'offer'), session };
+}
+
+test('offer meta.nat 随 offer 发出：采集成功 → 紧凑串进 meta', async () => {
+  const { offers, session } = await captureOffer(async () => 'm:ep-ind,servers:2');
+  try {
+    assert.equal(offers.length, 1, 'connect 必须发出一条 offer');
+    assert.deepEqual(offers[0]!.msg.meta, { access: 'unknown', nat: 'm:ep-ind,servers:2' }, 'nat 紧凑串随 offer 的 meta 发出');
+  } finally {
+    session.teardown();
+  }
+});
+
+test('offer meta.nat 采集失败（探针抛错/返回 undefined）→ 静默降级不阻断连接，meta 无 nat 键', async () => {
+  const throwing = await captureOffer(async () => {
+    throw new Error('probe boom');
+  });
+  try {
+    assert.equal(throwing.offers.length, 1, '采集抛错不得阻断 offer 发送');
+    assert.deepEqual(throwing.offers[0]!.msg.meta, { access: 'unknown' }, '失败降级：meta 不带 nat 键');
+  } finally {
+    throwing.session.teardown();
+  }
+
+  const undef = await captureOffer(async () => undefined);
+  try {
+    assert.equal(undef.offers.length, 1);
+    assert.deepEqual(undef.offers[0]!.msg.meta, { access: 'unknown' }, '无采集结果：meta 不带 nat 键');
+  } finally {
+    undef.session.teardown();
   }
 });

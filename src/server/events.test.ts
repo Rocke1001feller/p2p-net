@@ -98,3 +98,12 @@ test('无 access 的旧版会话事件不变（兼容）', () => {
   recordSessionEvent(log, { name: 'session_start', sid: 'b' });
   assert.deepEqual(lines, [['session_start', { sid: 'b' }]]);
 });
+
+// ---- Wave 2 W2-2：NAT facts——紧凑串随 session_start 透传，绝不带 ip ----
+
+test('session_start 带 nat 紧凑串透传进 events.jsonl 数据', () => {
+  const lines: [string, any][] = [];
+  const log = { event: (n: string, d: any) => lines.push([n, d]) } as any;
+  recordSessionEvent(log, { name: 'session_start', sid: 'a', access: 'cellular-ct', nat: 'm:ep-ind,servers:2' });
+  assert.deepEqual(lines, [['session_start', { sid: 'a', access: 'cellular-ct', nat: 'm:ep-ind,servers:2' }]]);
+});

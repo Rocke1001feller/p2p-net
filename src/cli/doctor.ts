@@ -1,17 +1,18 @@
-/** p2p-net doctor（Task 20）：七层归因探针，顺序与连接级联同序：
- *  auth → supabase → signaling → ice(TURN) → vps（每 relay）→ scanner → service。
+/** p2p-net doctor（Task 20）：八层归因探针，顺序与连接级联同序：
+ *  auth → supabase → signaling → ice(TURN) → vps（每 relay）→ scanner → service → nat。
  *
  *  裁决语义（Controller rulings）：
  *  - 只诊断不修复：全部探针只读，唯一例外是 signaling 自发自收——写自己房间
  *    sig:<uid>:doctor（30s TTL 自行过期 + purgeExpired 尽力清场）；
  *  - 首败不阻断：每层独立归因，失败后继续跑完剩余层收集完整报告；CLI 退出码=失败数；
  *  - 依赖标注：auth 层不过时，依赖 cfg/auth 的层标 ok=false + detail『依赖 auth 层通过』，
- *    不层层刷 401 红鲱鱼；vps 探针无鉴权只依赖 cfg——auth 挂、配置在时仍实跑；
+ *    不层层刷 401 红鲱鱼；vps/nat 探针无鉴权只依赖 cfg——auth 挂、配置在时仍实跑；
  *  - 续期一次性：doctor 每次运行都是新进程，refresh 失败即归因（AuthError 文案已含
  *    p2p-net login），绝不循环重试；refresh rotation 成功时持久化新凭据（同 start.ts）；
  *  - 凭据纪律：detail/fix 绝不含 accessToken/refreshToken/tunnelSecret（uid/email/ip 可以）；
+ *    nat 层 detail 只带聚合语义（mapping/servers），srflx 探测到的公网地址绝不进报告；
  *  - 全注入可测：loadConfig/loadAuth/saveAuth/ensureFreshToken/fetch/signalingFactory/
- *    verifyVps/stunProbe/scannerFactory/serviceStatus 全经 deps，测试零真实网络/OS；
+ *    verifyVps/stunProbe/scannerFactory/serviceStatus/natCollector 全经 deps，测试零真实网络/OS；
  *    例外：默认 STUN 探针本身打本地 UDP 回环单测（手工协议帧必须真发真收）。
  */
 
@@ -24,6 +25,8 @@ import { parseArgs } from 'node:util';
 
 import { PORTS } from '../contracts.js';
 import type { Layer, Logger } from '../log/logger.js';
+import type { NatFacts } from '../natfacts.js';
+import { collectNatFactsHost, type StunServer } from '../natfactsHost.js';
 import { ensureFreshToken, type AuthState } from '../server/auth.js';
 import { createScanner, SCANNER_ENUM_FAILED_CODE, type Scanner } from '../server/scanner.js';
 import { loadAuth, loadConfig, saveAuth, type AppConfig } from '../server/store.js';
@@ -65,6 +68,9 @@ export interface DoctorDeps {
   /** TURN 3478 STUN/UDP 探活（默认 node:dgram 发 Binding Request 收 Binding Response；
    *  不用裸 TCP connect——云厂商 DDoS SYN 代理/运营商中间盒会代答握手，coturn 停了也「通」（6c 实锤）。 */
   stunProbe?: (host: string, port: number, timeoutMs: number) => Promise<void>;
+  /** NAT facts 采集（W2-2 第 8 层；默认 collectNatFactsHost 打真实 STUN 取 srflx 观测）。
+   *  detail 只渲染 mappingConsistency/servers 聚合语义，srflx ip 不进报告（凭据纪律同款）。 */
+  natCollector?: (servers: StunServer[], timeoutMs?: number) => Promise<NatFacts>;
   scannerFactory?: (opts: { log: Logger }) => Scanner;
   serviceStatusFn?: (opts: { configDir: string }) => Promise<ServiceStatus>;
   /** 探针节奏（测试注入小值；生产默认见各常量）。 */
@@ -464,6 +470,26 @@ export function defaultStunProbe(host: string, port: number, timeoutMs: number):
 
 // ---------- 编排 ----------
 
+/** nat 层（W2-2 第 8 层）：从 cfg.relays 推导 STUN 地址（relay.ip + PORTS.STUN_PORT 契约单源），
+ *  采集 NAT facts。ok = servers≥1；facts 退化（coturn 不可达/单 relay）不抛，其余层照常。 */
+async function checkNat(cfg: AppConfig, deps: DoctorDeps): Promise<DoctorCheck> {
+  if (cfg.relays.length === 0) {
+    return { layer: 'nat', ok: true, detail: 'config.json 无 relays（尚未 init 任何 VPS？），跳过 NAT 探测' };
+  }
+  const collect = deps.natCollector ?? collectNatFactsHost;
+  const servers: StunServer[] = cfg.relays.map((r) => ({ host: r.ip, port: PORTS.STUN_PORT }));
+  const facts = await collect(servers, deps.stunTimeoutMs ?? STUN_TIMEOUT_MS);
+  if (facts.servers < 1) {
+    return {
+      layer: 'nat',
+      ok: false,
+      detail: `mapping=${facts.mappingConsistency} servers=${facts.servers}`,
+      fix: '检查 VPS coturn 与安全组 udp/tcp 放行',
+    };
+  }
+  return { layer: 'nat', ok: true, detail: `mapping=${facts.mappingConsistency} servers=${facts.servers}` };
+}
+
 export async function runDoctor(opts: RunDoctorOpts, deps: DoctorDeps = {}): Promise<DoctorCheck[]> {
   const fetchImpl = opts.fetchImpl ?? deps.fetchImpl ?? globalThis.fetch;
   const checks: DoctorCheck[] = [];
@@ -520,6 +546,7 @@ export async function runDoctor(opts: RunDoctorOpts, deps: DoctorDeps = {}): Pro
   });
   await guard('scanner', () => checkScanner(deps));
   await guard('service', () => checkService(opts.dir, deps));
+  await guard('nat', async () => (cfg ? checkNat(cfg, deps) : gated('nat', 'relays 配置')));
   return checks;
 }
 

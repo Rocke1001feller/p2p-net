@@ -24,3 +24,13 @@ export {
   selectedPairStats,
   type PathType,
 } from './pathType.js';
+// NAT facts（Wave 2 W2-2）：schema/判定表/紧凑串单一事实源（natfacts.ts 纯模块零 Node 依赖）。
+// 具名导出，不得 export *——host 采集器在 natfactsHost.ts（node:dgram），严禁进本 barrel
+// （dgram 进不了浏览器 bundle；browser-entry 门禁已加 natfactsHost 断言）。
+export {
+  formatNatFacts,
+  judgeMappingConsistency,
+  type MappingConsistency,
+  type NatFacts,
+  type SrflxObservation,
+} from './natfacts.js';

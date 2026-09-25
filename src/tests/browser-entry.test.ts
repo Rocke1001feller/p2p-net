@@ -6,7 +6,7 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-test('browser 入口源码图不 import werift（barrel 只含 signaling/frames/status/pathType）', () => {
+test('browser 入口源码图不 import werift（barrel 只含 signaling/frames/status/pathType/natfacts）', () => {
   const sources = [
     'src/browser.ts',
     'src/signaling/protocol.ts',
@@ -15,12 +15,23 @@ test('browser 入口源码图不 import werift（barrel 只含 signaling/frames/
     'src/status.ts',
     'src/ports.ts',
     'src/pathType.ts',
+    'src/natfacts.ts',
   ];
   for (const rel of sources) {
     const text = readFileSync(path.join(root, rel), 'utf8');
     assert.doesNotMatch(text, /from\s+['"]werift['"]/, `${rel} 不得引入 werift`);
     assert.doesNotMatch(text, /from\s+['"]\.\/bridge\/|from\s+['"]\.\/peer\.js|from\s+['"]\.\/host\.js/, `${rel} 不得引入 Node 桥/peer`);
   }
+  // natfacts 必须保持纯模块零 Node 依赖（schema 单源经 barrel 进浏览器）；
+  // dgram 采集器在 natfactsHost.ts，严禁进 barrel——browser-entry 门禁只拦 werift，
+  // dgram 靠这条模块拆分断言拦截。
+  const natfacts = readFileSync(path.join(root, 'src/natfacts.ts'), 'utf8');
+  assert.doesNotMatch(natfacts, /from\s+['"]node:/, 'src/natfacts.ts 不得引入 Node 内建模块');
+  assert.doesNotMatch(
+    readFileSync(path.join(root, 'src/browser.ts'), 'utf8'),
+    /from\s+['"]\.\/natfactsHost/,
+    'browser barrel 不得导出 dgram 采集器',
+  );
 });
 
 test('dist/browser.js 构建产物不含 werift 引用（需先 npm run build）', () => {
@@ -32,6 +43,7 @@ test('dist/browser.js 构建产物不含 werift 引用（需先 npm run build）
   assert.doesNotMatch(text, /import\(\s*['"]werift['"]/, 'browser 入口 bundle 动态引入了 werift');
   assert.doesNotMatch(text, /require\(\s*['"]werift['"]/, 'browser 入口 bundle require 了 werift');
   assert.ok(text.includes('SignalingClient'), 'browser 入口应导出信令客户端');
+  assert.ok(text.includes('judgeMappingConsistency'), 'browser 入口应导出 NAT facts 判定表（W2-2 schema 单源）');
 });
 
 test('dist/ports.js 直读 contracts/ports.json（端口契约浏览器侧无副本的机制锚点，需先 npm run build）', () => {

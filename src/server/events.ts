@@ -34,6 +34,9 @@ export interface SessionEvent {
   /** 接入类型分桶（Wave 2 W2-1）：PWA 侧标注经 offer meta 流入；缺省/旧版 = 'unknown'。
    *  取值域：'cellular-ct'|'cellular-cu'|'cellular-other'|'wifi-home'|'wifi-office'|'other'|'unknown'。 */
   access?: string;
+  /** NAT facts 紧凑串（Wave 2 W2-2）：offer meta.nat 原样透传（如 `m:ep-ind,servers:2`）。
+   *  只带聚合语义，srflx 的 ip 绝不进事件（序列化点 formatNatFacts 保证，同 events.ts:15 纪律）。 */
+  nat?: string;
   reason?: string;
 }
 

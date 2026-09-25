@@ -35,6 +35,7 @@ const AUTH: AuthState = {
 
 interface Rec {
   stun: string[];
+  nat: string[];
   purges: number;
   scannerStops: number;
   sentRoom?: string;
@@ -43,7 +44,7 @@ interface Rec {
 }
 
 function makeRec(): Rec {
-  return { stun: [], purges: 0, scannerStops: 0 };
+  return { stun: [], nat: [], purges: 0, scannerStops: 0 };
 }
 
 function okFetch(): typeof fetch {
@@ -87,6 +88,10 @@ function happyDeps(rec: Rec, over: Partial<DoctorDeps> = {}): DoctorDeps {
     stunProbe: async (host) => {
       rec.stun.push(host);
     },
+    natCollector: async (servers) => {
+      rec.nat = servers.map((s) => s.host);
+      return { hasSrflx: true, srflxPortStable: true, mappingConsistency: 'endpoint-independent' as const, servers: servers.length };
+    },
     scannerFactory: () => ({
       list: () => [{ port: 5173, name: 'Vite' }],
       start() {},
@@ -110,10 +115,10 @@ const byLayer = (checks: DoctorCheck[], l: Layer): DoctorCheck[] => checks.filte
 
 // ---------- 全绿汇总 ----------
 
-test('全绿：七层按级联顺序全过（vps 每 relay 一条），输出不含 token/secret', async () => {
+test('全绿：八层按级联顺序全过（vps 每 relay 一条），输出不含 token/secret', async () => {
   const rec = makeRec();
   const checks = await runDoctor({ dir: '/tmp/x', fetchImpl: okFetch() }, happyDeps(rec));
-  assert.deepEqual(layers(checks), ['auth', 'supabase', 'signaling', 'ice', 'vps', 'vps', 'scanner', 'service']);
+  assert.deepEqual(layers(checks), ['auth', 'supabase', 'signaling', 'ice', 'vps', 'vps', 'scanner', 'service', 'nat']);
   assert.ok(checks.every((c) => c.ok), JSON.stringify(checks));
   // 信令自回环：写自己 doctor 房间、短 TTL、读回带往返耗时、事后清场
   assert.equal(rec.sentRoom, 'sig:uid-1:doctor');
@@ -122,6 +127,11 @@ test('全绿：七层按级联顺序全过（vps 每 relay 一条），输出不
   assert.match(byLayer(checks, 'signaling')[0].detail, /往返 \d+ms/);
   // TURN：edge fn 通过 + 每台 relay 3478 STUN/UDP 探活
   assert.deepEqual(rec.stun, ['1.2.3.4', '5.6.7.8']);
+  // NAT facts（W2-2 第 8 层）：STUN 地址从 cfg.relays 推导（relay.ip + STUN_PORT 契约），无鉴权依赖
+  assert.deepEqual(rec.nat, ['1.2.3.4', '5.6.7.8']);
+  const nat = byLayer(checks, 'nat')[0];
+  assert.equal(nat.ok, true);
+  assert.match(nat.detail, /^mapping=endpoint-independent servers=2$/);
   // 扫描器必须收尾（无悬挂 handle）
   assert.equal(rec.scannerStops, 1);
   // 凭据纪律：序列化报告绝不含 token/secret（uid/email/ip 可以）
@@ -134,13 +144,14 @@ test('CLI 全绿：人话逐层输出 + OK 汇总 + 退出码 0；--json 输出�
   const code = await runDoctorCli(['--dir', '/tmp/x'], { ...happyDeps(makeRec()), fetchImpl: okFetch(), out: (l) => lines.push(l) });
   assert.equal(code, 0);
   assert.ok(lines.some((l) => l.startsWith('✓ auth')), lines.join('\n'));
-  assert.match(lines[lines.length - 1], /^OK：全部 8 项检查通过$/);
+  assert.ok(lines.some((l) => l.startsWith('✓ nat')), lines.join('\n'));
+  assert.match(lines[lines.length - 1], /^OK：全部 9 项检查通过$/);
 
   const jsonLines: string[] = [];
   const code2 = await runDoctorCli(['--json', '--dir', '/tmp/x'], { ...happyDeps(makeRec()), fetchImpl: okFetch(), out: (l) => jsonLines.push(l) });
   assert.equal(code2, 0);
   const parsed = JSON.parse(jsonLines.join('\n')) as DoctorCheck[];
-  assert.equal(parsed.length, 8);
+  assert.equal(parsed.length, 9);
   assert.ok(parsed.every((c) => c.ok === true));
 });
 
@@ -155,7 +166,7 @@ test('config 缺失 → layer=auth（fix 含 p2p-net init），依赖层标注�
   const auth = byLayer(checks, 'auth')[0];
   assert.equal(auth.ok, false);
   assert.match(auth.fix ?? '', /p2p-net init/);
-  for (const l of ['supabase', 'signaling', 'ice', 'vps'] as const) {
+  for (const l of ['supabase', 'signaling', 'ice', 'vps', 'nat'] as const) {
     const c = byLayer(checks, l)[0];
     assert.equal(c.ok, false, l);
     assert.match(c.detail, /依赖 auth 层通过/);
@@ -163,7 +174,7 @@ test('config 缺失 → layer=auth（fix 含 p2p-net init），依赖层标注�
   assert.ok(byLayer(checks, 'scanner')[0].ok);
   assert.ok(byLayer(checks, 'service')[0].ok);
 
-  // CLI：退出码 = 失败数（auth + 4 个依赖层 = 5），人话输出含 ✗ 与修复行
+  // CLI：退出码 = 失败数（auth + 5 个依赖层 = 6），人话输出含 ✗ 与修复行
   const lines: string[] = [];
   const code = await runDoctorCli(['--dir', '/tmp/x'], {
     ...happyDeps(makeRec(), {
@@ -174,10 +185,10 @@ test('config 缺失 → layer=auth（fix 含 p2p-net init），依赖层标注�
     fetchImpl: okFetch(),
     out: (l) => lines.push(l),
   });
-  assert.equal(code, 5);
+  assert.equal(code, 6);
   assert.ok(lines.some((l) => l.startsWith('✗ auth')), lines.join('\n'));
   assert.ok(lines.some((l) => l.includes('修复：')), '失败层必须给修复建议');
-  assert.match(lines[lines.length - 1], /未通过 5\/7 项/);
+  assert.match(lines[lines.length - 1], /未通过 6\/8 项/);
 });
 
 test('auth.json 缺失 → layer=auth，fix 含 p2p-net login；vps 只依赖 cfg 仍实跑全绿', async () => {
@@ -187,6 +198,7 @@ test('auth.json 缺失 → layer=auth，fix 含 p2p-net login；vps 只依赖 cf
   assert.match(auth.fix ?? '', /p2p-net login/);
   assert.equal(byLayer(checks, 'vps').length, 2);
   assert.ok(byLayer(checks, 'vps').every((c) => c.ok), 'vps 探针无鉴权，auth 挂配置在仍应实跑');
+  assert.ok(byLayer(checks, 'nat')[0].ok, 'nat 探针同样只依赖 cfg.relays（无鉴权），auth 挂仍实跑');
   for (const l of ['supabase', 'signaling', 'ice'] as const) {
     assert.match(byLayer(checks, l)[0].detail, /依赖 auth 层通过/);
   }
@@ -415,6 +427,56 @@ test('单个探针抛异常被归因到该层，不中断后续层、不崩整�
   assert.ok(vps.every((c) => !c.ok));
   assert.ok(byLayer(checks, 'scanner')[0].ok);
   assert.ok(byLayer(checks, 'service')[0].ok);
+});
+
+// ---------- nat 层归因（Wave 2 W2-2 第 8 层） ----------
+
+test('nat：coturn 不可达（servers=0）→ layer=nat ok=false + fix 点名安全组，其余层照常（首败不阻断）', async () => {
+  const checks = await runDoctor({ dir: '/tmp/x', fetchImpl: okFetch() }, happyDeps(makeRec(), {
+    natCollector: async () => ({ hasSrflx: false, srflxPortStable: null, mappingConsistency: 'unknown' as const, servers: 0 }),
+  }));
+  const nat = byLayer(checks, 'nat')[0];
+  assert.equal(nat.ok, false);
+  assert.match(nat.detail, /^mapping=unknown servers=0$/);
+  assert.match(nat.fix ?? '', /coturn/);
+  assert.match(nat.fix ?? '', /安全组/);
+  // detail 只带聚合语义（mapping/servers），绝不含 srflx ip（事件纪律同 events.ts）
+  for (const l of ['auth', 'supabase', 'signaling', 'ice', 'scanner', 'service'] as const) {
+    assert.ok(byLayer(checks, l).every((c) => c.ok), `${l} 不受 nat 失败影响`);
+  }
+});
+
+test('nat：只配 1 台 relay 时退化（mappingConsistency=unknown, servers=1）仍 ok（Review Focus #2）', async () => {
+  const oneRelay: AppConfig = { ...CFG, relays: [{ ip: '1.2.3.4' }] };
+  const checks = await runDoctor({ dir: '/tmp/x', fetchImpl: okFetch() }, happyDeps(makeRec(), {
+    loadConfigFn: () => oneRelay,
+    natCollector: async () => ({ hasSrflx: true, srflxPortStable: true, mappingConsistency: 'unknown' as const, servers: 1 }),
+  }));
+  const nat = byLayer(checks, 'nat')[0];
+  assert.equal(nat.ok, true, 'ok 判据 = servers≥1，单 relay 应答即过');
+  assert.match(nat.detail, /^mapping=unknown servers=1$/);
+});
+
+test('nat：采集器自身抛错 → guard 归因到 nat 层，不中断整个 run', async () => {
+  const checks = await runDoctor({ dir: '/tmp/x', fetchImpl: okFetch() }, happyDeps(makeRec(), {
+    natCollector: async () => {
+      throw new Error('boom');
+    },
+  }));
+  const nat = byLayer(checks, 'nat')[0];
+  assert.equal(nat.ok, false);
+  assert.match(nat.detail, /探针自身异常/);
+  assert.ok(byLayer(checks, 'service')[0].ok, 'nat 在 service 之后，前面的层不受影响');
+});
+
+test('nat：relays 为空 → ok 跳过（与 vps 层空 relays 同纪律）；cfg 缺失 → gated', async () => {
+  const noRelay: AppConfig = { ...CFG, relays: [] };
+  const checks = await runDoctor({ dir: '/tmp/x', fetchImpl: okFetch() }, happyDeps(makeRec(), {
+    loadConfigFn: () => noRelay,
+  }));
+  const nat = byLayer(checks, 'nat')[0];
+  assert.equal(nat.ok, true);
+  assert.match(nat.detail, /无 relays.*跳过/);
 });
 
 // ---------- 默认 STUN 探针（真实 UDP 回环，不打桩） ----------

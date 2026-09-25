@@ -10,10 +10,11 @@
  * 状态灯：原生 getStats → p2p 库 pairTypeFromStats/rttFromStats（werift 无 selected、浏览器有——
  * 库内两判据都写，此处直接复用）。
  */
-import { pairTypeFromStats, roomFor, rttFromStats, relayAddrFromStats, SignalingClient, decodeBinFrame, encodeWsMsgBin, PROXY_POOL_SIZE } from 'p2p-net/browser';
+import { pairTypeFromStats, roomFor, rttFromStats, relayAddrFromStats, SignalingClient, decodeBinFrame, encodeWsMsgBin, PROXY_POOL_SIZE, formatNatFacts } from 'p2p-net/browser';
 import { PoolRouter } from './poolRouter.js';
 import { DEFAULT_LIVENESS, type LivenessConfig } from './livenessConfig.js';
 import { LS_ACCESS } from './constants.js';
+import { collectNatFactsWeb } from './natfacts-web.js';
 
 /**
  * 接入类型自动探测（Wave 2 W2-1）：Navigator.connection 仅部分平台有
@@ -29,6 +30,19 @@ export function autoAccess(): string {
 export function offerAccess(): string {
   const ls = (globalThis as { localStorage?: Pick<Storage, 'getItem'> }).localStorage;
   return ls?.getItem(LS_ACCESS) ?? autoAccess();
+}
+
+/**
+ * offer meta.nat 取值（Wave 2 W2-2）：采集 NAT facts 并序列化为紧凑串
+ * （如 `m:ep-ind,servers:2`，formatNatFacts 单一事实源，绝不带 ip）。
+ * 采集失败/异常一律静默降级为 undefined——NAT 探测绝不允许阻断连接建立。
+ */
+export async function offerNat(iceServers: RTCIceServer[]): Promise<string | undefined> {
+  try {
+    return formatNatFacts(await collectNatFactsWeb(iceServers));
+  } catch {
+    return undefined;
+  }
 }
 
 export interface LightStatus {
@@ -51,6 +65,9 @@ export interface SessionOptions {
   onStatsRows?: (rows: Record<string, any>[]) => void;
   /** N4 活性阈值（spec D7）：缺省 DEFAULT_LIVENESS；真机标定由 shell 经 URL 注入。 */
   liveness?: Partial<Pick<LivenessConfig, 'pingMs' | 'livenessMs'>>;
+  /** NAT facts 探针（Wave 2 W2-2）：默认 offerNat（浏览器双 PC 采集 + 紧凑串序列化）。
+   *  返回 undefined/抛错均静默降级——offer 照发，meta 不带 nat 键。测试注入缝。 */
+  natProbe?: (iceServers: RTCIceServer[]) => Promise<string | undefined>;
 }
 
 const POLL_MS = 800;          // plan Task 4：800ms 增量轮询
@@ -181,10 +198,12 @@ export class WebRtcSession {
     };
 
     await pc.setLocalDescription(await pc.createOffer());
+    // W2-2：NAT facts 采集（失败/异常静默降级 undefined，绝不阻断 offer 发送）
+    const nat = await (this.opts.natProbe ?? offerNat)(this.opts.iceServers).catch(() => undefined);
     await this.opts.signaling.send(
       roomFor(this.opts.uid, deskDeviceId),
       this.opts.myDeviceId,
-      { type: 'offer', sid: this.sid, sdp: { type: pc.localDescription!.type, sdp: pc.localDescription!.sdp }, from: this.opts.myDeviceId, meta: { access: offerAccess() } },
+      { type: 'offer', sid: this.sid, sdp: { type: pc.localDescription!.type, sdp: pc.localDescription!.sdp }, from: this.opts.myDeviceId, meta: { access: offerAccess(), ...(nat ? { nat } : {}) } },
     );
 
     this.pollTimer = setInterval(() => void this.poll(), POLL_MS);

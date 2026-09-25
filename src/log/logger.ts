@@ -8,7 +8,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSyn
 import { join } from 'node:path';
 
 export type Layer =
-  | 'auth' | 'supabase' | 'signaling' | 'ice' | 'tunnel'
+  | 'auth' | 'supabase' | 'signaling' | 'ice' | 'tunnel' | 'nat'
   | 'vps' | 'bridge' | 'scanner' | 'pairing' | 'service';
 
 export type Level = 'debug' | 'info' | 'warn' | 'error';

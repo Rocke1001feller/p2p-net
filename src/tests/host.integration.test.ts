@@ -419,6 +419,42 @@ test('HostAgent：旧版 offer 无 meta —— 会话 access 为 undefined 不�
   }
 });
 
+// ---- Wave 2 W2-2：NAT facts——offer meta.nat 紧凑串沿 W2-1 同链路透传 ----
+
+test('HostAgent：offer meta.nat 入会话条目并随 HostStatus 转发（W2-2 NAT facts 链路）', async () => {
+  const statuses: HostStatus[] = [];
+  const agent = mkAgent(statuses, 10);
+  try {
+    const onSignal = (agent as unknown as { onSignal: (m: unknown) => Promise<void> }).onSignal.bind(agent);
+    const sessions = (agent as unknown as { sessions: Map<string, PeerSession> }).sessions;
+    await onSignal({ type: 'offer', sid: 's1', from: 'phone-nat', sdp: { type: 'offer', sdp: 'v=0 bogus' }, meta: { access: 'wifi-home', nat: 'm:ep-ind,servers:2' } }).catch(() => {});
+    const session = sessions.get('phone-nat');
+    assert.ok(session, '带 meta 的 offer 后会话应已入表');
+    assert.equal(session.nat, 'm:ep-ind,servers:2', 'offer meta.nat 必须落到会话条目');
+    driveStatus(agent, 'phone-nat', session, 'connected');
+    const st = statuses.find((s) => s.clientKey === 'phone-nat' && s.state === 'connected');
+    assert.equal(st?.nat, 'm:ep-ind,servers:2', 'HostStatus 必须带出来自 offer meta 的 nat');
+    assert.equal(st?.access, 'wifi-home', 'W2-1 的 access 链路不受影响');
+  } finally {
+    agent.stop();
+  }
+});
+
+test('HostAgent：offer meta 无 nat —— 会话 nat 为 undefined 不抛（采集降级/旧版兼容）', async () => {
+  const statuses: HostStatus[] = [];
+  const agent = mkAgent(statuses, 10);
+  try {
+    const session = await seedBogusSession(agent, 'phone-nonat');
+    assert.equal(session.nat, undefined, '无 nat 的 offer 不得在会话条目上编造 nat');
+    driveStatus(agent, 'phone-nonat', session, 'connected');
+    const st = statuses.find((s) => s.clientKey === 'phone-nonat' && s.state === 'connected');
+    assert.ok(st, '无 nat 的会话状态事件照常，不得抛错或拒连');
+    assert.equal(st!.nat, undefined, '无 nat 时缺省为 undefined（session_start 不带 nat 键）');
+  } finally {
+    agent.stop();
+  }
+});
+
 // ---- I1 会话会计：宽限到期必须合成一次终态 onStatus，否则 /status 长期谎报活跃会话 ----
 
 /** bogus offer 入表（acceptOffer 失败但会话已登记），返回会话对象与私有面句柄。 */
