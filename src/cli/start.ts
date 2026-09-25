@@ -29,7 +29,7 @@ import { HttpBridge, dcSend, type DcLike } from '../bridge/http.js';
 import { WsBridge } from '../bridge/ws.js';
 import { PORTS } from '../contracts.js';
 import { isReq, isReqAbort, isWsClose, isWsMsg, isWsOpen } from '../frames.js';
-import { HostAgent, type HostAgentOptions, type HostStatus, type SessionLedger } from '../host.js';
+import { HostAgent, makeLedger, type HostAgentOptions, type HostStatus, type SessionLedger } from '../host.js';
 import { createLogger, type Logger } from '../log/logger.js';
 import { ensureFreshToken, type AuthState } from '../server/auth.js';
 import { startControlPlane, startDiscovery } from '../server/control.js';
@@ -39,6 +39,7 @@ import { createScanner, DEFAULT_WHITELIST, NEVER_PORTS, type Scanner, type Servi
 import { startSelfcheck } from '../server/selfcheck.js';
 import { loadAuth, loadConfig, saveAuth, saveConfig, type AppConfig } from '../server/store.js';
 import { TunnelClient } from '../tunnel/client.js';
+import { TunnelMeter } from '../tunnel/meter.js';
 
 /** 控制面/发现端点的最小收尾面（生产为 node:http Server，测试注入假 server）。 */
 export interface ServerLike {
@@ -165,8 +166,8 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
   let stopped = false;
   let host: HostAgentLike;
   let pairing: PairingHandle | null = null;
-  /** 每条隧道 = 客户端 + 其专属本地桥（桥持有在途请求/代理 socket，必须随隧道同生共死）。 */
-  const tunnels: Array<{ client: TunnelClientLike; httpBridge: HttpBridge; wsBridge: WsBridge }> = [];
+  /** 每条隧道 = 客户端 + 其专属本地桥（桥持有在途请求/代理 socket，必须随隧道同生共死）+ 计量表（F10）。 */
+  const tunnels: Array<{ client: TunnelClientLike; httpBridge: HttpBridge; wsBridge: WsBridge; meter: TunnelMeter }> = [];
   let scanner: Scanner;
   let control: ServerLike;
   let discovery: ServerLike;
@@ -265,7 +266,29 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
         sessions: aggregateSessions(eventRing),
         services: scanner.list().length,
         mode: 'foreground',
-        dataPlane: host?.dataPlaneSnapshot?.() ?? null, // 旧进程/启动早期为 null，status.ts 容错省略
+        // F10：隧道腿计量并入数据面（成本模型补最贵变量）。口径：隧道腿进程期累计
+        // （无 host 侧会话生命周期，relay 把多客户端复用进一条链路）；WebRTC 部分为活跃会话
+        // 求和。byPath 保持逐会话语义（隧道腿非客户端会话，不占 byPath.tunnel），链路活性看
+        // tunnelLinks。stub/旧装配无 dataPlaneSnapshot 时 base 为 null，隧道计量照常上报。
+        dataPlane: (() => {
+          const base = host?.dataPlaneSnapshot?.() ?? null;
+          const totals = base ? { ...base.totals } : makeLedger();
+          for (const link of tunnels) {
+            const l = link.meter.ledger;
+            totals.req += l.req;
+            totals.resDone += l.resDone;
+            totals.bytesSent += l.bytesSent;
+            totals.bytesRecv += l.bytesRecv;
+            totals.wireBytesSent += l.wireBytesSent;
+            totals.wireBytesRecv += l.wireBytesRecv;
+          }
+          return {
+            totals,
+            sessions: base?.sessions ?? 0,
+            byPath: base?.byPath ?? { direct: 0, relay: 0, tunnel: 0, unknown: 0 },
+            tunnelLinks: { open: tunnels.filter((lk) => lk.client.isOpen).length, total: tunnels.length },
+          };
+        })(),
         signaling: host?.signalingHealth?.() ?? null, // 信令面健康（F4 黑洞治理）；stub/旧进程为 null 容错省略
       }),
     });
@@ -312,12 +335,15 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
       const t = tunnelFactory();
       const httpBridge = new HttpBridge();
       const wsBridge = new WsBridge({});
+      const meter = new TunnelMeter();
       // DcLike 适配：桥的出站帧（dcSend 产出的 JSON 串）parse 回对象经 TunnelClient.send 发 relay；
       // 背压无意义（ws 库自管缓冲，bufferedAmount 恒 0），readyState 跟随隧道连接态。
       const dc: DcLike = {
         send: (data) => {
           try {
-            t.send(typeof data === 'string' ? JSON.parse(data) : data);
+            const s = typeof data === 'string' ? data : JSON.stringify(data);
+            meter.recordOutbound(s); // F10：隧道出站计量（字节全计 + res-chunk done 计完成）
+            t.send(JSON.parse(s));
           } catch {
             // 非法出站帧丢弃（dcSend 只产合法 JSON，此处纯防御）
           }
@@ -365,6 +391,7 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
       };
       t.onFrame((frame) => {
         try {
+          meter.recordInbound(frame); // F10：隧道入站计量（req 计数 + 字节）
           dispatch(frame);
         } catch (e) {
           log.warn('tunnel', '隧道帧处理异常（已隔离，进程继续）', { ip: relay.ip, err: e instanceof Error ? e.message : String(e) });
@@ -379,7 +406,7 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
       });
       // URL 含 token，绝不进日志/stdout
       t.connect(`wss://${relay.ip}/tunnel/desktop?sid=${deviceId}&token=${tunnelToken}`);
-      tunnels.push({ client: t, httpBridge, wsBridge });
+      tunnels.push({ client: t, httpBridge, wsBridge, meter });
       log.info('tunnel', '隧道已发起连接', { ip: relay.ip });
     }
     teardowns.push(() => {

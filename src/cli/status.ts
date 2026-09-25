@@ -26,8 +26,9 @@ interface StatusBody {
   sessions?: { active?: number; byMode?: Record<string, number>; avgRttMs?: number | null } | number;
   services?: number;
   mode?: string;
-  /** Wave 1（spec D8）：数据面计量快照；旧进程无此字段 → 容错省略该行。 */
-  dataPlane?: { totals?: { req?: number; resDone?: number; bytesSent?: number; bytesRecv?: number }; sessions?: number } | null;
+  /** Wave 1（spec D8）：数据面计量快照；旧进程无此字段 → 容错省略该行。
+   *  F10 增补 tunnelLinks（隧道兜底腿在线/总数，字节已并入 totals）；旧进程无此字段 → 省略该行。 */
+  dataPlane?: { totals?: { req?: number; resDone?: number; bytesSent?: number; bytesRecv?: number }; sessions?: number; tunnelLinks?: { open?: number; total?: number } } | null;
   /** F4 信令黑洞治理：信令面健康；旧进程无此字段 → 容错省略该行。 */
   signaling?: { consecutiveFailures?: number; firstFailureAt?: number; lastError?: string; recovering?: boolean } | null;
 }
@@ -81,8 +82,13 @@ export async function runStatus(deps: StatusDeps = {}): Promise<number> {
   const sent = dp?.totals?.bytesSent;
   const recv = dp?.totals?.bytesRecv;
   if (typeof sent === 'number' && typeof recv === 'number') {
-    // 视角 = 本机（host）：bytesSent=发往客户端=上行；与 events.jsonl 的 bytesUp 同义
-    out(`数据面流量：上行 ${fmtBytes(sent)} / 下行 ${fmtBytes(recv)}（${dp?.sessions ?? 0} 活跃会话累计）`);
+    // 视角 = 本机（host）：bytesSent=发往客户端=上行；与 events.jsonl 的 bytesUp 同义。
+    // F10 起 totals 并入隧道腿进程期累计（最贵路径成本可见），故标签不再只提活跃会话。
+    out(`数据面流量：上行 ${fmtBytes(sent)} / 下行 ${fmtBytes(recv)}（${dp?.sessions ?? 0} 活跃会话 + 隧道腿进程期累计）`);
+    const tl = dp?.tunnelLinks;
+    if (tl && typeof tl.open === 'number' && typeof tl.total === 'number' && tl.total > 0) {
+      out(`隧道兜底腿：${tl.open}/${tl.total} 条在线`);
+    }
   }
   const sig = body.signaling;
   if (sig) {

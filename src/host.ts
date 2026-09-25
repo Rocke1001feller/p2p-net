@@ -129,7 +129,8 @@ export interface SessionLedger {
   resDone: number;
   bytesSent: number;
   bytesRecv: number;
-  /** 传输路径：direct/relay 来自 getStats 采样；tunnel 会话不经 PeerSession，host 账本不会出现 tunnel（tunnel 口径在 PWA 侧 noteTunnelFrame）；未判定 = unknown。 */
+  /** 传输路径：direct/relay 来自 getStats 采样；tunnel 腿不经 PeerSession，逐会话账本恒无 tunnel
+   *  （F10 起隧道腿由 TunnelMeter 进程期累计、并入 dataPlane.totals；byPath.tunnel 保持逐会话语义恒 0）；未判定 = unknown。 */
   pathType: PathType;
   wireBytesSent: number;
   wireBytesRecv: number;

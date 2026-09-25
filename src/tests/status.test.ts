@@ -98,3 +98,26 @@ test('dataPlane 存在时打印数据面流量行；缺字段（旧进程）省�
   });
   assert.ok(!lines2.some((l) => l.includes('数据面流量')), '旧进程无 dataPlane → 不打该行');
 });
+
+test('F10：tunnelLinks 存在时打印隧道腿在线数；缺字段（旧进程）省略', async () => {
+  const lines: string[] = [];
+  await runStatus({
+    fetchImpl: (async () => new Response(JSON.stringify({
+      uptime: 60, deviceId: 'desk-x', sessions: { active: 0, byMode: {}, avgRttMs: null },
+      services: 1, mode: 'foreground',
+      dataPlane: { totals: { req: 3, resDone: 3, bytesSent: 2048, bytesRecv: 1024 }, sessions: 0, tunnelLinks: { open: 1, total: 2 } },
+    }), { status: 200 })) as typeof fetch,
+    out: (l) => lines.push(l),
+  });
+  assert.ok(lines.some((l) => l.includes('隧道兜底腿') && l.includes('1/2')), lines.join('\n'));
+
+  const lines2: string[] = [];
+  await runStatus({
+    fetchImpl: (async () => new Response(JSON.stringify({
+      uptime: 60, deviceId: 'd', sessions: 0, services: 0,
+      dataPlane: { totals: { bytesSent: 1, bytesRecv: 1 }, sessions: 0 },
+    }), { status: 200 })) as typeof fetch,
+    out: (l) => lines2.push(l),
+  });
+  assert.ok(!lines2.some((l) => l.includes('隧道兜底腿')), '旧进程无 tunnelLinks → 不打该行');
+});

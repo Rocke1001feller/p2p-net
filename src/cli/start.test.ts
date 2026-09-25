@@ -659,3 +659,39 @@ test('隧道数据面接线：req/ws 帧派发到本地桥；白名单外端口 
     await new Promise<void>((r) => wss.close(() => r()));
   }
 });
+
+test('F10：隧道腿计量并入 /status 数据面（成本模型补最贵变量）', async () => {
+  const httpServer = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('ok');
+  });
+  await new Promise<void>((r) => httpServer.listen(0, r));
+  const httpPort = (httpServer.address() as AddressInfo).port;
+
+  const ctx = makeDeps({ services: [{ port: httpPort, name: 'T' }] });
+  const handle = await runStart({ foreground: true }, ctx.deps);
+  try {
+    const rx = ctx.frameCbs[0]!;
+    rx({ k: 'req', id: 1, port: 0, method: 'GET', path: `/s/${httpPort}/a`, headers: {}, via: 'tunnel' });
+    await waitFor(() => ctx.sentFrames.some((f) => f.k === 'res-chunk' && f.id === 1 && f.done === true), 'req 1 应收齐 done 帧');
+
+    const st = ctx.controlStatus() as {
+      dataPlane: {
+        totals: { req: number; resDone: number; bytesSent: number; bytesRecv: number };
+        sessions: number;
+        byPath: Record<string, number>;
+        tunnelLinks: { open: number; total: number };
+      };
+    };
+    assert.equal(st.dataPlane.tunnelLinks.total, 2, 'CFG 两台 relay = 两条隧道腿');
+    assert.equal(st.dataPlane.tunnelLinks.open, 2);
+    assert.ok(st.dataPlane.totals.req >= 1, '隧道入站 req 应计入 totals');
+    assert.ok(st.dataPlane.totals.resDone >= 1, '隧道出站完成应计入 totals');
+    assert.ok(st.dataPlane.totals.bytesSent > 0 && st.dataPlane.totals.bytesRecv > 0, '隧道字节应计入 totals');
+    assert.equal(st.dataPlane.sessions, 0, '隧道腿不是客户端会话');
+    assert.equal(st.dataPlane.byPath.tunnel, 0, 'byPath 保持逐会话语义：隧道腿不占 tunnel 桶');
+  } finally {
+    await handle.stop();
+    await new Promise<void>((r) => httpServer.close(() => r()));
+  }
+});
