@@ -16,13 +16,13 @@
 
 - **规则**：平行实现（孪生副本）改一侧必须同步另一侧；能从结构上消灭的副本，不留。
 - **根因**：pathType 判据存在两份平行实现（`src/pathType.ts` ↔ `pwa/src/frameLedger.ts`，后者自述为前者的「PWA 孪生副本」）。9-22 真机实锤的判据（F8 双侧规则：candidate-pair 任一端 relay 即中继），9-23 在平行模块被写错——改一侧、忘另一侧。
-- **关联测试/门禁**：🚧 `test:parity`（pathType 共享语料：两侧实现跑同一份 corpus，语义漂移即红）+ `twin-guard` lint（禁止新增孪生副本）。物证：修复提交 `b5303e0` / `cd669ff`（pathType 双侧规则）；副本注释 `pwa/src/frameLedger.ts:16`。
+- **关联测试/门禁**：✅ `npm run test:parity`（共享语料 `contracts/path-type-corpus.json`；host 侧 `src/tests/path-parity.parity.ts` + PWA 侧 `pwa/src/path-parity.parity.ts`，同一语料断言一致）+ `npm run lint:twins`（`scripts/twin-guard.mjs`，test 链第一棒，孪生复活即短路失败）。孪生副本已于 2026-09-25 结构消灭（`409352c`：PWA 改 import 根包 `./browser` 导出）；历史物证：修复提交 `b5303e0` / `cd669ff`（pathType 双侧规则）。
 
 ### ② 2026-09-23 端口契约副本
 
 - **规则**：「必须同步」的注释不是保护；契约只许单一来源，其余消费方由构建 / 测试机械对齐。
-- **根因**：端口契约存在副本（`contracts/ports.json` ↔ `pwa/src/constants.ts`）：PWA 由 vite 独立构建、无法 import 根仓 `src/contracts.ts`，故保留一份副本，仅靠注释「改根仓 ports.json 时必须同步本文件」（`pwa/src/constants.ts:6`）维系 = 无保护。
-- **关联测试/门禁**：🚧 端口契约门禁（机制丙，`mech/ports` 分支：ports.json 为单一来源，副本由测试机械比对）。
+- **根因**：端口契约存在副本（`contracts/ports.json` ↔ `pwa/src/constants.ts`）：PWA 由 vite 独立构建、无法 import 根仓 `src/contracts.ts`，故保留一份副本，仅靠注释「改根仓 ports.json 时必须同步本文件」（修复前 `pwa/src/constants.ts` 头注释）维系 = 无保护。
+- **关联测试/门禁**：✅ 单一事实源已贯通（`6fa7864`）：`src/ports.ts` 浏览器安全视图直读 `contracts/ports.json`（STUN_PORT 同日入约），PWA 经根包 `./browser` 导出消费、副本已删；parity 断言在 `pwa/src/constants.test.ts`（回填字面量即红，已实证）；`lint:twins` 含端口字面量指纹（注释中出现也拦）。
 
 ### ③ 2026-09-25「Mac 大概率休眠」误判
 
