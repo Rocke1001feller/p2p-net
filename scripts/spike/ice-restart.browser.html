@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<!--
+THROWAWAY — W2-6 spike Step ②③：浏览器侧 ICE restart 行为取证页 v2（单 PC + 远端 werift 应答方）。
+非生产代码；证据归档 e2e/wave2-upgrade-wheel-spike-2026-09-26.md ②③ 节。
+
+  ② 真实 TURN 取证（与路线 a 生产形态同构）：
+     pc 以 iceTransportPolicy:'relay' + 真实 TURN（__ICE__ 服务端注入，页面不落凭据日志）建连；
+     2s 基线后记录 nominated（预期 relay）→ setConfiguration 翻转 policy 'all'+STUN
+     （浏览器侧对照 werift E3「配置翻转无效」结论）→ createOffer({iceRestart:true}) →
+     观测：ufrag 轮换、nominated 迁移 relay→host/srflx、25ms ping/pong 数据面中断时长。
+     候选/地址一律只记 candidateType + djb2 哈希（srflx 裸 IP 不进日志）。
+  ③ 影子 PC 内存：主实验后顺序建 4 对 loopback PC（iceServers:[]，不等 dc open），
+     逐对采 usedJSHeapSize，全部 close 后再采一次（WebKit 无 performance.memory 记 unsupported）。
+输出：window.__log（JSON 字符串数组）+ window.__done；CDP driver 轮询收割。
+-->
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>w26 spike ②③</title>
+<body>w26 spike v2 running…（收割 window.__log / __done）</body>
+<script>
+'use strict';
+window.__log = []; window.__done = false;
+const __ICE__ = "__ICE__"; // 服务端替换为 {turn:{urls,username,credential}, stun:{urls}}
+const t0 = Date.now();
+const log = (step, data = {}) => { window.__log.push(JSON.stringify({ ms: Date.now() - t0, step, ...data })); };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const ufragOf = (sdp) => sdp?.match(/^a=ice-ufrag:(.+)$/m)?.[1]?.trim() ?? null;
+const hash = (s) => { let h = 5381; for (let i = 0; i < String(s).length; i++) h = ((h << 5) + h + String(s).charCodeAt(i)) >>> 0; return h.toString(36); };
+
+async function nominatedPair(pc) {
+  const st = await pc.getStats();
+  const byId = new Map(); st.forEach((r) => byId.set(r.id, r));
+  let pair = null;
+  st.forEach((r) => { if (r.type === 'candidate-pair' && r.nominated) pair = r; });
+  if (!pair) st.forEach((r) => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = byId.get(r.selectedCandidatePairId); });
+  if (!pair) return null;
+  const lc = byId.get(pair.localCandidateId), rc = byId.get(pair.remoteCandidateId);
+  const fmt = (c) => c ? `${c.candidateType}#${hash(c.address ?? c.ip ?? '?')}:${c.port}` : null;
+  return { state: pair.state, local: fmt(lc), remote: fmt(rc), localType: lc?.candidateType, remoteType: rc?.candidateType };
+}
+
+async function waitIceComplete(pc, ms = 20000) {
+  const t1 = Date.now();
+  while (pc.iceGatheringState !== 'complete' && Date.now() - t1 < ms) await sleep(100);
+}
+
+async function main() {
+  log('ua', { ua: navigator.userAgent, policy: 'relay-first' });
+  const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + location.pathname.replace(/[^/]*$/, '') + 'sig';
+  const ws = new WebSocket(wsUrl);
+  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+  log('sig.open', {});
+  let answerResolve = null;
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.answer && answerResolve) answerResolve(m.answer);
+    if (m.error) log('sig.error', { err: String(m.error).slice(0, 200) });
+  };
+  const exchange = async (pc) => {
+    await waitIceComplete(pc);
+    const p = new Promise((res) => { answerResolve = res; });
+    ws.send(JSON.stringify({ offer: pc.localDescription.sdp }));
+    const answer = await Promise.race([p, sleep(30000).then(() => null)]);
+    if (!answer) throw new Error('answer timeout');
+    await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+    return answer;
+  };
+
+  const pc = new RTCPeerConnection({ iceServers: [__ICE__.turn], iceTransportPolicy: 'relay' });
+  pc.oniceconnectionstatechange = () => log('iceState', { s: pc.iceConnectionState });
+  pc.onicecandidate = (e) => {
+    if (!e.candidate) { log('cand.end', { gatherState: pc.iceGatheringState }); return; }
+    const m = e.candidate.candidate?.match(/ typ (\S+)/);
+    log('cand', { type: m?.[1] ?? '?' });
+  };
+  const pongs = [];
+  const dc = pc.createDataChannel('probe');
+  dc.onmessage = (m) => { const d = JSON.parse(m.data); pongs.push({ seq: d.seq, at: Date.now() }); };
+  const dcOpen = new Promise((res) => { dc.onopen = res; });
+
+  const offer1 = await pc.createOffer();
+  await pc.setLocalDescription(offer1);
+  const answer1 = await exchange(pc);
+  await Promise.race([dcOpen, sleep(15000)]);
+  log('phase1.connected', {
+    dcState: dc.readyState,
+    ufragLocal: ufragOf(pc.localDescription?.sdp), ufragRemote: ufragOf(answer1),
+  });
+  if (dc.readyState !== 'open') { log('FAIL', { why: 'dc not open (relay phase)' }); pc.close(); window.__done = true; return; }
+
+  // 基线 2s ping/pong
+  let seq = 0; let stopPing = false;
+  const pingTimer = setInterval(() => { if (!stopPing && dc.readyState === 'open') dc.send(JSON.stringify({ seq: ++seq, t: Date.now() })); }, 25);
+  await sleep(2000);
+  const pairBefore = await nominatedPair(pc);
+  log('pair.before', pairBefore ?? { none: true });
+
+  // setConfiguration 翻转（浏览器侧对照 werift E3）→ iceRestart
+  let setCfgErr = null;
+  try {
+    pc.setConfiguration({ iceServers: [__ICE__.turn, __ICE__.stun], iceTransportPolicy: 'all' });
+  } catch (err) { setCfgErr = String(err); }
+  log('setConfiguration', { ok: !setCfgErr, err: setCfgErr, policyNow: pc.getConfiguration().iceTransportPolicy });
+
+  const restartAt = Date.now();
+  let migratedAt = null; let pairAfter = null;
+  const migPoll = setInterval(async () => {
+    const p = await nominatedPair(pc);
+    if (p && pairBefore && (p.local !== pairBefore.local || p.remote !== pairBefore.remote) && !migratedAt) {
+      migratedAt = Date.now(); pairAfter = p;
+      log('pair.migrated', { afterRestartMs: migratedAt - restartAt, ...p });
+    }
+  }, 100);
+
+  const offer2 = await pc.createOffer({ iceRestart: true });
+  await pc.setLocalDescription(offer2);
+  log('restart.offer', { ufragBefore: ufragOf(offer1.sdp), ufragAfter: ufragOf(pc.localDescription.sdp) });
+  const answer2 = await exchange(pc);
+  log('restart.answer', { ufragRemote: ufragOf(answer2) });
+
+  await sleep(8000);
+  clearInterval(migPoll);
+  stopPing = true; clearInterval(pingTimer);
+  let gapMs = 0; let firstPongAfter = null;
+  for (let i = 1; i < pongs.length; i++) {
+    const g = pongs[i].at - pongs[i - 1].at;
+    if (pongs[i - 1].at <= restartAt + 100 && pongs[i].at >= restartAt && g > gapMs) gapMs = g;
+  }
+  for (const p of pongs) { if (p.at > restartAt) { firstPongAfter = p.at - restartAt; break; } }
+  const pairFinal = await nominatedPair(pc);
+  log('result.②', {
+    firstPongAfterMs: firstPongAfter,
+    interruptGapMs: gapMs,
+    migrated: !!migratedAt,
+    migrateMs: migratedAt ? migratedAt - restartAt : null,
+    pairBefore, pairAfter: pairAfter ?? pairFinal,
+    pongsTotal: pongs.length,
+  });
+  pc.close();
+
+  // ---------- ③ 影子 PC 内存 ----------
+  const mem = () => (performance.memory ? performance.memory.usedJSHeapSize : null);
+  if (!performance.memory) { log('mem.unsupported', {}); }
+  else {
+    log('mem.base', { heap: mem() });
+    const held = [];
+    for (let i = 0; i < 4; i++) {
+      const x = new RTCPeerConnection({ iceServers: [] });
+      const y = new RTCPeerConnection({ iceServers: [] });
+      x.onicecandidate = (e) => e.candidate && y.addIceCandidate(e.candidate).catch(() => {});
+      y.onicecandidate = (e) => e.candidate && x.addIceCandidate(e.candidate).catch(() => {});
+      const ch = x.createDataChannel('s');
+      x.setLocalDescription(await x.createOffer()).then(async () => {
+        await sleep(3000);
+        await y.setRemoteDescription(x.localDescription).catch(() => {});
+        await y.setLocalDescription(await y.createAnswer()).catch(() => {});
+        await sleep(3000);
+        await x.setRemoteDescription(y.localDescription).catch(() => {});
+      });
+      await sleep(7000);
+      held.push(x, y);
+      log('mem.step', { i, dcOpen: ch.readyState === 'open', heap: mem() });
+    }
+    held.forEach((c) => c.close());
+    await sleep(1000);
+    log('mem.closed', { heap: mem() });
+  }
+  log('DONE', {});
+  window.__done = true;
+}
+
+main().catch((err) => { log('FATAL', { err: String(err?.stack ?? err).slice(0, 500) }); window.__done = true; });
+</script>

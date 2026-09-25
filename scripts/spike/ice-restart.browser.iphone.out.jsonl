@@ -1,0 +1,19 @@
+{"ms":1,"step":"ua","ua":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1","policy":"relay-first"}
+{"ms":163,"step":"sig.open"}
+{"ms":325,"step":"cand","type":"relay"}
+{"ms":325,"step":"cand.end","gatherState":"gathering"}
+{"ms":604,"step":"iceState","s":"checking"}
+{"ms":764,"step":"iceState","s":"connected"}
+{"ms":1191,"step":"phase1.connected","dcState":"open","ufragLocal":"AEBQ","ufragRemote":"9edb"}
+{"ms":3198,"step":"pair.before","state":"succeeded","local":"relay#1ig2lqr:50019","remote":"relay#1ig2lqr:50005","localType":"relay","remoteType":"relay"}
+{"ms":3199,"step":"setConfiguration","ok":true,"err":null,"policyNow":"all"}
+{"ms":3201,"step":"restart.offer","ufragBefore":"AEBQ","ufragAfter":"RyYq"}
+{"ms":3207,"step":"cand","type":"host"}
+{"ms":3210,"step":"cand","type":"host"}
+{"ms":3235,"step":"cand","type":"srflx"}
+{"ms":3290,"step":"restart.answer","ufragRemote":"96b4"}
+{"ms":3311,"step":"cand","type":"relay"}
+{"ms":3311,"step":"cand.end","gatherState":"gathering"}
+{"ms":11292,"step":"result.②","firstPongAfterMs":31,"interruptGapMs":44,"migrated":false,"migrateMs":null,"pairBefore":{"state":"succeeded","local":"relay#1ig2lqr:50019","remote":"relay#1ig2lqr:50005","localType":"relay","remoteType":"relay"},"pairAfter":{"state":"succeeded","local":"relay#1ig2lqr:50019","remote":"relay#1ig2lqr:50005","localType":"relay","remoteType":"relay"},"pongsTotal":73}
+{"ms":11295,"step":"mem.unsupported"}
+{"ms":11295,"step":"DONE"}

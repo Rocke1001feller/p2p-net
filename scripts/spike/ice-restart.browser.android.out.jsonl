@@ -1,0 +1,25 @@
+{"ms":2,"step":"ua","ua":"Mozilla/5.0 (Linux; U; Android 16; en-us; 2409BRN2CC Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.7049.79 Mobile Safari/537.36 XiaoMi/MiuiBrowser/20.26.1040831","policy":"relay-first"}
+{"ms":127,"step":"sig.open"}
+{"ms":335,"step":"cand","type":"relay"}
+{"ms":336,"step":"cand.end","gatherState":"complete"}
+{"ms":472,"step":"iceState","s":"checking"}
+{"ms":640,"step":"iceState","s":"connected"}
+{"ms":1049,"step":"phase1.connected","dcState":"open","ufragLocal":"XMNy","ufragRemote":"d4a7"}
+{"ms":3062,"step":"pair.before","state":"succeeded","local":"relay#1ig2lqr:50003","remote":"relay#1ig2lqr:50012","localType":"relay","remoteType":"relay"}
+{"ms":3070,"step":"setConfiguration","ok":true,"err":null,"policyNow":"all"}
+{"ms":3093,"step":"restart.offer","ufragBefore":"XMNy","ufragAfter":"HrhO"}
+{"ms":3100,"step":"cand","type":"host"}
+{"ms":3102,"step":"cand","type":"host"}
+{"ms":3140,"step":"restart.answer","ufragRemote":"24e5"}
+{"ms":3151,"step":"cand","type":"srflx"}
+{"ms":3270,"step":"cand","type":"relay"}
+{"ms":3271,"step":"cand.end","gatherState":"complete"}
+{"ms":4090,"step":"pair.migrated","afterRestartMs":1020,"state":"succeeded","local":"relay#1ig2lqr:50011","remote":"relay#1ig2lqr:50012","localType":"relay","remoteType":"relay"}
+{"ms":11155,"step":"result.②","firstPongAfterMs":11,"interruptGapMs":28,"migrated":true,"migrateMs":1020,"pairBefore":{"state":"succeeded","local":"relay#1ig2lqr:50003","remote":"relay#1ig2lqr:50012","localType":"relay","remoteType":"relay"},"pairAfter":{"state":"succeeded","local":"relay#1ig2lqr:50011","remote":"relay#1ig2lqr:50012","localType":"relay","remoteType":"relay"},"pongsTotal":80}
+{"ms":11170,"step":"mem.base","heap":42100000}
+{"ms":18210,"step":"mem.step","i":0,"dcOpen":true,"heap":42100000}
+{"ms":25257,"step":"mem.step","i":1,"dcOpen":true,"heap":42100000}
+{"ms":32293,"step":"mem.step","i":2,"dcOpen":true,"heap":42100000}
+{"ms":39333,"step":"mem.step","i":3,"dcOpen":true,"heap":42100000}
+{"ms":40392,"step":"mem.closed","heap":42100000}
+{"ms":40392,"step":"DONE"}

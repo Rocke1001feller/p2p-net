@@ -1,0 +1,18 @@
+{"ms":2,"step":"ua","ua":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36","policy":"relay-first"}
+{"ms":35,"step":"sig.open"}
+{"ms":368,"step":"iceState","s":"checking"}
+{"ms":507,"step":"iceState","s":"connected"}
+{"ms":803,"step":"phase1.connected","dcState":"open","ufragLocal":"fgyY","ufragRemote":"c1f0"}
+{"ms":2811,"step":"pair.before","state":"succeeded","local":"relay#1ig2lqr:50016","remote":"relay#1ig2lqr:50013","localType":"relay","remoteType":"relay"}
+{"ms":2812,"step":"setConfiguration","ok":true,"err":null,"policyNow":"all"}
+{"ms":2814,"step":"restart.offer","ufragBefore":"fgyY","ufragAfter":"LOpw"}
+{"ms":2841,"step":"restart.answer","ufragRemote":"9b69"}
+{"ms":3214,"step":"pair.migrated","afterRestartMs":402,"state":"succeeded","local":"prflx#45h:53076","remote":"host#yn7vpo:49706","localType":"prflx","remoteType":"host"}
+{"ms":10844,"step":"result.②","firstPongAfterMs":8,"interruptGapMs":121,"migrated":true,"migrateMs":402,"pairBefore":{"state":"succeeded","local":"relay#1ig2lqr:50016","remote":"relay#1ig2lqr:50013","localType":"relay","remoteType":"relay"},"pairAfter":{"state":"succeeded","local":"prflx#45h:53076","remote":"host#yn7vpo:49706","localType":"prflx","remoteType":"host"},"pongsTotal":79}
+{"ms":10848,"step":"mem.base","heap":1597111}
+{"ms":17853,"step":"mem.step","i":0,"dcOpen":false,"heap":1629755}
+{"ms":24858,"step":"mem.step","i":1,"dcOpen":false,"heap":1642635}
+{"ms":31862,"step":"mem.step","i":2,"dcOpen":false,"heap":1655085}
+{"ms":38868,"step":"mem.step","i":3,"dcOpen":false,"heap":584132}
+{"ms":39880,"step":"mem.closed","heap":586092}
+{"ms":39880,"step":"DONE"}

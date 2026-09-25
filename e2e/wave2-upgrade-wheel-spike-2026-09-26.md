@@ -1,9 +1,9 @@
 # W2-6 暖场升级轮 spike 报告（2026-09-26）
 
-> 分支 `wave2/spike`（worktree `p2p-net-w2-spike`）。本报告只完成计划 W2-6 的 **Step 1（werift ICE restart 能力取证）** 与 **Step 4 中的 ①④ 两项**（① werift 能力裁决、④ 路线 a/b 推荐框架与实现预算初稿）。
-> **② 浏览器行为取证（Chrome/Safari `createOffer({iceRestart:true})` 后 nominated 迁移与中断时长）＝ 待真机窗口，未做。**
-> **③ 影子 PC（路线 b）低端机内存实测 ＝ 待真机窗口，未做。**
-> 在 ② 落定前，本文 ① 的可行性裁决为「条件性裁决」，④ 为「框架与预算初稿」，不作为实现开工依据（spec §3 T6 门禁：spike 报告获批前禁止进实现）。
+> 分支 `wave2/spike`（worktree `p2p-net-w2-spike`）。Step 1（werift ICE restart 能力取证）+ Step 4 ①④ + **②③ 浏览器/内存取证（2026-09-26 真机窗口完成，见 §2 §3）**。
+> ② 结论：三端浏览器 iceRestart 机制全部可用且数据面近无感（中断 28–121ms）；
+> 但「relay→direct 迁移」仅桌面 Chrome 在窗内完成（402ms），两台蜂窝真机 8s 窗内未迁移——
+> 路线 a 可行，但实现**不得假设单次 restart 即时迁移**（详见 §2.4 裁决）。
 
 ## 0. 工件清单（随报告归档，throwaway）
 
@@ -12,6 +12,11 @@
 | `scripts/spike/ice-restart.probe.mjs` | werift 能力探针（E0–E4 五组实验），`node scripts/spike/ice-restart.probe.mjs` 可复跑 |
 | `scripts/spike/ice-restart.probe.out.jsonl` | 探针逐步输出落盘（61 行 JSONL，含 VERDICT 终行） |
 | `scripts/spike/grep-evidence.txt` | werift 0.24.4 API 表面 grep 取证（plan 原文命令 A + 任务书面命令 B + 底层锚点 C） |
+| `scripts/spike/ice-restart.browser.html` | ②③ 浏览器取证页 v2（单 PC + 真实 TURN + werift 应答方，自包含可复跑） |
+| `scripts/spike/ice-restart.serve.mjs` | ②③ 一体伺服（HTTP+WS 信令+werift 应答方；TURN 临时凭据读 /tmp 0600 文件，不落工件） |
+| `scripts/spike/ice-restart.cdp-run.mjs` | ②③ CDP 收割驱动（桌面 Chrome/Android WebView/iPhone Safari 通用） |
+| `scripts/spike/ice-restart.stun-probe.mjs` | STUN 直达探针（排查 TURN 池耗尽时隔离 STUN/TURN 用） |
+| `scripts/spike/ice-restart.browser.{desktop-chrome,android,iphone}.out.jsonl` | ②③ 三端证据行落盘（候选只记 type+djb2 哈希，无 srflx 裸 IP/无凭据） |
 
 环境：macOS（Intel x86_64）、node v24.13.1、werift 0.24.4（`npm ci` 锁定安装，与 `package.json` `werift: ^0.24.4` 一致）。
 
@@ -68,13 +73,43 @@ VERDICT 终行（JSONL 最后一行）：
 3. **「首建 relay-only → 后期放开直连」不能靠 `setConfiguration` 翻转**（E3：选项建期冻结）。路线 a 实现的候选策略必须是：PC 构造即 `iceTransportPolicy:'all'`，**首建由信令层过滤非 relay 候选**（本探针同源手法），升级时 restart + 放开过滤。
 4. 信令纪律：restart 重协商期间，**必须先交换描述再放行候选**——werift 在已有旧远端描述时对新 ufrag 的乱序 trickle 候选直接 `OperationError: No media section matched the ICE usernameFragment` 拒绝（无描述时才会内部排队）。生产信令按 room 消息天然有序，仍需在 host 侧做候选缓冲兜底。
 
-## 2. ② 浏览器行为取证 —— 待真机窗口，未做
+## 2. ② 浏览器行为取证（2026-09-26 真机窗口完成）
 
-计划 W2-6 Step 2：本机/真机 Chrome + Safari，relay-only 建连 → `createOffer({iceRestart:true})` → 观察 onicecandidate 重触发、getStats 前后 nominated 对迁移、迁移期数据面中断时长。**本窗口未执行。** 它是 §1.4 第 1 条「浏览器作控制端会跑 checks」假设的直接验证，也是路线 a 最终裁决的最后一环。
+### 2.0 实验设计与工件
 
-## 3. ③ 影子 PC（路线 b）内存实测 —— 待真机窗口，未做
+- 工件：`scripts/spike/ice-restart.browser.html`（自包含取证页 v2）、`ice-restart.serve.mjs`（HTTP+WS 信令+werift 应答方一体）、`ice-restart.cdp-run.mjs`（CDP 收割驱动）、`ice-restart.stun-probe.mjs`（STUN 直达探针）；证据行落盘 `ice-restart.browser.{desktop-chrome,android,iphone}.out.jsonl`。
+- 拓扑（与路线 a 生产形态同构）：浏览器 PC 以 `iceTransportPolicy:'relay'` + **真实 TURN**（coturn REST 临时凭据，1h TTL，凭据只经 /tmp 0600 文件与内存流转，不进任何落盘工件）建连到 werift 应答方（Mac 本机，host+srflx+relay 全候选）；2s 基线（25ms ping/pong）→ `setConfiguration` 翻转 `policy:'all'`+STUN（浏览器侧对照 werift E3）→ `createOffer({iceRestart:true})` → 观测 8s：ufrag 轮换、nominated 迁移、中断时长。候选/地址一律只记 candidateType + djb2 哈希（srflx 裸 IP 不落盘）。
+- 三端：桌面 Chrome 154 headless（Mac）；Android 小米 MiuiBrowser（Chromium 135，WebView 系，蜂窝 LTE CGNAT）；iPhone Safari（iOS 18.7 / WebKit，蜂窝，页面经生产隧道 `/s/8888/` 送达）。
 
-计划 W2-6 Step 3：低端机 relay 会话 + 额外 idle PC 的 Chrome DevTools Memory 快照对比。**本窗口未执行。** 路线 b 的内存成本未知前，④ 的预算对比只能给框架。
+### 2.1 三端结果矩阵
+
+| 端 | relay 建连 | setConfiguration 翻转 | ufrag 轮换（本端/对端） | nominated 迁移 | 迁移耗时 | 数据面中断（gap/首 pong） |
+|---|---|---|---|---|---|---|
+| 桌面 Chrome 154 | ✅ relay↔relay | ✅ `policyNow:'all'` | ✅ fgyY→LOpw / c1f0→9b69 | ✅ **relay→prflx/host** | **402ms** | 121ms / 8ms |
+| Android Chromium 135（蜂窝） | ✅ relay↔relay | ✅ | ✅ XMNy→HrhO / d4a7→24e5 | ⚠ relay→**relay**（新分配 50003→50011；host/srflx 候选已采到但检查未胜出） | 1020ms | 28ms / 11ms |
+| iPhone Safari（蜂窝） | ✅ relay↔relay | ✅ | ✅ AEBQ→RyYq / 9edb→96b4 | ✗ **8s 窗内未迁移**（nominated 保持 relay↔relay 原对） | — | 44ms / 31ms |
+
+### 2.2 关键判读
+
+1. **机制层面三端全绿**：`iceRestart` 在浏览器侧（含 WebKit）可用——ufrag 轮换、对端（werift）自动对称重启、`setConfiguration` 运行期翻转 `iceTransportPolicy` 有效（三端一致；与 werift E3「选项建期冻结」不同，**浏览器允许运行期翻转**）。数据面在重启期间近无感：中断 28–121ms，首 pong 8–31ms。
+2. **迁移不保证即时**：仅桌面 Chrome（同机直连拓扑）在 402ms 内迁到更优路径；两台蜂窝真机 host/srflx 候选虽采到，但 8s 窗内检查未胜出（CGNAT↔家宽 NAT 下 srflx 对未成熟），Android 迁至新 relay 对、Safari 守原 relay 对。生产 p2p 段 10/10 直连（W2-4 自然级联）走的是**全新 PC 完整 ICE 交换**，与「restart 后即时升级直连」不是同一工况。
+3. **对路线 a 的直接含义**：实现不得假设「单次 restart → 秒级迁移直连」。设计必须容忍「restart 后 nominated 留在 relay，直连对成熟后再迁/再 restart」的渐近形态，并把「是否迁成」交给 getStats 观测而非时序假设。
+4. **Safari 保守性**：WebKit 重启后连 relay 对都不换（守原对）——升级轮在 Safari 上需要更长的观测窗或多次 restart 触发，验收口径不能用 Chrome 的 402ms 套。
+
+### 2.3 附带发现（外溢价值，产能硬事实）
+
+**coturn relay 端口池仅 20（min-port=50000 / max-port=50019），耗尽即 `ALLOCATE error 508: Cannot create socket`**（/var/log/syslog 实证，2026-09-26 07:33–07:36）。每 PC 视 transport 数占 1–2 个分配，分配残留 ~600s（allocation timeout），故 **TURN 并发会话硬顶 ≈ 10–20，且快速迭代场景极易撞池**。这正对上 W2-4 发现②（iPhone 强制 TURN 4/10 超时）的强候选根因（同口证实测，尚未逐样本对账，不定性）。**必须进成本/容量文档**：coturn 端口池 = TURN 兜底容量的第一约束，先于带宽。
+
+### 2.4 ② 裁决
+
+**路线 a go（条件满足）**：§1.4 第 1 条「浏览器作控制端会跑 checks」被三端实证；浏览器运行期翻转 policy 可行，实现可省掉「信令层过滤」的首建约束（保留作为纵深）。**但实现立项必须采纳 §2.2 第 2/3/4 条设计约束**（渐近迁移 + getStats 观测 + Safari 宽容窗），并连带把 coturn 端口池扩容/监控列为配套运维项。
+
+## 3. ③ 影子 PC（路线 b）内存实测（2026-09-26 完成，结论：证据偏向路线 a）
+
+- 桌面 Chrome 154：`performance.memory.usedJSHeapSize` 基线 1.60MB，顺序建 4 对 loopback PC（full gather）逐对增量在 **数十 KB 噪声级**（1.63→1.65MB，第 4 对后 close 回落至 0.59MB，GC 噪声主导）——**Chromium 上影子 PC 内存代价可忽略量级**。
+- Android（MiuiBrowser）：`usedJSHeapSize` 全程冻结常数 42.1MB（隐私量化/冻结），**无法取证**；附带发现：Android WebView 系 loopback 双 PC 可正常 dc open（桌面 headless Chrome 不行，mDNS loopback 不连）。
+- iPhone Safari：`performance.memory` 不存在（WebKit 无此 API），**无法取证**。
+- 判读：路线 b（影子 PC）的内存成本在唯一可测端（Chromium 桌面）为噪声级，低端 Android 真机无法取证（指标冻结）。结合 ② 的正向结果，**路线 b 无必要作为主线**，保留为降级预案；移动端内存证据缺口记为路线 b 的否决弱证据之一（不是路线 a 的风险）。
 
 ## 4. ④ 路线 a/b 推荐框架与实现预算（初稿）
 
