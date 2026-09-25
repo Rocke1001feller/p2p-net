@@ -15,3 +15,12 @@ export * from './frames.js';
 export * from './pool.js';
 export * from './status.js';
 export { PORTS, type PortContract } from './ports.js';
+// pathType（spec D9）：PathType 类型 + classifyCandidateType/classifyVia/selectedPairStats。
+// selectedPairStats 为双形态判据（werift state/nominated；浏览器 selected===true 优先），
+// PWA 帧账本（pwa/src/frameLedger.ts）直接复用——孪生副本已于 2026-09-25 消灭（机制甲1）。
+export {
+  classifyCandidateType,
+  classifyVia,
+  selectedPairStats,
+  type PathType,
+} from './pathType.js';

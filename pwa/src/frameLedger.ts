@@ -3,22 +3,18 @@
  * 加双向字节计量——成本模型的 PWA 侧观测口径（与 host SessionLedger 对账）。
  *
  * Wave 1 增补（spec D9）：pathType + wire 字节。dc 段由 WebRtcSession 既有 5s stats 节拍喂
- * getStats 行（sampleWireStats，浏览器判据 candidate-pair && selected===true，落选回退
- * nominated/首个 succeeded——与 src/pathType.ts 同源的孪生判据；PWA 模块边界自带小副本，
- * 不过包边界 import src/）。tunnel 段不过 DataChannel，getStats 判不到：响应帧经
- * noteTunnelFrame 计入 wire 桶并把 pathType 记 'tunnel'。
+ * getStats 行（sampleWireStats）。2026-09-25 机制甲1：本地孪生判据已删除，选定对检出与
+ * 路径归类统一走 src/pathType.ts（经 'p2p-net/browser'；双形态判据——浏览器 selected===true
+ * 优先，回退 nominated/首个 succeeded），双侧语义由 contracts/path-type-corpus.json 钉死。
+ * tunnel 段不过 DataChannel，getStats 判不到：响应帧经 noteTunnelFrame 计入 wire 桶并把
+ * pathType 记 'tunnel'。
  */
 
+import { selectedPairStats, type PathType } from 'p2p-net/browser';
+
+export type { PathType };
+
 export interface HungEntry { port?: number; path: string; ms: number }
-
-export type PathType = 'direct' | 'relay' | 'tunnel' | 'unknown';
-
-/** src/pathType.ts classifyCandidateType 的 PWA 孪生副本（保持两侧语义逐字一致）。 */
-function classifyCandidateType(ct: string | undefined): PathType {
-  if (ct === 'relay') return 'relay';
-  if (ct === 'host' || ct === 'srflx' || ct === 'prflx') return 'direct';
-  return 'unknown';
-}
 
 export class FrameLedger {
   sent = 0;
@@ -67,28 +63,17 @@ export class FrameLedger {
   }
 
   /** dc 段 wire 采样（spec D9）：getStats 展平行 → 选定对累计值取增量累进；只写内存。
-   *  首拍只建基线不计增量（与 host 侧同一口径）；pc 重建计数回退时负增量钳零。 */
+   *  首拍只建基线不计增量（与 host 侧同一口径）；pc 重建计数回退时负增量钳零。
+   *  无选定对（found=false）时提前返回：不污染 pathType，也不动增量基线。 */
   sampleWireStats(rows: any[]): void {
-    const pairs = rows.filter((s) => s?.type === 'candidate-pair' && (s.selected === true || s.state === 'succeeded'));
-    const pair = pairs.find((p) => p.selected === true) ?? pairs.find((p) => p.nominated) ?? pairs[0];
-    if (!pair) return;
-    const loc = rows.find((s) => s?.type === 'local-candidate' && s.id === pair.localCandidateId);
-    const rem = rows.find((s) => s?.type === 'remote-candidate' && s.id === pair.remoteCandidateId);
-    // 双侧规则（F8 真机实证，与 src/pathType.ts 孪生保持一致）：任一端 relay 即过 TURN——
-    // 只看本端会把「手机 prflx ↔ 桌面 relay」的同一条对误判成直连（门禁自然臂全程如此）。
-    const locType = classifyCandidateType(loc?.candidateType);
-    const remType = classifyCandidateType(rem?.candidateType);
-    const pathType = locType === 'relay' || remType === 'relay' ? 'relay'
-      : locType !== 'unknown' ? locType
-      : remType;
-    const wireSent = pair.bytesSent ?? 0;
-    const wireRecv = pair.bytesReceived ?? 0;
+    const cur = selectedPairStats(rows);
+    if (!cur.found) return;
     if (this.prevWire) {
-      this.wireBytesSent += Math.max(0, wireSent - this.prevWire.wireSent);
-      this.wireBytesRecv += Math.max(0, wireRecv - this.prevWire.wireRecv);
+      this.wireBytesSent += Math.max(0, cur.wireSent - this.prevWire.wireSent);
+      this.wireBytesRecv += Math.max(0, cur.wireRecv - this.prevWire.wireRecv);
     }
-    if (pathType !== 'unknown') this.pathType = pathType;
-    this.prevWire = { wireSent, wireRecv };
+    if (cur.pathType !== 'unknown') this.pathType = cur.pathType;
+    this.prevWire = { wireSent: cur.wireSent, wireRecv: cur.wireRecv };
   }
 
   /** tunnel 段归类（spec D9）：隧道响应帧计入 wire 桶并把路径记为 'tunnel'

@@ -6,7 +6,7 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-test('browser 入口源码图不 import werift（barrel 只含 signaling/frames/status）', () => {
+test('browser 入口源码图不 import werift（barrel 只含 signaling/frames/status/pathType）', () => {
   const sources = [
     'src/browser.ts',
     'src/signaling/protocol.ts',
@@ -14,6 +14,7 @@ test('browser 入口源码图不 import werift（barrel 只含 signaling/frames/
     'src/frames.ts',
     'src/status.ts',
     'src/ports.ts',
+    'src/pathType.ts',
   ];
   for (const rel of sources) {
     const text = readFileSync(path.join(root, rel), 'utf8');
@@ -52,6 +53,9 @@ test('package.json exports 映射：. / ./browser / ./package.json', () => {
   assert.equal(pkg.exports['./package.json'], './package.json');
   // 主套件同时覆盖 src/ 与 pwa/src/（2026-09-22 起：pwa 测试此前不在主 glob 里，bind 解析 bug 漏网）
   // 2026-09-24 起拆两段：并行套件（本 pin 守护的覆盖范围不变）+ 串行 HOL 门禁（CPU 竞争敏感，隔离单跑以保预注册判定口径——≥10 窗口探测/增量公式/粘滞断言——在常态负载下有效；阈值数值修订史见 hol-gate.serial.ts 头注释）
+  // 2026-09-25 起接第三段 test:parity（机制丙1）：pathType 双侧 conformance，host/PWA 读同一语料
+  // contracts/path-type-corpus.json 断言一致；*.parity.ts 不匹配 *.test.ts glob，仅由本脚本运行。
   assert.equal(pkg.scripts['test:parallel'], 'tsx --test "src/**/*.test.ts" "pwa/src/**/*.test.ts"');
-  assert.equal(pkg.scripts.test, 'npm run test:parallel && npm run test:serial');
+  assert.equal(pkg.scripts['test:parity'], 'tsx --test "src/**/*.parity.ts" "pwa/src/**/*.parity.ts"');
+  assert.equal(pkg.scripts.test, 'npm run test:parallel && npm run test:serial && npm run test:parity');
 });

@@ -1,0 +1,174 @@
+{
+  "$schema": "path-type-corpus/v1",
+  "description": "pathType 双侧一致性共享语料（机制甲3）：host（werift getStats 形状：candidate-pair 无 selected 字段，选定对=state==='succeeded' 且 nominated 优先）与 PWA（浏览器形状：selected===true 优先）共用同一份输入与期望。两侧 conformance 测试 src/tests/path-parity.parity.ts 与 pwa/src/path-parity.parity.ts 从本文件读入逐条断言；shape 字段仅作形态标注，统一后的 selectedPairStats 双形态通吃，两侧均跑全部条目。双侧规则（F8 真机实证）：本端或对端 candidateType 任一为 'relay' 即判 relay。",
+  "candidateType": [
+    { "name": "relay → relay", "input": "relay", "expect": "relay" },
+    { "name": "host → direct", "input": "host", "expect": "direct" },
+    { "name": "srflx → direct", "input": "srflx", "expect": "direct" },
+    { "name": "prflx → direct", "input": "prflx", "expect": "direct" },
+    { "name": "未知类型 → unknown", "input": "bogus", "expect": "unknown" },
+    { "name": "缺失(null→undefined) → unknown", "input": null, "expect": "unknown" }
+  ],
+  "via": [
+    { "name": "tunnel 帧 → tunnel", "input": "tunnel", "expect": "tunnel" },
+    { "name": "dc 帧 → unknown", "input": "dc", "expect": "unknown" },
+    { "name": "无 via(null→undefined) → unknown", "input": null, "expect": "unknown" }
+  ],
+  "stats": [
+    {
+      "name": "werift/succeeded/本端 relay（remote 行缺失回落本端）",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "localCandidateId": "l1", "bytesSent": 1000, "bytesReceived": 2000 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "relay" }
+      ],
+      "expect": { "found": true, "pathType": "relay", "wireSent": 1000, "wireRecv": 2000 }
+    },
+    {
+      "name": "werift/succeeded/本端 srflx + 对端 relay → relay（F8 双侧规则核心案例）",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "localCandidateId": "l1", "remoteCandidateId": "r1", "bytesSent": 1000, "bytesReceived": 2000 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "srflx" },
+        { "type": "remote-candidate", "id": "r1", "candidateType": "relay" }
+      ],
+      "expect": { "found": true, "pathType": "relay", "wireSent": 1000, "wireRecv": 2000 }
+    },
+    {
+      "name": "werift/succeeded/本端 relay + 对端 srflx → relay",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "localCandidateId": "l1", "remoteCandidateId": "r1", "bytesSent": 100, "bytesReceived": 200 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "relay" },
+        { "type": "remote-candidate", "id": "r1", "candidateType": "srflx" }
+      ],
+      "expect": { "found": true, "pathType": "relay", "wireSent": 100, "wireRecv": 200 }
+    },
+    {
+      "name": "werift/succeeded/两端均 host → direct",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "localCandidateId": "l1", "remoteCandidateId": "r1", "bytesSent": 10, "bytesReceived": 20 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "host" },
+        { "type": "remote-candidate", "id": "r1", "candidateType": "host" }
+      ],
+      "expect": { "found": true, "pathType": "direct", "wireSent": 10, "wireRecv": 20 }
+    },
+    {
+      "name": "werift/succeeded/本端 prflx + 对端 srflx → direct",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "localCandidateId": "l1", "remoteCandidateId": "r1", "bytesSent": 30, "bytesReceived": 40 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "prflx" },
+        { "type": "remote-candidate", "id": "r1", "candidateType": "srflx" }
+      ],
+      "expect": { "found": true, "pathType": "direct", "wireSent": 30, "wireRecv": 40 }
+    },
+    {
+      "name": "werift/多对 succeeded 时 nominated 优先（路径与字节都取 nominated 对）",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "localCandidateId": "l1", "bytesSent": 1, "bytesReceived": 1 },
+        { "type": "candidate-pair", "id": "p2", "state": "succeeded", "nominated": true, "localCandidateId": "l2", "bytesSent": 9, "bytesReceived": 9 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "relay" },
+        { "type": "local-candidate", "id": "l2", "candidateType": "srflx" }
+      ],
+      "expect": { "found": true, "pathType": "direct", "wireSent": 9, "wireRecv": 9 }
+    },
+    {
+      "name": "werift/多对 succeeded 无 nominated → 取首对",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "localCandidateId": "l1", "bytesSent": 5, "bytesReceived": 6 },
+        { "type": "candidate-pair", "id": "p2", "state": "succeeded", "localCandidateId": "l2", "bytesSent": 7, "bytesReceived": 8 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "host" },
+        { "type": "local-candidate", "id": "l2", "candidateType": "relay" }
+      ],
+      "expect": { "found": true, "pathType": "direct", "wireSent": 5, "wireRecv": 6 }
+    },
+    {
+      "name": "werift/仅 in-progress 对 → 未选定，found=false 且字节归零",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "in-progress", "localCandidateId": "l1", "bytesSent": 100, "bytesReceived": 100 }
+      ],
+      "expect": { "found": false, "pathType": "unknown", "wireSent": 0, "wireRecv": 0 }
+    },
+    {
+      "name": "werift/两端候选类型均未知 → unknown（字节仍如实上报）",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "localCandidateId": "l1", "remoteCandidateId": "r1", "bytesSent": 42, "bytesReceived": 43 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "bogus" },
+        { "type": "remote-candidate", "id": "r1", "candidateType": "bogus" }
+      ],
+      "expect": { "found": true, "pathType": "unknown", "wireSent": 42, "wireRecv": 43 }
+    },
+    {
+      "name": "werift/本端行缺失 + 对端 relay → relay（remote 回落）",
+      "shape": "werift",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "localCandidateId": "l1", "remoteCandidateId": "r1", "bytesSent": 11, "bytesReceived": 22 },
+        { "type": "remote-candidate", "id": "r1", "candidateType": "relay" }
+      ],
+      "expect": { "found": true, "pathType": "relay", "wireSent": 11, "wireRecv": 22 }
+    },
+    {
+      "name": "browser/selected===true/本端 relay → relay",
+      "shape": "browser",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "selected": true, "localCandidateId": "l1", "bytesSent": 1000, "bytesReceived": 2000 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "relay" }
+      ],
+      "expect": { "found": true, "pathType": "relay", "wireSent": 1000, "wireRecv": 2000 }
+    },
+    {
+      "name": "browser/selected===true/本端 prflx + 对端 relay → relay（门禁自然臂形态）",
+      "shape": "browser",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "selected": true, "localCandidateId": "l1", "remoteCandidateId": "r1", "bytesSent": 500, "bytesReceived": 600 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "prflx" },
+        { "type": "remote-candidate", "id": "r1", "candidateType": "relay" }
+      ],
+      "expect": { "found": true, "pathType": "relay", "wireSent": 500, "wireRecv": 600 }
+    },
+    {
+      "name": "browser/selected===true/两端直连候选 → direct",
+      "shape": "browser",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "selected": true, "localCandidateId": "l1", "remoteCandidateId": "r1", "bytesSent": 70, "bytesReceived": 80 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "host" },
+        { "type": "remote-candidate", "id": "r1", "candidateType": "srflx" }
+      ],
+      "expect": { "found": true, "pathType": "direct", "wireSent": 70, "wireRecv": 80 }
+    },
+    {
+      "name": "browser/selected 对与 nominated 对并存 → selected 优先（字节取 selected 对）",
+      "shape": "browser",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "succeeded", "nominated": true, "localCandidateId": "l1", "bytesSent": 1, "bytesReceived": 1 },
+        { "type": "candidate-pair", "id": "p2", "state": "succeeded", "selected": true, "localCandidateId": "l2", "bytesSent": 90, "bytesReceived": 91 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "host" },
+        { "type": "local-candidate", "id": "l2", "candidateType": "relay" }
+      ],
+      "expect": { "found": true, "pathType": "relay", "wireSent": 90, "wireRecv": 91 }
+    },
+    {
+      "name": "browser/裸 selected===true（无 state 字段）→ 仍视为选定对",
+      "shape": "browser",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "selected": true, "localCandidateId": "l1", "bytesSent": 12, "bytesReceived": 13 },
+        { "type": "local-candidate", "id": "l1", "candidateType": "host" }
+      ],
+      "expect": { "found": true, "pathType": "direct", "wireSent": 12, "wireRecv": 13 }
+    },
+    {
+      "name": "browser/无 selected 无 succeeded → found=false（浏览器回退判据同样不命中）",
+      "shape": "browser",
+      "rows": [
+        { "type": "candidate-pair", "id": "p1", "state": "in-progress", "localCandidateId": "l1", "bytesSent": 100, "bytesReceived": 100 }
+      ],
+      "expect": { "found": false, "pathType": "unknown", "wireSent": 0, "wireRecv": 0 }
+    }
+  ]
+}
