@@ -114,7 +114,9 @@ test('DEFAULT_WHITELIST / NEVER_PORTS 精确集合', () => {
 });
 
 test('createScanner：list 初始为空，start 幂等，stop 清定时器（不阻碍进程退出）', () => {
-  const s = createScanner({ extraWhitelist: [12345], log: fakeLogger() });
+  // enumerate 注入空集：本测只验 start/stop 语义；真实枚举会让 cycle 对全机监听端口（含其他
+  // 测试进程的动态端口计数服务器）发真实 HTTP 探测——跨进程污染，2026-09-25 实锤为 flaky 根因之一。
+  const s = createScanner({ extraWhitelist: [12345], log: fakeLogger(), enumerate: async () => [] });
   assert.deepEqual(s.list(), []);
   s.start();
   s.start(); // 幂等：不叠加定时器

@@ -167,8 +167,17 @@ function runEnumTool(cmd: string, args: string[], noMatchCode: number | null): P
   });
 }
 
-/** 创建扫描器。start 立即跑首轮并挂 10s 周期（unref，不阻碍进程退出）；stop 清定时器。 */
-export function createScanner(opts: { extraWhitelist?: number[]; log: Logger }): Scanner {
+/** 创建扫描器。start 立即跑首轮并挂 10s 周期（unref，不阻碍进程退出）；stop 清定时器。
+ *  enumerate/fetchImpl 为测试注入缝：默认真实 OS 内省 + 真实 HTTP 探测——测试必须注入空枚举，
+ *  否则 cycle 会对全机所有监听端口（含其他测试进程的动态端口计数服务器）发起真实 GET。 */
+export function createScanner(opts: {
+  extraWhitelist?: number[];
+  log: Logger;
+  /** 监听枚举实现（默认 lsof/ss）；测试传 async () => [] 让 cycle 零候选、零真实探测。 */
+  enumerate?: () => Promise<number[] | null>;
+  /** probePort 的 fetch 实现（默认全局 fetch）。 */
+  fetchImpl?: typeof fetch;
+}): Scanner {
   const { log } = opts;
   const whitelist = [...new Set([...DEFAULT_WHITELIST, ...(opts.extraWhitelist ?? [])])]
     .filter((p) => !NEVER_PORTS.has(p));
@@ -208,7 +217,7 @@ export function createScanner(opts: { extraWhitelist?: number[]; log: Logger }):
     if (cycleRunning) return; // 上一轮未结束（慢机器/枚举卡顿）：跳过本轮
     cycleRunning = true;
     try {
-      const enumPorts = await enumerateListeners();
+      const enumPorts = await (opts.enumerate ?? enumerateListeners)();
       if (enumPorts === null) return;
       const listening = new Set(enumPorts);
       // 进程已消失 → 立即除名；缓存一并遗忘（进程重开时按新端口重新探测）
@@ -234,7 +243,7 @@ export function createScanner(opts: { extraWhitelist?: number[]; log: Logger }):
       const workers = Array.from({ length: Math.min(PROBE_CONCURRENCY, stale.length) }, async () => {
         while (i < stale.length) {
           const port = stale[i++];
-          const info = await probePort(port).catch(() => null);
+          const info = await probePort(port, opts.fetchImpl).catch(() => null);
           probeCache.set(port, { info, ts: Date.now() });
         }
       });

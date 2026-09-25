@@ -98,9 +98,12 @@ async function sessionViaOffer(agent: HostAgent): Promise<PeerSession> {
   return s;
 }
 
-async function listenCountingHttp(onHit: () => void): Promise<{ server: http.Server; port: number }> {
-  const server = http.createServer((_req, res) => {
-    onHit();
+/** 计数 HTTP 服务器：onHit 收到原始 req，由调用方按标记头甄别——常驻 host 的扫描器（10s 周期）
+ *  与 scanner.test 的真实 cycle 会探测全机所有监听端口（2026-09-25 实锤：UA=p2p-net-scanner 的
+ *  GET / 打到本测试的动态端口），裸计数会被外来探测污染成 flaky；只数带本测试标记头的请求。 */
+async function listenCountingHttp(onHit: (req: http.IncomingMessage) => void): Promise<{ server: http.Server; port: number }> {
+  const server = http.createServer((req, res) => {
+    onHit(req);
     res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
     res.end('allowed-ok');
   });
@@ -108,17 +111,23 @@ async function listenCountingHttp(onHit: () => void): Promise<{ server: http.Ser
   return { server, port };
 }
 
+/** 计数 WS 服务器：按 upgrade 握手计数且只数 /ws 路径——桥的真实 ws 连接必走 Upgrade（ws.ts 连
+ *  ws://localhost:<port><path>），纯 HTTP GET 探测（scanner）不触发 upgrade；TCP 'connection'
+ *  级计数无法区分二者，曾被常驻 host 扫描器污染（2026-09-25 flaky 实锤）。 */
 async function listenCountingWs(onConn: () => void): Promise<{ server: http.Server; wss: WebSocketServer; port: number }> {
   const server = http.createServer();
-  server.on('connection', onConn); // TCP 级计数：即使握手未发生也能抓到出站连接
+  server.on('upgrade', (req) => { if (req.url === '/ws') onConn(); });
   const wss = new WebSocketServer({ server });
   const port = await new Promise<number>((r) => server.listen(0, '127.0.0.1', () => r((server.address() as AddressInfo).port)));
   return { server, wss, port };
 }
 
 test('req 帧命中白名单外端口：res-head 403 + done 收尾 + 零出站请求（HostAgent options 装配贯通）', async () => {
+  const marker = 'req-deny';
   let hits = 0;
-  const { server, port } = await listenCountingHttp(() => { hits += 1; });
+  const { server, port } = await listenCountingHttp((req) => {
+    if (req.headers['x-p2p-net-test'] === marker) hits += 1; // 只数本测试的帧：守卫失效时桥会原样转发标记头
+  });
 
   const agent = mkAgent(() => false); // 全拒：任何端口都不在白名单
   const session = await sessionViaOffer(agent);
@@ -131,7 +140,7 @@ test('req 帧命中白名单外端口：res-head 403 + done 收尾 + 零出站�
   const origErr = console.error;
   console.error = (...a: unknown[]) => { errs.push(a.join(' ')); };
   try {
-    dc.onmessage!({ data: JSON.stringify({ k: 'req', id: 1, port, method: 'GET', path: '/', headers: {} }) });
+    dc.onmessage!({ data: JSON.stringify({ k: 'req', id: 1, port, method: 'GET', path: '/', headers: { 'x-p2p-net-test': marker } }) });
     await until(() => sent.some((f) => f.k === 'res-head'), 3000, 'res-head');
     await new Promise((r) => setTimeout(r, 60)); // 反证窗口：若守卫失效，出站请求必在此间触达
 
@@ -152,15 +161,18 @@ test('req 帧命中白名单外端口：res-head 403 + done 收尾 + 零出站�
 });
 
 test('req 帧命中白名单内端口：正常代理触达 localhost（白名单不误伤）', async () => {
+  const marker = 'req-allow';
   let hits = 0;
-  const { server, port } = await listenCountingHttp(() => { hits += 1; });
+  const { server, port } = await listenCountingHttp((req) => {
+    if (req.headers['x-p2p-net-test'] === marker) hits += 1; // 只数本测试的帧，外来探测不计（同 deny 测）
+  });
 
   const session = new PeerSession(undefined, (p) => p === port);
   const sent: any[] = [];
   const dc = mkDc(sent);
   session.wireChannel(dc, 'proxy');
   try {
-    dc.onmessage!({ data: JSON.stringify({ k: 'req', id: 2, port, method: 'GET', path: '/', headers: {} }) });
+    dc.onmessage!({ data: JSON.stringify({ k: 'req', id: 2, port, method: 'GET', path: '/', headers: { 'x-p2p-net-test': marker } }) });
     await until(() => sent.some((f) => f.k === 'res-chunk' && f.done), 3000, 'res done');
     const head = sent.find((f) => f.k === 'res-head');
     assert.equal(head.status, 200);

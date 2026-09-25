@@ -19,9 +19,10 @@ import type { ServiceInfo } from './scanner.js';
 /** 仅本机回环：控制面/发现端点绝不监听外部接口。 */
 const BIND_HOST = '127.0.0.1';
 
-/** 控制面：GET /status → getStatus() 原样透传。 */
-export function startControlPlane(opts: { log: Logger; getStatus(): unknown }): Server {
-  assertPortFree(PORTS.CONTROL_PORT);
+/** 控制面：GET /status → getStatus() 原样透传。port 缺省取契约 CONTROL_PORT；测试传 0 走 OS 动态端口。 */
+export function startControlPlane(opts: { log: Logger; getStatus(): unknown; port?: number }): Server {
+  const port = opts.port ?? PORTS.CONTROL_PORT;
+  assertPortFree(port);
   const srv = createServer((req, res) => {
     try {
       if (req.method === 'GET' && pathOf(req.url) === '/status') {
@@ -35,13 +36,14 @@ export function startControlPlane(opts: { log: Logger; getStatus(): unknown }): 
       else res.end();
     }
   });
-  listenWithHumanError(srv, PORTS.CONTROL_PORT, opts.log, '控制面');
+  listenWithHumanError(srv, port, opts.log, '控制面');
   return srv;
 }
 
-/** 发现端点：GET /services → { console: [], services: [{name,url}], self: {deviceId} }。 */
-export function startDiscovery(opts: { log: Logger; getServices(): ServiceInfo[]; deviceId(): string }): Server {
-  assertPortFree(PORTS.DISCOVERY_PORT);
+/** 发现端点：GET /services → { console: [], services: [{name,url}], self: {deviceId} }。port 缺省取契约 DISCOVERY_PORT；测试传 0 走 OS 动态端口。 */
+export function startDiscovery(opts: { log: Logger; getServices(): ServiceInfo[]; deviceId(): string; port?: number }): Server {
+  const port = opts.port ?? PORTS.DISCOVERY_PORT;
+  assertPortFree(port);
   const srv = createServer((req, res) => {
     try {
       if (req.method === 'GET' && pathOf(req.url) === '/services') {
@@ -59,7 +61,7 @@ export function startDiscovery(opts: { log: Logger; getServices(): ServiceInfo[]
       else res.end();
     }
   });
-  listenWithHumanError(srv, PORTS.DISCOVERY_PORT, opts.log, '发现端点');
+  listenWithHumanError(srv, port, opts.log, '发现端点');
   return srv;
 }
 
@@ -69,8 +71,10 @@ function humanPortMessage(port: number): string {
 }
 
 /** listen 前同步预检：确认端口空闲才继续，被占则同步抛人话（满足启动即知占用语义）。
+ *  port=0 由 OS 分配动态端口，无可预检，直接放行。
  *  平台无枚举工具时返回 null = 无法预检，放行给 listen 的异步 'error' 兜底。 */
 function assertPortFree(port: number): void {
+  if (port === 0) return;
   if (isPortListening(port) === true) throw new Error(humanPortMessage(port));
 }
 

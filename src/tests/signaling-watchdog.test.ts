@@ -25,13 +25,21 @@ class FailSignaling {
   async purgeExpired(): Promise<void> {}
 }
 
-class FlakySignaling extends FailSignaling {
-  constructor(private failsLeft: number) { super(); }
+/** 门控连败信令：连败 failsBeforeHold 次后把下一轮 poll 挂起直到 release()——将 recovering 黄灯
+ *  钉成稳态供采样；release 后恒成功（host 的 polling 互斥保证挂起期间无新 poll 推进计数）。
+ *  2026-09-25 flaky 实锤：原 FlakySignaling(2) 两连败后立刻自愈，recovering=true 只存续一个
+ *  poll 周期（~5ms），与 until 的 10ms 采样循环竞争，错过窗口即 5s 超时。 */
+class HoldSignaling extends FailSignaling {
+  released = false;
+  private waiter?: () => void;
+  constructor(private failsBeforeHold: number) { super(); }
   override async poll(): Promise<PollResult> {
     this.calls++;
-    if (this.failsLeft-- > 0) throw new Error('signaling poll failed: 503');
+    if (this.calls <= this.failsBeforeHold) throw new Error('signaling poll failed: 503');
+    if (!this.released) await new Promise<void>((r) => { this.waiter = r; });
     return { msgs: [], cursor: 0 };
   }
+  release(): void { this.released = true; this.waiter?.(); }
 }
 
 function makeHost(over: Record<string, unknown> = {}): HostAgent {
@@ -73,7 +81,7 @@ test('信令看门狗：连续失败爬楼梯，黑洞回调恰好一次（注�
 });
 
 test('信令看门狗：poll 恢复后计数清零、recovering 复位（假恢复不得残留黄灯）', async () => {
-  const sig = new FlakySignaling(2); // 失败 2 次（达到 recoverAfter）后自愈
+  const sig = new HoldSignaling(2); // 连败 2 次（达到 recoverAfter）后挂起：黄灯稳态可观测；release 后自愈
   const host = makeHost({
     signaling: sig,
     signalingWatchdog: { recoverAfter: 2, recreateAfter: 3, exitAfter: 1000 },
@@ -82,6 +90,7 @@ test('信令看门狗：poll 恢复后计数清零、recovering 复位（假恢�
   host.start();
   try {
     await until(() => host.signalingHealth().recovering, 5000, '2 连败后应进入 recovering');
+    sig.release();
     await until(() => !host.signalingHealth().recovering && host.signalingHealth().consecutiveFailures === 0, 5000, '恢复后应清零复位');
     const h = host.signalingHealth();
     assert.equal(h.consecutiveFailures, 0);
@@ -123,12 +132,15 @@ class AuthFailSignaling extends FailSignaling {
   override async poll(): Promise<PollResult> { this.calls++; throw new SignalingHttpError('poll', 401); }
 }
 
-/** 按序播出错的信令：每轮取队列首部（'auth401' | 'net500' | 'ok'），空则恒 ok。 */
+/** 按序播出错的信令：每轮取队列首部；播完按 tail 恒播（默认 'ok'）。 */
 class SeqSignaling extends FailSignaling {
-  constructor(private seq: Array<'auth401' | 'net500' | 'ok'>) { super(); }
+  constructor(
+    private seq: Array<'auth401' | 'net500' | 'ok'>,
+    private tail: 'auth401' | 'net500' | 'ok' = 'ok',
+  ) { super(); }
   override async poll(): Promise<PollResult> {
     this.calls++;
-    const k = this.seq.shift() ?? 'ok';
+    const k = this.seq.shift() ?? this.tail;
     if (k === 'auth401') throw new SignalingHttpError('poll', 401);
     if (k === 'net500') throw new Error('signaling poll failed: 500');
     return { msgs: [], cursor: 0 };
@@ -211,7 +223,8 @@ test('401 恢复：poll 成功后 authFailures 清零', async () => {
 });
 
 test('混合分类：401 不垫不拆网络楼梯——net500 ×3 → 401 ×3 → net500 ×2 仍判黑洞', async () => {
-  const sig = new SeqSignaling(['net500', 'net500', 'net500', 'auth401', 'auth401', 'auth401', 'net500', 'net500']);
+  // tail 必须恒 net500：播完转 ok 会触发 notePollOk 清零双账，与黑洞后的采样断言竞争（flaky 实锤 2026-09-25）。
+  const sig = new SeqSignaling(['net500', 'net500', 'net500', 'auth401', 'auth401', 'auth401', 'net500', 'net500'], 'net500');
   let blackholes = 0;
   const host = makeHost({
     signaling: sig,
