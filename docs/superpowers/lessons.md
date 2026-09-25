@@ -52,7 +52,7 @@
 
 - **规则**：套件必须在常驻服务运行下全绿；测试绑固定端口即债。
 - **根因**：开发机常驻 host 占用 `contracts/ports.json` 的 CONTROL/DISCOVERY/DOCS 端口（19727–19729）；测试绑固定端口即与常驻服务冲突，套件在真实开发环境跑不绿，绿灯变成奢侈品。
-- **关联测试/门禁**：🚧 `mech/testiso` 分支（存量测试动态端口化，`listen(0)`）；新增测试一律动态端口，禁止绑 19727–19729。
+- **关联测试/门禁**：✅ `mech/testiso` 已合入 main（常驻 host 运行中 `npm run test:parallel` 连续 4 次全绿）：`control.ts` 工厂可注入端口、测试全量 `listen(0)` 动态化；watchdog 两例竞争根修（原断言未动）；scanner 加注入缝 + whitelist 甄别测试标记。新增测试一律动态端口，禁止绑 19727–19729。
 
 ## 二、计划自审 checklist（写实施计划前必答）
 
