@@ -345,6 +345,8 @@ export class HostAgent {
   private sigLastError?: string;
   private sigOk = 0;
   private sigFail = 0;
+  /** 最近一次 poll 耗时（2026-09-25 自检探针：信令 RTT 是黑洞归因的第一变量）。 */
+  private sigLastPollMs?: number;
   private sigRecovering = false;
   private sigRecreated = false;
   private sigBlackHoleFired = false;
@@ -397,7 +399,9 @@ export class HostAgent {
     if (this.polling) return;
     this.polling = true;
     try {
+      const t0 = Date.now();
       const { msgs, cursor } = await this.signaling.poll(this.room(), this.cursor);
+      this.sigLastPollMs = Date.now() - t0;
       this.notePollOk();
       this.cursor = cursor;
       for (const row of msgs) {
@@ -472,6 +476,7 @@ export class HostAgent {
     recreated: boolean;
     pollsOk: number;
     pollsFailed: number;
+    lastPollMs?: number;
   } {
     return {
       consecutiveFailures: this.sigConsecFail,
@@ -481,6 +486,7 @@ export class HostAgent {
       recreated: this.sigRecreated,
       pollsOk: this.sigOk,
       pollsFailed: this.sigFail,
+      ...(this.sigLastPollMs !== undefined ? { lastPollMs: this.sigLastPollMs } : {}),
     };
   }
 

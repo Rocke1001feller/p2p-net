@@ -4,7 +4,7 @@
  *  loadConfig → loadAuth（无则引导 p2p-net login）→ ensureFreshToken（变更即重存 auth.json）
  *  → bind_device_auth RPC 取 deviceId（落 config.json 复用；已有 deviceId 直接复用不打 RPC）
  *  → createScanner().start() → startControlPlane/startDiscovery（只绑 127.0.0.1）
- *  → new HostAgent（isPortAllowed 白名单必传，§5.3 安全洞）
+ *  → new HostAgent（isPortAllowed 白名单必传，§5.3 安全洞）→ 自检探针（5s 级服务+信令留痕）
  *  → 每 relay 一条隧道链路（token = HMAC(tunnelSecret, deviceId)，secret 从 0600 config.json 读）：
  *    TunnelClient 帧 → 解析 /s/<port>/ 前缀 → 白名单闸门（与 WebRTC 桥同口径，fail-closed）
  *    → 派发进该链路专属 HttpBridge/WsBridge；重连清场，坏帧逐帧隔离不杀进程。
@@ -36,6 +36,7 @@ import { startControlPlane, startDiscovery } from '../server/control.js';
 import { aggregateSessions, recordSessionEvent, type SessionEvent } from '../server/events.js';
 import { bindDeviceAuth, fetchTurnCredentials, startPairingLoop, type PairingHandle, type TicketStatus } from '../server/pairing.js';
 import { createScanner, DEFAULT_WHITELIST, NEVER_PORTS, type Scanner, type ServiceInfo } from '../server/scanner.js';
+import { startSelfcheck } from '../server/selfcheck.js';
 import { loadAuth, loadConfig, saveAuth, saveConfig, type AppConfig } from '../server/store.js';
 import { TunnelClient } from '../tunnel/client.js';
 
@@ -50,8 +51,8 @@ export interface HostAgentLike {
   stop(): void;
   /** 数据面计量快照（Task 5，spec D5/D8+D9）：假 agent/旧装配可无此方法（/status 容错为 null）。 */
   dataPlaneSnapshot?(): { totals: SessionLedger; sessions: number; byPath: Record<string, number> };
-  /** 信令面健康快照（F4 黑洞治理）：假 agent/旧装配可无此方法（/status 容错为 null）。 */
-  signalingHealth?(): { consecutiveFailures: number; firstFailureAt?: number; lastError?: string; recovering: boolean; recreated: boolean; pollsOk: number; pollsFailed: number };
+  /** 信令面健康快照（F4 黑洞治理 + 2026-09-25 lastPollMs）：假 agent/旧装配可无此方法（/status 容错为 null）。 */
+  signalingHealth?(): { consecutiveFailures: number; firstFailureAt?: number; lastError?: string; recovering: boolean; recreated: boolean; pollsOk: number; pollsFailed: number; lastPollMs?: number };
 }
 
 /** TunnelClient 的最小装配面（含数据面接线所需的 send/isOpen）。 */
@@ -93,6 +94,8 @@ export interface RunStartDeps {
   pollTicketStatusFn?: (cfg: AppConfig, accessToken: string, ticketId: string) => Promise<TicketStatus>;
   /** 运行期 token 周期续期间隔（默认 10min；测试注入小值）。 */
   tokenRefreshIntervalMs?: number;
+  /** 自检探针装配（默认真探针；测试注入假实现避免真定时器/真 fetch）。 */
+  startSelfcheckFn?: typeof startSelfcheck;
 }
 
 /** start 进程句柄：stop() 反向收尾全部组件（SIGINT 由 bin 接线 → handle.stop()）。 */
@@ -285,6 +288,17 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
     });
     host.start();
     teardowns.push(() => host.stop());
+
+    // 7.5) 自检探针（2026-09-25 事故治理，debugging 优先原则）：5s 级探测 scanner 发现的本地服务
+    //     （HTTP 级——TCP 握手测不出事件循环停顿）+ 信令面快照翻转，翻转告警 + 60s 心跳写 events.jsonl。
+    //     装配在 host 之后、teardown 栈靠后（先停探针再停 host，不留对死组件的误报）。
+    const selfcheckFn = deps.startSelfcheckFn ?? startSelfcheck;
+    const selfcheck = selfcheckFn({
+      log,
+      getServices: () => scanner.list(),
+      ...(host.signalingHealth ? { signalingHealth: () => host.signalingHealth!() } : {}),
+    });
+    teardowns.push(() => selfcheck.stop());
 
     // 8) 每 relay 一条隧道链路（兜底数据面）：TunnelClient + 其专属 HttpBridge/WsBridge。
     //    relay 下发的 req/ws-open 帧 port=0、路径形如 /s/<port>/<rest>：解析端口 → 白名单
