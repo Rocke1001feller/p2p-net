@@ -72,7 +72,7 @@ init 全程使用 **Supabase Management API 纯 HTTPS 调用**，不依赖 supab
 
 ```bash
 npx @rocke1001feller/p2p-net status      # 运行状态：设备 ID / 活跃会话数 / 链路模式（p2p·relay）/ 平均 RTT / 服务数
-npx @rocke1001feller/p2p-net doctor      # 七层归因诊断：auth → supabase → signaling → ice → vps → scanner → service
+npx @rocke1001feller/p2p-net doctor      # 八层归因诊断：auth → supabase → signaling → ice → vps → scanner → service → nat
 npx @rocke1001feller/p2p-net doctor --json   # 机器可读输出；退出码 = 失败层数
 ```
 
@@ -84,7 +84,7 @@ npx @rocke1001feller/p2p-net doctor --json   # 机器可读输出；退出码 = 
 
 ## 故障排查
 
-先跑 `npx @rocke1001feller/p2p-net doctor`——七层探针按连接级联同序归因，每层给出人话 detail + 可操作的 fix 建议；常见情形：
+先跑 `npx @rocke1001feller/p2p-net doctor`——八层探针按连接级联同序归因，每层给出人话 detail + 可操作的 fix 建议；常见情形：
 
 - **auth 层失败**：登录态过期 → 重跑 `npx @rocke1001feller/p2p-net login`；
 - **vps 层失败**：多为安全组未放行（对照上方端口清单）或 VPS 上 coturn/caddy 异常（`systemctl status coturn caddy p2p-net-tunnel`）；
