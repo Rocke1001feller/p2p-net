@@ -3,7 +3,7 @@
  *
  * 设计立场（历史教训平移）：端口**不靠猜**，而是两级事实来源：
  *   ① 本次 URL 的 `?dsc=`（配对二维码刚给的新鲜事实，最可信）/ 该设备上次成功的端口记忆
- *   ② 契约端口（contracts/ports.json: DISCOVERY_PORT=19728，见 constants.ts）
+ *   ② 契约端口（contracts/ports.json: DISCOVERY_PORT，经 constants.ts 注入）
  *   顺序之外的任何"硬编码假设"都是 bug。
  */
 import { DISCOVERY_PORT } from './constants.js';
@@ -21,7 +21,7 @@ function normalize(list: (number | string | null | undefined)[]): number[] {
 
 /**
  * 探测候选（按可信度降序）：
- *   preferred（URL dsc / 设备记忆） → 契约 19728
+ *   preferred（URL dsc / 设备记忆） → 契约 DISCOVERY_PORT
  */
 export function discoveryCandidates(preferred?: number | string | null): number[] {
   return normalize([preferred, DISCOVERY_PORT]);

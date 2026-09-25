@@ -11,7 +11,7 @@ import { PORTS } from 'p2p-net/browser';
 /** 桌面 daemon 服务发现端口（contracts/ports.json: DISCOVERY_PORT）。 */
 export const DISCOVERY_PORT = PORTS.DISCOVERY_PORT;
 
-/** 自建 coturn 的 STUN 端口（contracts/ports.json: STUN_PORT；安全组放行 3478 tcp+udp）。 */
+/** 自建 coturn 的 STUN 端口（contracts/ports.json: STUN_PORT；VPS 安全组需放行该端口 tcp+udp）。 */
 export const STUN_PORT = PORTS.STUN_PORT;
 
 /** 本端持久化键（uid / 本机 deviceId / 上次连接的桌面 deviceId）。 */

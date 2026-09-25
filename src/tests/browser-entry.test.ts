@@ -56,6 +56,8 @@ test('package.json exports 映射：. / ./browser / ./package.json', () => {
   // 2026-09-25 起接第三段 test:parity（机制丙1）：pathType 双侧 conformance，host/PWA 读同一语料
   // contracts/path-type-corpus.json 断言一致；*.parity.ts 不匹配 *.test.ts glob，仅由本脚本运行。
   assert.equal(pkg.scripts['test:parallel'], 'tsx --test "src/**/*.test.ts" "pwa/src/**/*.test.ts"');
+  // 2026-09-25 起 test 链最前接入 lint:twins（丙2 孪生复活门禁）：检出已登记孪生即短路失败
+  assert.equal(pkg.scripts['lint:twins'], 'node scripts/twin-guard.mjs');
   assert.equal(pkg.scripts['test:parity'], 'tsx --test "src/**/*.parity.ts" "pwa/src/**/*.parity.ts"');
-  assert.equal(pkg.scripts.test, 'npm run test:parallel && npm run test:serial && npm run test:parity');
+  assert.equal(pkg.scripts.test, 'npm run lint:twins && npm run test:parallel && npm run test:serial && npm run test:parity');
 });

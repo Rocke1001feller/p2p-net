@@ -2,7 +2,7 @@
  * 级联连接控制器（2026-09-08 用户裁决顺序）：P2P 直连 → 反向隧道 → TURN 中继。
  * relay 服务器仅兜底控成本——TURN 是最后一段，且必须用 turn-credentials 临时凭据（防白嫖）。
  *
- * - p2p 段：WebRtcSession + 仅 STUN（自建 coturn @3478）——不含 TURN 候选，直连失败不会
+ * - p2p 段：WebRtcSession + 仅 STUN（自建 coturn，端口走契约 STUN_PORT）——不含 TURN 候选，直连失败不会
  *   悄悄滑进 TURN，顺序由本类显式控制。
  *   2026-09-09 蜂窝 A/B 实证（Android/联通 LTE）：full ICE 合并方案 0/3 失败，显式分段 3/3 可用——
  *   本分段结构为产品定案，勿合并回 single-PC full ICE。
@@ -50,7 +50,7 @@ export interface CascadeOptions {
   p2pFullIce?: boolean;
   /** dev/验收覆盖：?tunnel=1 或 ?notunnel=1 时只跑反向隧道段（Task 11 强制隧道模式）。 */
   forceTunnel?: boolean;
-  /** 验收覆盖：daemon discovery 端口（?dsc=；默认 DISCOVERY_PORT 19728）。 */
+  /** 验收覆盖：daemon discovery 端口（?dsc=；默认取契约 DISCOVERY_PORT）。 */
   servicesPort?: number;
   /** N4 活性阈值（spec D7）：透传进两段 WebRtcSession；缺省 DEFAULT_LIVENESS。 */
   liveness?: Partial<Pick<LivenessConfig, 'pingMs' | 'livenessMs'>>;
