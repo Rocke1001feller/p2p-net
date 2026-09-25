@@ -49,3 +49,29 @@ test('constructor 自定义 wedgeMs（N4 真机标定）；缺省 = WEDGE_MS', (
   assert.equal(b.wedged(1, 1_500), false);
   assert.equal(b.wedged(1, 61_000), true);
 });
+
+// 2026-09-25 F9：旧 wedged 只看在途数与静默——隧道期泄漏的陈旧在途计数（实测 76 条）
+// + 陈旧活性证据，让「连接进行中」的实例被判黑洞；看门狗 cascade.stop() 打断健康重试，
+// 叠加 'stopped' 静默 return 构成自动重连永久死亡。判死必须只针对「已打开的非隧道链路」。
+
+test('F9：链路未打开（连接进行中/已停止）→ 不判死，即便在途>0 且静默超阈', () => {
+  const l = new DataPlaneLiveness();
+  const t0 = 1_000_000;
+  l.noteOpen(t0);
+  assert.equal(l.wedged(76, t0 + WEDGE_MS + 1, { isOpen: false, mode: null }), false);
+});
+
+test('隧道模式不参与 dc 黑洞判定（link 口径）', () => {
+  const l = new DataPlaneLiveness();
+  const t0 = 1_000_000;
+  l.noteOpen(t0);
+  assert.equal(l.wedged(5, t0 + WEDGE_MS + 1, { isOpen: true, mode: 'tunnel' }), false);
+});
+
+test('已打开的 dc 链路 + 在途>0 + 静默超阈 → 判死（link 口径不削弱真黑洞检测）', () => {
+  const l = new DataPlaneLiveness();
+  const t0 = 1_000_000;
+  l.noteOpen(t0);
+  assert.equal(l.wedged(2, t0 + WEDGE_MS + 1, { isOpen: true, mode: 'p2p' }), true);
+  assert.equal(l.wedged(2, t0 + WEDGE_MS + 1, { isOpen: true, mode: 'turn' }), true);
+});

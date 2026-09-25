@@ -44,7 +44,7 @@ import {
   type SavedDevice,
 } from './ui.js';
 import { stallSuspect } from './stall.js';
-import { onConnectFailure } from './reconnectPolicy.js';
+import { onConnectFailure, onConnectStopped } from './reconnectPolicy.js';
 import { bootConnectTarget } from './bootPolicy.js';
 
 const Q = new URLSearchParams(location.search);
@@ -240,15 +240,19 @@ async function onSwReq(m: { id: number; port?: number; method: string; path: str
     return;
   }
   const gid = ++dcSeq;
-  const timer = setTimeout(() => pendingSw.delete(gid), 90_000); // 慢链路大文件传输可超 31s；90s 兜底 GC
+  // 慢链路大文件传输可超 31s；90s 兜底 GC。F9：两图同清——只清 pendingSw 会把在途计数
+  // 永远留在 inflightSw（dc 回帧销账 :306 走不到无 pendingSw 的条目），泄漏计数会喂给看门狗。
+  const timer = setTimeout(() => { pendingSw.delete(gid); inflightSw.delete(gid); }, 90_000);
   pendingSw.set(gid, { swPort, origId: m.id, timer });
   inflightSw.set(gid, Date.now()); // 看门狗计时（回帧时清）
   if (cascade.mode === 'tunnel') {
     // 隧道模式：SW req 分流到网关 HTTP（流式回帧后清理）——隧道段走网关 HTTP，不进 dc 账本；
     // 但 spec D9 路径归类：响应帧计 wire 桶且 pathType 记 'tunnel'（隧道段无 ICE 对，getStats 判不到）。
+    // F9：finish 必须与 dc 腿同口径清理（pendingSw/inflightSw/timer）——tunnelProxy 成功与失败
+    // 都以 done:true 的 res-chunk 收尾，此处是隧道腿唯一可靠的成对清理点。
     const finish = (frame: any): void => {
       swPort.postMessage({ ...frame, id: m.id });
-      if (frame.k === 'res-chunk' && frame.done) clearTimeout(timer);
+      if (frame.k === 'res-chunk' && frame.done) { clearTimeout(timer); pendingSw.delete(gid); inflightSw.delete(gid); }
     };
     await cascade.tunnelProxy({ ...m, port: m.port ?? 0 }, (frame) => { frameLedger.noteTunnelFrame(frame); finish({ ...frame, id: gid }); });
     return;
@@ -265,6 +269,7 @@ function onSwAbort(m: { id: number }): void {
     if (e.swPort === lp && e.origId === m.id) {
       clearTimeout(e.timer);
       pendingSw.delete(gid);
+      inflightSw.delete(gid); // F9：中止也要清在途计数（dc 回帧销账走不到已删的 pendingSw 条目）
       if (cascade.mode !== 'tunnel') void cascade.send({ k: 'req-abort', id: gid });
       return;
     }
@@ -337,10 +342,12 @@ function onDcFrame(m: any): void {
   }
 }
 
-/** 数据面是否已黑：有在途请求且全局静默超阈（任何回帧都在刷新活性）。隧道段不走 dc，故不参与判定。 */
+/** 数据面是否已黑：有在途请求且全局静默超阈（任何回帧都在刷新活性）。
+ *  F9：判死口径下沉 liveness.wedged 的 link 参数——未打开（连接进行中/已停止）与隧道
+ *  链路不判；连接进行中没有数据面可黑，陈旧在途计数不得误杀进行中的健康重试。 */
 function dataPlaneWedged(): boolean {
-  if (!cascade || cascade.mode === 'tunnel') return false;
-  return liveness.wedged(inflightSw.size);
+  if (!cascade) return false;
+  return liveness.wedged(inflightSw.size, Date.now(), { isOpen: cascade.isOpen, mode: cascade.mode });
 }
 
 /** stall 示警（spec D5）：tunnel 段 ctrlAlive 恒 false——隧道无 dc 静默概念，SW 超时兜底。 */
@@ -477,7 +484,20 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
     await afterConnected();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg === 'stopped') return;
+    if (msg === 'stopped') {
+      // F9：实例被停（看门狗/手动断开/排障 flap/被新实例取代）。旧代码无条件静默 return——
+      // 看门狗 stop 落在自动重试中途时，onCascadeStatus 的 'off' 分支又因 wasConnected 已清零
+      // 不排重连 → 两侧都不排、无待触发定时器 → 自动重连循环永久死亡（页面谎称「正在重连…」，
+      // 桌面端恢复也救不回来）。裁决下沉 reconnectPolicy.onConnectStopped（单测覆盖）。
+      const stoppedAct = onConnectStopped({ superseded: gen !== cascadeGen, manualStop, ...autoCtx });
+      if (!stoppedAct.reconnect && !stoppedAct.sheet) return; // 被取代/手动断开：保持静默
+      log(`[conn] 连接被中断（stopped）→ ${stoppedAct.reconnect ? '自动重连循环续命' : '交代用户'}`);
+      hideConnecting();
+      setStatus({ state: 'failed', pairType: null }, deskName);
+      if (stoppedAct.reconnect) scheduleReconnect();
+      if (stoppedAct.sheet) showOfflineSheet(d.name || `桌面 ${d.id.slice(0, 8)}…`, '连接被数据面看门狗中断。请重试。', () => void startConnect(d));
+      return;
+    }
     log(`[conn] 级联失败：${msg}`);
     hideConnecting();
     setStatus({ state: 'failed', pairType: null }, deskName);

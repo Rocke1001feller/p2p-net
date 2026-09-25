@@ -30,8 +30,14 @@ export class DataPlaneLiveness {
     this.lastProofAt = now;
   }
 
-  /** 判死条件：有在途请求 且 全局静默超阈。无在途请求的空闲链路永不拆。 */
-  wedged(inflight: number, now = Date.now()): boolean {
+  /**
+   * 判死条件：有在途请求 且 全局静默超阈。无在途请求的空闲链路永不拆。
+   * link 给出时（2026-09-25 F9 收紧）：仅对「已打开的非隧道链路」判黑洞——
+   * 连接进行中/已停止的实例没有数据面可黑（恢复由重连循环负责），隧道段不走 dc 不参与；
+   * 否则陈旧在途计数 + 陈旧活性证据会让看门狗误杀进行中的健康重试。
+   */
+  wedged(inflight: number, now = Date.now(), link?: { isOpen: boolean; mode: string | null }): boolean {
+    if (link && (!link.isOpen || link.mode === 'tunnel')) return false;
     if (inflight <= 0) return false;
     return now - this.lastProofAt > this.wedgeMs;
   }

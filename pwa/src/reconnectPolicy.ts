@@ -25,3 +25,26 @@ export function onConnectFailure(c: ReconnectCtx): { reconnect: boolean; sheet: 
   const autoCtx = c.isRetry || c.wasConnected || c.reconnectAttempt > 0 || c.timerPending;
   return { reconnect: autoCtx, sheet: !c.isRetry };
 }
+
+export interface StoppedCtx extends ReconnectCtx {
+  /** 本次实例已被更新的 startConnect 取代（gen 过期）：迟到的 'stopped'。 */
+  superseded: boolean;
+  /** 用户主动断开（stopSession）。 */
+  manualStop: boolean;
+}
+
+/**
+ * connect() 抛 'stopped' 时的裁决（2026-09-25 真机门禁 F9）。
+ *
+ * F9 事故：看门狗在自动重试的 connect() 进行中触发 → cascade.stop() → 在途 connect 抛
+ * 'stopped' → 旧 catch 无条件静默 return；同时 onCascadeStatus 的 'off' 分支要求
+ * wasConnected===true（手动重试进入时已清零、重试成功才回设）→ 两侧都不 scheduleReconnect、
+ * 无待触发定时器 → 自动重连循环永久死亡，页面谎称「正在重连…」，桌面端恢复也救不回来。
+ *
+ * 裁决：被取代/手动断开 → 静默（新实例已接管 / 手动断开语义就是杀循环）；
+ * 其余外部中断（看门狗/排障 flap）视同连接失败，按 onConnectFailure 口径裁决。
+ */
+export function onConnectStopped(c: StoppedCtx): { reconnect: boolean; sheet: boolean } {
+  if (c.superseded || c.manualStop) return { reconnect: false, sheet: false };
+  return onConnectFailure(c);
+}
