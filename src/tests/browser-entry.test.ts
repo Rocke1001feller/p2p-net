@@ -13,6 +13,7 @@ test('browser 入口源码图不 import werift（barrel 只含 signaling/frames/
     'src/signaling/client.ts',
     'src/frames.ts',
     'src/status.ts',
+    'src/ports.ts',
   ];
   for (const rel of sources) {
     const text = readFileSync(path.join(root, rel), 'utf8');
@@ -30,6 +31,18 @@ test('dist/browser.js 构建产物不含 werift 引用（需先 npm run build）
   assert.doesNotMatch(text, /import\(\s*['"]werift['"]/, 'browser 入口 bundle 动态引入了 werift');
   assert.doesNotMatch(text, /require\(\s*['"]werift['"]/, 'browser 入口 bundle require 了 werift');
   assert.ok(text.includes('SignalingClient'), 'browser 入口应导出信令客户端');
+});
+
+test('dist/ports.js 直读 contracts/ports.json（端口契约浏览器侧无副本的机制锚点，需先 npm run build）', () => {
+  const dist = path.join(root, 'dist/ports.js');
+  assert.equal(existsSync(dist), true, 'dist/ports.js 不存在——请先运行 npm run build');
+  const text = readFileSync(dist, 'utf8');
+  // 机制要求：emit 保留对 ports.json 的 JSON import（值由 bundler/运行时从同一物理文件取），
+  // 一旦有人把端口值内联成字面量（重新制造副本），本断言立刻红。
+  assert.ok(
+    text.includes("'../contracts/ports.json'"),
+    'dist/ports.js 应保留对 contracts/ports.json 的 import（单一事实源），不得内联字面量',
+  );
 });
 
 test('package.json exports 映射：. / ./browser / ./package.json', () => {

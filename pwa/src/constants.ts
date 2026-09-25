@@ -1,16 +1,18 @@
 /**
  * 静态产品常量（非后端配置——后端配置一律走 config.ts 的 loadRuntimeConfig）。
  *
- * 端口契约对齐根仓 contracts/ports.json（DISCOVERY_PORT=19728）；PWA 由 vite 独立构建、
- * 跑在浏览器里，无法 import 根仓 src/contracts.ts（它 readFileSync，非浏览器安全），
- * 故此处保留一份副本——改根仓 ports.json 时必须同步本文件。
+ * 端口契约无副本：DISCOVERY_PORT / STUN_PORT 的值经包内 browser 入口直取
+ * contracts/ports.json（单一事实源，vite 构建期内联，tsx 测试期直读）。
+ * 禁止在此回填端口字面量——parity 门禁见本目录 constants.test.ts
+ * 「端口契约 parity」测试（回填即红）。
  */
+import { PORTS } from 'p2p-net/browser';
 
 /** 桌面 daemon 服务发现端口（contracts/ports.json: DISCOVERY_PORT）。 */
-export const DISCOVERY_PORT = 19728;
+export const DISCOVERY_PORT = PORTS.DISCOVERY_PORT;
 
-/** 自建 coturn 的 STUN 端口（VPS init 侧契约；安全组放行 3478 tcp+udp）。 */
-export const STUN_PORT = 3478;
+/** 自建 coturn 的 STUN 端口（contracts/ports.json: STUN_PORT；安全组放行 3478 tcp+udp）。 */
+export const STUN_PORT = PORTS.STUN_PORT;
 
 /** 本端持久化键（uid / 本机 deviceId / 上次连接的桌面 deviceId）。 */
 export const LS_UID = 'p2p-net.pwa.uid';

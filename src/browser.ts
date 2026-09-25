@@ -14,3 +14,4 @@ export {
 export * from './frames.js';
 export * from './pool.js';
 export * from './status.js';
+export { PORTS, type PortContract } from './ports.js';
