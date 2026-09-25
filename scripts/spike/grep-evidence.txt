@@ -1,0 +1,60 @@
+=== A. grep -rn "restartIce\|iceRestart" node_modules/werift/lib/ (plan 原文命令, 排除 .map) ===
+node_modules/werift/lib/index.mjs:11646:      iceRestarts: this.iceTransport.iceRestarts
+node_modules/werift/lib/index.mjs:11815:  iceRestarts = 0;
+node_modules/werift/lib/index.mjs:11913:    this.iceRestarts++;
+node_modules/werift/lib/index.mjs:16969:  restartIce() {
+node_modules/werift/lib/index.mjs:17431:  async createOffer({ iceRestart } = {}) {
+node_modules/werift/lib/index.mjs:17432:    if (iceRestart || this.needRestart) {
+node_modules/werift/lib/index.mjs:17434:      this.secureManager.restartIce();
+node_modules/werift/lib/index.mjs:17739:  restartIce() {
+node_modules/werift/lib/webrtc/src/transport/dtls.js:531:            iceRestarts: this.iceTransport.iceRestarts,
+node_modules/werift/lib/webrtc/src/transport/ice.d.ts:32:    iceRestarts: number;
+node_modules/werift/lib/webrtc/src/transport/ice.js:83:        Object.defineProperty(this, "iceRestarts", {
+node_modules/werift/lib/webrtc/src/transport/ice.js:267:        this.iceRestarts++;
+node_modules/werift/lib/webrtc/src/peerConnection.js:514:    async createOffer({ iceRestart } = {}) {
+node_modules/werift/lib/webrtc/src/peerConnection.js:515:        if (iceRestart || this.needRestart) {
+node_modules/werift/lib/webrtc/src/peerConnection.js:517:            this.secureManager.restartIce();
+node_modules/werift/lib/webrtc/src/peerConnection.js:815:    restartIce() {
+node_modules/werift/lib/webrtc/src/peerConnection.d.ts:165:    createOffer({ iceRestart }?: {
+node_modules/werift/lib/webrtc/src/peerConnection.d.ts:166:        iceRestart?: boolean;
+node_modules/werift/lib/webrtc/src/peerConnection.d.ts:191:    restartIce(): void;
+node_modules/werift/lib/webrtc/src/secureTransportManager.d.ts:53:    restartIce(): void;
+
+=== B. grep -rniE "restartIce|iceRestart|restart" node_modules/werift/lib/webrtc/ (任务书面命令, 排除 .map) ===
+node_modules/werift/lib/webrtc/src/transport/dtls.js:531:            iceRestarts: this.iceTransport.iceRestarts,
+node_modules/werift/lib/webrtc/src/transport/ice.d.ts:32:    iceRestarts: number;
+node_modules/werift/lib/webrtc/src/transport/ice.d.ts:63:    restart(): void;
+node_modules/werift/lib/webrtc/src/transport/ice.js:83:        Object.defineProperty(this, "iceRestarts", {
+node_modules/werift/lib/webrtc/src/transport/ice.js:260:                log("restart", remoteParameters);
+node_modules/werift/lib/webrtc/src/transport/ice.js:261:                this.restart();
+node_modules/werift/lib/webrtc/src/transport/ice.js:266:    restart() {
+node_modules/werift/lib/webrtc/src/transport/ice.js:267:        this.iceRestarts++;
+node_modules/werift/lib/webrtc/src/transport/ice.js:268:        this.connection.restart();
+node_modules/werift/lib/webrtc/src/peerConnection.js:127:        Object.defineProperty(this, "needRestart", {
+node_modules/werift/lib/webrtc/src/peerConnection.js:514:    async createOffer({ iceRestart } = {}) {
+node_modules/werift/lib/webrtc/src/peerConnection.js:515:        if (iceRestart || this.needRestart) {
+node_modules/werift/lib/webrtc/src/peerConnection.js:516:            this.needRestart = false;
+node_modules/werift/lib/webrtc/src/peerConnection.js:517:            this.secureManager.restartIce();
+node_modules/werift/lib/webrtc/src/peerConnection.js:815:    restartIce() {
+node_modules/werift/lib/webrtc/src/peerConnection.js:816:        this.needRestart = true;
+node_modules/werift/lib/webrtc/src/peerConnection.d.ts:43:    needRestart: boolean;
+node_modules/werift/lib/webrtc/src/peerConnection.d.ts:165:    createOffer({ iceRestart }?: {
+node_modules/werift/lib/webrtc/src/peerConnection.d.ts:166:        iceRestart?: boolean;
+node_modules/werift/lib/webrtc/src/peerConnection.d.ts:191:    restartIce(): void;
+node_modules/werift/lib/webrtc/src/secureTransportManager.d.ts:53:    restartIce(): void;
+node_modules/werift/lib/webrtc/src/secureTransportManager.js:280:    restartIce() {
+node_modules/werift/lib/webrtc/src/secureTransportManager.js:282:            transport.restart();
+node_modules/werift/lib/webrtc/src/media/stats.d.ts:207:    iceRestarts?: number;
+
+=== C. werift/lib/ice 底层 Connection.restart / forceTurn / gatherRelayOnly 锚点 ===
+node_modules/werift/lib/ice/src/ice.js:624:    async restart() {
+node_modules/werift/lib/ice/src/ice.js:784:        const gatherRelayOnly = !gatherIceLite &&
+node_modules/werift/lib/ice/src/ice.js:785:            this.options.forceTurn &&
+node_modules/werift/lib/ice/src/ice.js:790:            // ice restartで同じアドレスが追加されるのを防ぐ
+node_modules/werift/lib/ice/src/ice.js:796:        const localStunPromises = gatherRelayOnly
+node_modules/werift/lib/ice/src/ice.js:821:        if (!gatherRelayOnly) {
+node_modules/werift/lib/ice/src/ice.js:824:        if (!gatherRelayOnly && this.options.useTcp) {
+node_modules/werift/lib/ice/src/ice.js:852:        if (!gatherIceLite && !gatherRelayOnly && stunServer) {
+node_modules/werift/lib/ice/src/ice.js:1024:                if (this.options.forceTurn &&
+node_modules/werift/lib/webrtc/src/secureTransportManager.js:116:            forceTurnTCP: this.config.forceTurnTCP,
+node_modules/werift/lib/webrtc/src/secureTransportManager.js:121:            forceTurn: this.config.iceTransportPolicy === "relay",
