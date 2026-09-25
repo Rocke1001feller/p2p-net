@@ -44,9 +44,11 @@ create table if not exists public.pairing_tickets (
   status       text not null default 'pending' check (status in ('pending', 'redeemed', 'expired')),
   device_label text not null default '',
   created_at   timestamptz not null default now(),
-  expires_at   timestamptz not null default (now() + interval '120 seconds'),
+  expires_at   timestamptz not null default (now() + interval '2 hours'),
   redeemed_at  timestamptz
 );
+-- 存量库对齐：列默认 120s → 2h（幂等；host 出票自 2026-09-25 起显式带 expires_at，双保险）
+alter table public.pairing_tickets alter column expires_at set default (now() + interval '2 hours');
 create index if not exists pairing_tickets_user_idx on public.pairing_tickets(user_id);
 
 alter table public.pairing_tickets enable row level security;

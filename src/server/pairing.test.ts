@@ -77,7 +77,11 @@ test('出票走 PostgREST 且带用户 JWT', async () => {
   assert.equal(seen.headers?.['Authorization'], 'Bearer jwt-1');
   assert.equal(seen.headers?.['apikey'], 'pk-test');
   assert.equal(seen.headers?.['Prefer'], 'return=representation');
-  assert.deepEqual(seen.body, {});
+  // 显式 expires_at（2h）：不依赖服务端列默认，存量环境免 DDL 变更（2026-09-25 联通臂实测票据 120s 过短）
+  const body = seen.body as { expires_at?: unknown };
+  assert.ok(body && typeof body.expires_at === 'string', '出票体必须显式携带 expires_at');
+  const deltaMs = new Date(body.expires_at as string).getTime() - Date.now();
+  assert.ok(deltaMs > 119 * 60_000 && deltaMs <= 120 * 60_000 + 5_000, `expires_at 应在 ~120min 后，实际 ${Math.round(deltaMs / 60000)}min`);
 });
 
 test('出票非 2xx 抛 PairingError，文案不含 token', async () => {

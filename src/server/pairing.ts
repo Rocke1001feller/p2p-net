@@ -1,15 +1,15 @@
 /** 配对出票与 start 运行时的 Supabase 数据面直连助手（Task 17 产出）。
  *  纯 REST 直连（apikey + 用户 JWT），不引 supabase-js（与 server/auth.ts 同一纪律）：
- *  - issuePairingTicket：POST /rest/v1/pairing_tickets（空 body，Prefer: return=representation）→ 票据 id；
+ *  - issuePairingTicket：POST /rest/v1/pairing_tickets（显式 expires_at，Prefer: return=representation）→ 票据 id；
  *  - getTicketStatus：GET /rest/v1/pairing_tickets?id=eq.<id>&select=status → pending|redeemed|expired；
  *  - bindDeviceAuth：POST /rest/v1/rpc/bind_device_auth {p_role:'desktop', p_hostname} → 设备 uuid
  *    （服务端按 (user, role, hostname) 幂等，重复绑定返回既有设备 id）；
  *  - fetchTurnCredentials：POST /functions/v1/turn-credentials → HostAgent 的 TurnCredentials；
  *  - startPairingLoop：出票 → 逐 relay 回调打印 URL+QR → 5s 轮询 → redeemed 打「手机已接入」回执 /
- *    expired 或 120s 到期自动换新票重打。环内任何失败只 warn 重试，绝不 crash 宿主进程。
+ *    expired 或本地到期自动换新票重打。环内任何失败只 warn 重试，绝不 crash 宿主进程。
  *
  *  秘密纪律：accessToken 只进 Authorization 头，绝不进日志/错误文案/stdout；
- *  打到终端的 URL 含 ticketId+deviceId 是产品设计（PWA 扫码载荷），票据 120s 即过期。
+ *  打到终端的 URL 含 ticketId+deviceId 是产品设计（PWA 扫码载荷），票据 2h 过期。
  */
 
 import { hostname } from 'node:os';
@@ -31,9 +31,10 @@ export type TicketStatus = 'pending' | 'redeemed' | 'expired';
 const REQUEST_TIMEOUT_MS = 10_000;
 const BODY_EXCERPT_LEN = 200;
 
-/** 默认轮询节奏 5s / 票据有效期 120s（与服务端 expires_at 默认值一致）。 */
+/** 默认轮询节奏 5s / 票据有效期 2h（与服务端 expires_at 默认值一致；2026-09-25 起由 120s 调长——
+ *  真机实测 120s 不够用户从电脑走到手机打开链接）。 */
 export const PAIRING_POLL_INTERVAL_MS = 5_000;
-export const PAIRING_TICKET_TTL_MS = 120_000;
+export const PAIRING_TICKET_TTL_MS = 7_200_000;
 
 /** PWA 扫码载荷形态：<relay>/connect?t=<ticketId>&d=<deskDeviceId>&u=<接入URL>（pwa/src/cloud.ts 解析）。
  *  u= 直指隧道公网入口 /tunnel/s/<deviceId>：PWA 把 u 原样存为 tunnelUrl 并拼 `${u}/s/<port>/…`，
@@ -43,13 +44,16 @@ export function buildConnectUrl(ip: string, ticketId: string, deviceId: string):
   return `https://${ip}/connect?t=${encodeURIComponent(ticketId)}&d=${encodeURIComponent(deviceId)}&u=${u}`;
 }
 
-/** 出票：POST /rest/v1/pairing_tickets（空 body，return=representation）→ { ticketId }。 */
+/** 出票：POST /rest/v1/pairing_tickets（显式 expires_at=now+TTL，return=representation）→ { ticketId }。
+ *  显式列值而非空 body 依赖服务端默认：存量环境（列默认仍是 120s）免 DDL 变更即可生效。 */
 export async function issuePairingTicket(
   cfg: AppConfig,
   accessToken: string,
   fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<{ ticketId: string }> {
-  const res = await postJson(cfg, accessToken, '/rest/v1/pairing_tickets', {}, fetchImpl, {
+  const res = await postJson(cfg, accessToken, '/rest/v1/pairing_tickets', {
+    expires_at: new Date(Date.now() + PAIRING_TICKET_TTL_MS).toISOString(),
+  }, fetchImpl, {
     Prefer: 'return=representation',
   });
   if (!res.ok) throw new PairingError(`配对出票失败（HTTP ${res.status}）：${errExcerpt(res.json)}，请重试；若持续失败请运行 p2p-net doctor 排查`);
@@ -177,7 +181,7 @@ export function startPairingLoop(opts: PairingLoopOptions, deps: PairingLoopDeps
       return;
     }
     if (stopped) return;
-    log.info('pairing', '配对票已签发（120s 有效）', { ticketId, relays: opts.relays.length });
+    log.info('pairing', '配对票已签发（2h 有效）', { ticketId, relays: opts.relays.length });
     for (const relay of opts.relays) {
       const url = buildConnectUrl(relay.ip, ticketId, opts.deviceId);
       try {

@@ -386,7 +386,7 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
           deviceId,
           log,
           printTicket: (ip, url) => {
-            out(`Relay ${ip} 配对链接（120s 有效，过期自动换新票）：`);
+            out(`Relay ${ip} 配对链接（2h 有效，过期自动换新票）：`);
             out(url);
             printQr(url);
           },
