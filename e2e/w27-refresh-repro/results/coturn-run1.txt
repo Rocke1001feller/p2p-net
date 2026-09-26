@@ -1,0 +1,46 @@
+2026-09-26T15:13:11.647024+0800 VM-0-10-ubuntu turnserver[117817]: 306848: : session 003000000000003810: new, realm=<p2p-net>, username=<<TURN_USER>>, lifetime=600
+2026-09-26T15:13:11.647024+0800 VM-0-10-ubuntu turnserver[117817]: 306848: : session 003000000000003810: realm <p2p-net> user <<TURN_USER>>: incoming packet ALLOCATE processed, success
+2026-09-26T15:21:32.494361+0800 VM-0-10-ubuntu turnserver[117817]: 307348: : session 003000000000003841: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Wrong nonce
+2026-09-26T15:21:32.494361+0800 VM-0-10-ubuntu turnserver[117817]: 307348: : session 003000000000003841: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:21:32.494361+0800 VM-0-10-ubuntu turnserver[117817]: 307348: : session 003000000000003841: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:21:32.494361+0800 VM-0-10-ubuntu turnserver[117817]: 307349: : session 003000000000003841: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:21:32.494361+0800 VM-0-10-ubuntu turnserver[117817]: 307349: : session 003000000000003841: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:21:32.494361+0800 VM-0-10-ubuntu turnserver[117817]: 307350: : session 003000000000003841: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:21:39.055412+0800 VM-0-10-ubuntu turnserver[117817]: 307351: : session 003000000000003841: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:22:37.187051+0800 VM-0-10-ubuntu turnserver[117817]: 307408: : session 003000000000003841: usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=7, rb=812, sp=7, sb=756
+2026-09-26T15:22:37.187051+0800 VM-0-10-ubuntu turnserver[117817]: 307408: : session 003000000000003841: peer usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=0, rb=0, sp=0, sb=0
+2026-09-26T15:22:37.187051+0800 VM-0-10-ubuntu turnserver[117817]: 307408: : session 003000000000003841: closed (2nd stage), user <<TURN_USER>> realm <p2p-net> origin <>, local <VPS_LAN>:3478, remote <HOME_IP>:45939, reason: allocation watchdog determined stale session state
+2026-09-26T15:23:13.669349+0800 VM-0-10-ubuntu turnserver[117817]: 307448: : session 003000000000003810: usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=2, rb=160, sp=2, sb=220
+2026-09-26T15:23:13.669349+0800 VM-0-10-ubuntu turnserver[117817]: 307448: : session 003000000000003810: peer usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=0, rb=0, sp=0, sb=0
+2026-09-26T15:23:13.669349+0800 VM-0-10-ubuntu turnserver[117817]: 307448: : session 003000000000003810: closed (2nd stage), user <<TURN_USER>> realm <p2p-net> origin <>, local <VPS_LAN>:3478, remote <HOME_IP>:44715, reason: allocation timeout
+2026-09-26T15:23:13.669349+0800 VM-0-10-ubuntu turnserver[117817]: 307448: : session 003000000000003810: delete: realm=<p2p-net>, username=<<TURN_USER>>
+2026-09-26T15:29:59.811419+0800 VM-0-10-ubuntu turnserver[117817]: 307855: : session 003000000000003871: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Wrong nonce
+2026-09-26T15:29:59.811419+0800 VM-0-10-ubuntu turnserver[117817]: 307855: : session 003000000000003871: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:29:59.811419+0800 VM-0-10-ubuntu turnserver[117817]: 307855: : session 003000000000003871: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:29:59.811419+0800 VM-0-10-ubuntu turnserver[117817]: 307855: : session 003000000000003871: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:29:59.811419+0800 VM-0-10-ubuntu turnserver[117817]: 307855: : session 003000000000003871: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:29:59.811419+0800 VM-0-10-ubuntu turnserver[117817]: 307856: : session 003000000000003871: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:30:03.813239+0800 VM-0-10-ubuntu turnserver[117817]: 307858: : session 003000000000003871: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:31:03.479982+0800 VM-0-10-ubuntu turnserver[117817]: 307915: : session 003000000000003871: usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=7, rb=812, sp=7, sb=756
+2026-09-26T15:31:03.479982+0800 VM-0-10-ubuntu turnserver[117817]: 307915: : session 003000000000003871: peer usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=0, rb=0, sp=0, sb=0
+2026-09-26T15:31:03.479982+0800 VM-0-10-ubuntu turnserver[117817]: 307915: : session 003000000000003871: closed (2nd stage), user <<TURN_USER>> realm <p2p-net> origin <>, local <VPS_LAN>:3478, remote <HOME_IP>:45448, reason: allocation watchdog determined stale session state
+2026-09-26T15:38:30.731305+0800 VM-0-10-ubuntu turnserver[117817]: 308361: : session 001000000000004036: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Wrong nonce
+2026-09-26T15:38:30.731305+0800 VM-0-10-ubuntu turnserver[117817]: 308361: : session 001000000000004036: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:38:30.731305+0800 VM-0-10-ubuntu turnserver[117817]: 308361: : session 001000000000004036: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:38:30.731305+0800 VM-0-10-ubuntu turnserver[117817]: 308361: : session 001000000000004036: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:38:30.731305+0800 VM-0-10-ubuntu turnserver[117817]: 308362: : session 001000000000004036: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:38:30.731305+0800 VM-0-10-ubuntu turnserver[117817]: 308363: : session 001000000000004036: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:38:30.732219+0800 VM-0-10-ubuntu turnserver[117817]: 308364: : session 001000000000004036: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:39:25.380135+0800 VM-0-10-ubuntu turnserver[117817]: 308421: : session 001000000000004036: usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=7, rb=812, sp=7, sb=756
+2026-09-26T15:39:25.380135+0800 VM-0-10-ubuntu turnserver[117817]: 308421: : session 001000000000004036: peer usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=0, rb=0, sp=0, sb=0
+2026-09-26T15:39:25.380135+0800 VM-0-10-ubuntu turnserver[117817]: 308421: : session 001000000000004036: closed (2nd stage), user <<TURN_USER>> realm <p2p-net> origin <>, local <VPS_LAN>:3478, remote <HOME_IP>:45352, reason: allocation watchdog determined stale session state
+2026-09-26T15:43:10.632910+0800 VM-0-10-ubuntu turnserver[117817]: 308648: : session 000000000000007590: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Wrong nonce
+2026-09-26T15:43:10.632910+0800 VM-0-10-ubuntu turnserver[117817]: 308648: : session 000000000000007590: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:43:10.632910+0800 VM-0-10-ubuntu turnserver[117817]: 308648: : session 000000000000007590: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:43:12.237613+0800 VM-0-10-ubuntu turnserver[117817]: 308649: : session 000000000000007590: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:43:12.238418+0800 VM-0-10-ubuntu turnserver[117817]: 308649: : session 000000000000007590: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:43:12.238418+0800 VM-0-10-ubuntu turnserver[117817]: 308650: : session 000000000000007590: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:43:16.419326+0800 VM-0-10-ubuntu turnserver[117817]: 308651: : session 000000000000007590: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Stale nonce
+2026-09-26T15:44:10.863115+0800 VM-0-10-ubuntu turnserver[117817]: 308708: : session 000000000000007590: usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=7, rb=812, sp=7, sb=756
+2026-09-26T15:44:10.863115+0800 VM-0-10-ubuntu turnserver[117817]: 308708: : session 000000000000007590: peer usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=0, rb=0, sp=0, sb=0
+2026-09-26T15:44:10.863115+0800 VM-0-10-ubuntu turnserver[117817]: 308708: : session 000000000000007590: closed (2nd stage), user <<TURN_USER>> realm <p2p-net> origin <>, local <VPS_LAN>:3478, remote <HOME_IP>:44340, reason: allocation watchdog determined stale session state

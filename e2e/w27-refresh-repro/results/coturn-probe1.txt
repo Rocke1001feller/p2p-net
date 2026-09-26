@@ -1,0 +1,14 @@
+2026-09-26T16:11:29.867514+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007679: realm <p2p-net> user <>: incoming packet message processed, error 401: Unauthorized
+2026-09-26T16:11:29.868109+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007679: new, realm=<p2p-net>, username=<<TURN_USER>>, lifetime=600
+2026-09-26T16:11:29.868109+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007679: realm <p2p-net> user <<TURN_USER>>: incoming packet ALLOCATE processed, success
+2026-09-26T16:11:29.868109+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007679: refreshed, realm=<p2p-net>, username=<<TURN_USER>>, lifetime=600
+2026-09-26T16:11:29.868109+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007679: realm <p2p-net> user <<TURN_USER>>: incoming packet REFRESH processed, success
+2026-09-26T16:11:29.868109+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007680: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 438: Wrong nonce
+2026-09-26T16:11:29.868109+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007680: realm <p2p-net> user <<TURN_USER>>: incoming packet REFRESH processed, error 437: Invalid allocation
+2026-09-26T16:11:29.868109+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007680: realm <p2p-net> user <<TURN_USER>>: incoming packet message processed, error 437: Invalid allocation
+2026-09-26T16:11:29.868109+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007679: refreshed, realm=<p2p-net>, username=<<TURN_USER>>, lifetime=0
+2026-09-26T16:11:29.868109+0800 VM-0-10-ubuntu turnserver[117817]: 310348: : session 000000000000007679: realm <p2p-net> user <<TURN_USER>>: incoming packet REFRESH processed, success
+2026-09-26T16:11:30.716268+0800 VM-0-10-ubuntu turnserver[117817]: 310349: : session 000000000000007679: usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=4, rb=392, sp=4, sb=396
+2026-09-26T16:11:30.716268+0800 VM-0-10-ubuntu turnserver[117817]: 310349: : session 000000000000007679: peer usage: realm=<p2p-net>, username=<<TURN_USER>>, rp=0, rb=0, sp=0, sb=0
+2026-09-26T16:11:31.678662+0800 VM-0-10-ubuntu turnserver[117817]: 310349: : session 000000000000007679: closed (2nd stage), user <<TURN_USER>> realm <p2p-net> origin <>, local <VPS_LAN>:3478, remote <HOME_IP>:45359, reason: allocation timeout
+2026-09-26T16:11:31.678662+0800 VM-0-10-ubuntu turnserver[117817]: 310349: : session 000000000000007679: delete: realm=<p2p-net>, username=<<TURN_USER>>

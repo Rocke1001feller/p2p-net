@@ -1,0 +1,7 @@
+{"t":"2026-09-26T08:11:27.576Z","mono":1.783,"ev":"meta","scrub":{"username":"<TURN_USER>","turnHost":"<VPS_IP>"},"usernameHash":"fd89d016"}
+{"t":"2026-09-26T08:11:27.613Z","mono":1.819,"ev":"allocated","relayed":"<VPS_IP>:50008","mapped":"<HOME_IP>:45359","nonceLen":16,"realm":"p2p-net","scrubMore":{"mappedIp":"<HOME_IP>"}}
+{"t":"2026-09-26T08:11:27.625Z","mono":1.831,"ev":"armA_same_tuple","outcome":"success","lifetime":600}
+{"t":"2026-09-26T08:11:27.639Z","mono":1.844,"ev":"armB_new_tuple","outcome":"response","from":"<VPS_IP>:3478","bytes":108,"errorCode":438,"attrs":["ERROR-CODE","NONCE","REALM","SOFTWARE","FINGERPRINT"],"hasMessageIntegrity":false,"hasNewNonce":true,"verifiedWithIntegrityKey":false}
+{"t":"2026-09-26T08:11:27.659Z","mono":1.865,"ev":"armC_new_nonce_retry","outcome":"response","bytes":108,"errorCode":437,"attrs":["ERROR-CODE","SOFTWARE","MESSAGE-INTEGRITY","FINGERPRINT"],"hasMessageIntegrity":true}
+{"t":"2026-09-26T08:11:27.672Z","mono":1.877,"ev":"teardown","outcome":"deleted"}
+{"t":"2026-09-26T08:11:27.672Z","mono":1.878,"ev":"done"}
