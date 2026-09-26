@@ -60,6 +60,7 @@ c. 短命 relay 会话 wireBytes 明显小于 appBytes（pair 切换期字节归
 - 结果【实测】：**跨过 17min 老死亡点**（1016s），但 **+1190s（19分50秒）仍死**（session_end reason=failed）。死法与旧 host 不同：coturn 窗口**零 438**，allocation 于 +1113s 死于「allocation timeout」（= 仅 +497s 完成一次 REFRESH，+997s 的第二次 REFRESH 未到达 coturn，600s 静默判死）；**`turn_438_repair` 事件 0 条**（438 修复循环从未被触发——本次根本不是 438 死法）。
 - 未定性：REFRESH#2 缺席原因三候选——Android 页面 ~20min 被冻结（浏览器侧 TURN 客户端停发）/ UDP 单包丢失无重传 / host werift REFRESH 链缺陷。判别实验登记：桌面 werift loopback 复现（排除手机因素）+ host 加 TURN 层 REFRESH 发送日志。
 - 附带：06:38:51Z 一条 upgrade fallback 落在垂死会话上（session_end 后 5s），升级轮对濒死会话的触发纪律待查。
+- **判别结论（任务D，桌面 werift 复现，全链证据见 `e2e/w27-refresh-repro/README.md`）【全部实测】**：死亡链 = 家庭 NAT 在 ~500s 控制面静默后回收 UDP 映射并**重映射新外部端口**（同一客户端 socket 五个不同外部端口铁证）→ REFRESH 从新端口发出 → coturn 按五元组落「幽灵 session」回 438（**不签名**）→ werift 完整性门禁丢弃无签名 438 → 7 发 7 应全无效 TransactionTimeout → werift 失败后睡满 500s → allocation 死于 +600s。三候选裁决：② UDP 丢包**排除**（28/28 包有响应）；③ werift 链缺陷**证实**（机制如上）；① Android 冻结**非必要条件**（Mac 无 Android 100% 复现 coturn 侧形态），但 W2-7 当窗全量零 438（连幽灵 session 都无）形态不同，手机腿更指向「未发出/路径黑洞」，需手机侧仪器另判。**最重推论：TURN 层自愈原理上不可能**（采信 438 拿新 nonce 重签也只在五元组上撞 437 Invalid allocation）——正修方向只有保活防重映射（≤30–60s 轻量流量，对空闲 gather allocation 同样必要）或 ICE 层重建。`turn_438_repair` 对本链永不可能触发（438 在更下层即被丢弃），与「17min 死法消失而本死法仍在」互洽。
 
 ### 3.5 隧道腿僵尸事件（14:0x–14:4x，iPhone 前台四大功能全灭）
 
@@ -72,8 +73,15 @@ c. 短命 relay 会话 wireBytes 明显小于 appBytes（pair 切换期字节归
 5. 代码根因【读码】：`src/tunnel/client.ts` **只有 close 事件驱动重连（指数退避 1→30s），无任何应用层 ping/pong 活性检测**；relay.ts:206 注明 ping/pong 帧纯转发——client 从不发 ping。中间设备（家用 NAT/代理）静默回收会话后，close 事件可迟到数小时（TCP keepalive 默认 2h 量级）→ host 假绿 + 全量隧道客户端 502。今晨 tunnel_reconnect 10–65min 间隔（00:07–05:59Z 共 10 次）= 同一盲区的历史发作记录。
 6. 架构事实（纠正直觉）：**PWA 隧道模式数据面 = 逐请求经网关的无状态设计**（session.ts:261 `fetch(${gw}/s/port/path)`），手机侧无持久连接可被 iOS 后台杀死——本次事件与 iPhone 后台**无关**，纯属 host 腿单点。WebRTC 模式（p2p/relay）才有持久 PC 怕后台。
 
-**登记修复项（待用户拍板立项）**：client.ts 加应用层心跳（ws 标准模式：15–30s `ping()` + pong 看门狗，连续缺席 `terminate()` 触发既有退避重连）+ host status 如实化（腿活性以 pong 为准，不以 readyState 为准）。~30 行 + 单测，与 WebRTC 层 15s pong 看门狗同构，零新增复杂度类别。
+**修复落地（用户已拍板 a+b+c+d，当日完成并部署）**：任务A=client.ts 应用层心跳看门狗（15s `ping()`+连续 2 拍缺席 `terminate()` 交既有退避重连；`HeartbeatOptions` intervalMs/tolerateMisses 可配、计时器可注入；`isAlive`/`onLegDead` 外暴露）；任务B=`tunnelLinks.open` 按 `isAlive` 计数（假绿灯消灭）+ 事件流新增 `tunnel_leg_dead`（sid=relay ip）；任务C/D 见 §3.6。僵尸腿语义变化：从「数小时假绿灯」变为「最坏 ~35s 判死自愈」。
+
+### 3.6 修复落地与部署实录（2026-09-26 下午，swarm 三路并行）
+
+- **合并**：A+B（agent e19273b）→ squash main `577ae79`；C 前台探活（df9d6e6）→ `361d924`；D 判别档案（f89aa07）→ `ab5e705`。合并后全量测试链绿（parallel 504 / serial / parity 68）。
+- **任务C 形态**：`pwa/src/foregroundProbe.ts`（`shouldProbeOnForeground` + 状态机 idle→probing→idle/down，去抖防重入）；双触发=`pageshow persisted=true`（bfcache 恢复无论时长必探）∨ `visibilitychange` 后台 >60s（`?probehidden=` 秒可标定）；探活端点=发现端口 `/services`（全模式最轻，4s 超时）；失败→琥珀黄灯「连接待恢复，点我重试」可点击重探；**pong 心跳刷不熄黄灯**（pong 只证明控制面活，杜绝绿色谎言）；8 单测钉死触发条件与状态迁移。
+- **部署【实测】**：tarball `rocke1001feller-p2p-net-0.2.1.tgz`（sha256 `9b111d69…`）`npm install -g` → `launchctl kickstart -k gui/501/net.p2p-net.server`（≈16:20 CST）；全局包 dist 内核验 heartbeat/tunnel_leg_dead 代码在包；PWA `pwa-dist` rsync 上 VPS（线上 bundle `main-D4P6vgLn.js` 含黄灯文案）；**复测 `/s/3001/` HTTP 200（0.19s）**——僵尸期同请求为 502 `desktop offline`；`tunnel_leg_dead` 计数 0（健康态不触发，符合预期）；Android 真机会话在重启后自然恢复级联。
+- **遗留登记（待拍板立项）**：① W2-7 正修=TURN socket ≤30–60s 保活防 NAT 重映射（对空闲 gather allocation 同样必要）+ 快速失败（refresh 失败不睡满整周期）+ host TURN 层 REFRESH 发送/响应/失败事件（打点参照系=`e2e/w27-refresh-repro`）；② W2-7 手机腿（当窗零 438 形态）需手机侧仪器另判；③ §3.2.2 仪器缺口（隧道腿会话不产生 session 事件）未修。
 
 ## 4. 结论与 cost-model §6.1 回填
 
-（待 §3.4 判别实验与用户对「样本不足」口径的裁决后填：中继率行维持【弱证据】或升【实测-本仓 N=16 方向性信号】，由用户拍板。）
+（待用户对「样本不足」口径的裁决后填：中继率行维持【弱证据】或升【实测-本仓 N=16 方向性信号】，由用户拍板。）
