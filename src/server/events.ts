@@ -20,8 +20,8 @@ import type { Logger } from '../log/logger.js';
 import type { PathType } from '../pathType.js';
 
 export interface SessionEvent {
-  name: 'session_start' | 'session_end' | 'cascade_choice' | 'tunnel_reconnect' | 'upgrade';
-  /** 会话标识：WebRTC 会话为客户端 deviceId；tunnel_reconnect 为 relay ip。 */
+  name: 'session_start' | 'session_end' | 'cascade_choice' | 'tunnel_reconnect' | 'tunnel_leg_dead' | 'upgrade';
+  /** 会话标识：WebRTC 会话为客户端 deviceId；tunnel_reconnect/tunnel_leg_dead 为 relay ip。 */
   sid: string;
   mode?: 'p2p' | 'relay' | 'tunnel';
   rttMs?: number;
@@ -72,7 +72,7 @@ export function aggregateSessions(events: SessionEvent[]): SessionsSummary {
       if (typeof e.mode === 'string') s.mode = e.mode;
       if (typeof e.rttMs === 'number' && Number.isFinite(e.rttMs)) s.rttMs = e.rttMs;
     }
-    // tunnel_reconnect：与会话聚合计数无关
+    // tunnel_reconnect/tunnel_leg_dead：与会话聚合计数无关
   }
 
   const byMode: Record<string, number> = {};

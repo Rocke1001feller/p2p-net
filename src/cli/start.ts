@@ -64,6 +64,11 @@ export interface TunnelClientLike {
   send(obj: unknown): void;
   /** 当前连接是否 OPEN（dc shim 的 readyState 语义来源；断开即丢帧，relay 侧 504 兜底）。 */
   readonly isOpen: boolean;
+  /** 链路活性（心跳口径，2026-09-26 僵尸腿根修）：OPEN 且看门狗未判死——tunnelLinks.open
+   *  以此为准；stub/旧装配无此属性 → 回退 isOpen。 */
+  readonly isAlive?: boolean;
+  /** 心跳判死回调（terminate 前一刻注册）；stub/旧装配可无。 */
+  onLegDead?(cb: () => void): void;
   onFrame(cb: (frame: unknown) => void): void;
   onReconnect(cb: () => void): void;
   close(): void;
@@ -290,7 +295,9 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
             totals,
             sessions: base?.sessions ?? 0,
             byPath: base?.byPath ?? { direct: 0, relay: 0, tunnel: 0, unknown: 0 },
-            tunnelLinks: { open: tunnels.filter((lk) => lk.client.isOpen).length, total: tunnels.length },
+            // open 只数心跳活腿（2026-09-26 僵尸腿根修）：中间设备静默回收 TCP 时 readyState
+            // 可假 OPEN 数小时——以 isAlive 为准（无此属性的 stub/旧装配回退 isOpen）。
+            tunnelLinks: { open: tunnels.filter((lk) => lk.client.isAlive ?? lk.client.isOpen).length, total: tunnels.length },
           };
         })(),
         signaling: host?.signalingHealth?.() ?? null, // 信令面健康（F4 黑洞治理）；stub/旧进程为 null 容错省略
@@ -438,6 +445,12 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
         wsBridge.closeAll();
         log.info('tunnel', '隧道断线重连成功', { ip: relay.ip });
         record({ name: 'tunnel_reconnect', sid: relay.ip }); // ruling #2：sid = relay ip
+      });
+      t.onLegDead?.(() => {
+        // 心跳判死（僵尸腿根修）：terminate 已由客户端发起，退避重连接管恢复；
+        // 在途请求/WebSocket 不等重连成功，这里先如实记事件（status 同刻已按 isAlive 报死）。
+        log.warn('tunnel', '隧道腿心跳缺席判死，已 terminate 交由退避重连接管', { ip: relay.ip });
+        record({ name: 'tunnel_leg_dead', sid: relay.ip }); // 与 tunnel_reconnect 同纪律：sid = relay ip
       });
       // URL 含 token，绝不进日志/stdout
       t.connect(`wss://${relay.ip}/tunnel/desktop?sid=${deviceId}&token=${tunnelToken}`);

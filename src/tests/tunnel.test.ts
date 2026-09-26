@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createTunnelRelay, type TunnelRelay } from '../tunnel/relay.js';
-import { TunnelClient, backoffDelayMs } from '../tunnel/client.js';
+import { TunnelClient, backoffDelayMs, heartbeatAdvance } from '../tunnel/client.js';
 import { decodeFrame } from '../frames.js';
 
 // ---- 工具 ----
@@ -501,5 +501,171 @@ test('TunnelClient：close() 停止重连', async () => {
   await sleep(250);
   assert.equal(conns.length, countAtClose);
   assert.equal(client.isOpen, false);
+  closeServer(server);
+});
+
+// ---- TunnelClient 心跳看门狗（2026-09-26 僵尸腿根修）----
+
+/** 假时钟（注入 TunnelClient）：捕获心跳 interval 回调，测试手动驱动拍点。 */
+class FakeClock {
+  /** 最近一次 setInterval 的间隔（默认应为 15000）。 */
+  ms: number | null = null;
+  cb: (() => void) | null = null;
+  cleared = 0;
+  setInterval(cb: () => void, ms: number): unknown {
+    this.cb = cb;
+    this.ms = ms;
+    return cb;
+  }
+  clearInterval(_handle: unknown): void {
+    this.cleared += 1;
+    this.cb = null;
+  }
+  tick(): void {
+    this.cb?.();
+  }
+}
+
+/** 僵尸化服务端连接：底层 socket 停读——客户端 ping 留在内核缓冲，ws 永不回 pong。 */
+function pauseServerSocket(ws: WebSocket): void {
+  (ws as unknown as { _socket: { pause(): void } })._socket.pause();
+}
+
+test('heartbeatAdvance：pong 复位缺席计数；连续缺席 ≥ 容忍即判死', () => {
+  assert.deepEqual(heartbeatAdvance(1, true, 2), { missed: 0, dead: false }); // pong 到 → 归零
+  assert.deepEqual(heartbeatAdvance(0, false, 2), { missed: 1, dead: false }); // 第 1 次缺席
+  assert.deepEqual(heartbeatAdvance(1, false, 2), { missed: 2, dead: true });  // 第 2 次缺席 → 死
+  assert.deepEqual(heartbeatAdvance(4, false, 2), { missed: 5, dead: true });  // 超容忍仍死
+  assert.deepEqual(heartbeatAdvance(0, false, 1), { missed: 1, dead: true });  // 容忍 1：一拍即死
+});
+
+test('TunnelClient 心跳：连续 2 拍无 pong → 判死 terminate → 既有退避重连接管恢复', async () => {
+  const server = http.createServer();
+  const conns: WebSocket[] = [];
+  const wss = new WebSocketServer({ server });
+  wss.on('connection', (ws) => conns.push(ws));
+  const port = await listen(server);
+
+  const clock = new FakeClock();
+  const client = new TunnelClient({ backoff: { baseMs: 60, maxMs: 300, jitter: 0.2 }, clock });
+  let legDeads = 0;
+  let reconnects = 0;
+  client.onLegDead(() => { legDeads += 1; });
+  client.onReconnect(() => { reconnects += 1; });
+  client.connect(`ws://127.0.0.1:${port}/tunnel/desktop?sid=x&token=y`);
+  await waitFor(() => conns.length === 1 && client.isOpen, 3000, 'first connection');
+  assert.equal(clock.ms, 15_000, 'open 后按默认 15s 间隔起心跳表');
+  assert.equal(client.isAlive, true, '新连接（心跳宽限内）应报活');
+
+  pauseServerSocket(conns[0]); // 僵尸化：ping 发得出，pong 永不回
+  clock.tick(); // 第 1 拍：发 ping，缺席 1
+  await sleep(30);
+  assert.equal(legDeads, 0, '第 1 拍缺席不判死');
+  assert.equal(client.isAlive, true);
+  clock.tick(); // 第 2 拍：缺席 2 → 判死
+  assert.equal(legDeads, 1, '连续 2 拍无 pong 必须触发 onLegDead');
+  assert.equal(client.isAlive, false, '判死即刻如实报死（不等 close 事件）');
+  assert.ok(clock.cleared >= 1, '判死后心跳表已停');
+
+  // terminate → close → 既有退避重连（真定时器小退避）；重连后心跳状态复位
+  await waitFor(() => conns.length >= 2 && reconnects === 1, 3000, 'terminate 后自动重连');
+  await waitFor(() => client.isAlive, 2000, '重连后活性复位');
+  assert.equal(legDeads, 1, '重连成功不得重复判死');
+  client.close();
+  closeServer(server);
+});
+
+test('TunnelClient 心跳：pong 到 → 缺席复位（健康期不误判）；之后僵尸化两拍照死', async () => {
+  const server = http.createServer();
+  const conns: WebSocket[] = [];
+  let serverPings = 0;
+  const wss = new WebSocketServer({ server });
+  wss.on('connection', (ws) => { conns.push(ws); ws.on('ping', () => { serverPings += 1; }); });
+  const port = await listen(server);
+
+  const clock = new FakeClock();
+  // 大退避：判死后重连不在本用例落地，排除干扰
+  const client = new TunnelClient({ backoff: { baseMs: 10_000, maxMs: 30_000, jitter: 0 }, clock });
+  let legDeads = 0;
+  client.onLegDead(() => { legDeads += 1; });
+  client.connect(`ws://127.0.0.1:${port}/tunnel/desktop?sid=x&token=y`);
+  await waitFor(() => conns.length === 1 && client.isOpen, 3000, 'first connection');
+
+  // 健康期 4 拍：每拍 ping 都有真 pong（ws 服务端协议层自动回）→ 缺席恒复位。
+  // 若 pong 不复位，第 2 拍就已被误判死——活过 4 拍即复位得证。
+  for (let i = 1; i <= 4; i++) {
+    clock.tick();
+    await waitFor(() => serverPings >= i, 2000, `服务端应收第 ${i} 个 ping`);
+    await sleep(30); // pong 回程
+  }
+  assert.equal(legDeads, 0);
+  assert.equal(client.isAlive, true);
+
+  pauseServerSocket(conns[0]);
+  // 第 1 拍：消费窗口内最后一个真 pong（ping4 的 pong 健康期已到）→ 缺席归零，不误判
+  clock.tick();
+  assert.equal(legDeads, 0);
+  // 此后两个完整周期无任何 pong → 连续缺席 2 → 判死
+  clock.tick();
+  assert.equal(legDeads, 0);
+  clock.tick();
+  assert.equal(legDeads, 1);
+  assert.equal(client.isAlive, false);
+  client.close();
+  closeServer(server);
+});
+
+test('TunnelClient 心跳：间隔/容忍可配（intervalMs/tolerateMisses 生效）', async () => {
+  const server = http.createServer();
+  const conns: WebSocket[] = [];
+  const wss = new WebSocketServer({ server });
+  wss.on('connection', (ws) => conns.push(ws));
+  const port = await listen(server);
+
+  const clock = new FakeClock();
+  const client = new TunnelClient({
+    backoff: { baseMs: 10_000, maxMs: 30_000, jitter: 0 },
+    heartbeat: { intervalMs: 4_000, tolerateMisses: 3 },
+    clock,
+  });
+  let legDeads = 0;
+  client.onLegDead(() => { legDeads += 1; });
+  client.connect(`ws://127.0.0.1:${port}/tunnel/desktop?sid=x&token=y`);
+  await waitFor(() => conns.length === 1 && client.isOpen, 3000, 'first connection');
+  assert.equal(clock.ms, 4_000, '心跳间隔必须取注入值');
+
+  pauseServerSocket(conns[0]);
+  clock.tick(); // 缺席 1
+  clock.tick(); // 缺席 2——容忍 3，仍活
+  await sleep(30);
+  assert.equal(legDeads, 0, '容忍 3：两拍缺席不得判死');
+  assert.equal(client.isAlive, true);
+  clock.tick(); // 缺席 3 → 死
+  assert.equal(legDeads, 1);
+  client.close();
+  closeServer(server);
+});
+
+test('TunnelClient 心跳：close() 停表，不再 ping、不再判死', async () => {
+  const server = http.createServer();
+  const conns: WebSocket[] = [];
+  let serverPings = 0;
+  const wss = new WebSocketServer({ server });
+  wss.on('connection', (ws) => { conns.push(ws); ws.on('ping', () => { serverPings += 1; }); });
+  const port = await listen(server);
+
+  const clock = new FakeClock();
+  const client = new TunnelClient({ clock });
+  let legDeads = 0;
+  client.onLegDead(() => { legDeads += 1; });
+  client.connect(`ws://127.0.0.1:${port}/tunnel/desktop?sid=x&token=y`);
+  await waitFor(() => conns.length === 1 && client.isOpen, 3000, 'first connection');
+
+  client.close();
+  assert.ok(clock.cleared >= 1, 'close 必须停心跳表');
+  clock.tick(); // close 后拍点不得再 ping
+  await sleep(50);
+  assert.equal(serverPings, 0, 'close 后不得再发 ping');
+  assert.equal(legDeads, 0);
   closeServer(server);
 });

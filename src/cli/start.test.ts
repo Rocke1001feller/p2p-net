@@ -95,6 +95,10 @@ function makeDeps(overrides: MakeOpts = {}) {
   const tunnelUrls: string[] = [];
   /** 逐条隧道捕获 onReconnect 回调（测试手动触发隧道重连事件）。 */
   const reconnectCbs: Array<() => void> = [];
+  /** 逐条隧道捕获 onLegDead 回调（测试手动触发心跳判死）。 */
+  const legDeadCbs: Array<() => void> = [];
+  /** 逐条隧道活性状态（isAlive 测试缝；真客户端由心跳看门狗自治）。 */
+  const tunnelAlive: boolean[] = [];
   /** 逐条隧道捕获 onFrame 回调（隧道数据面测试手动驱动 relay 下发帧）。 */
   const frameCbs: Array<(frame: unknown) => void> = [];
   /** 隧道出站帧（桥经 dc shim → TunnelClient.send 的回帧；JSON 对象形态）。 */
@@ -173,6 +177,8 @@ function makeDeps(overrides: MakeOpts = {}) {
     },
     tunnelFactory: () => {
       calls.push('tunnel.new');
+      tunnelAlive.push(true);
+      const idx = tunnelAlive.length - 1;
       return {
         connect: (url) => {
           calls.push('tunnel.connect');
@@ -182,11 +188,17 @@ function makeDeps(overrides: MakeOpts = {}) {
           sentFrames.push(obj as Record<string, unknown>);
         },
         isOpen: true,
+        get isAlive() {
+          return tunnelAlive[idx];
+        },
         onFrame: (cb) => {
           frameCbs.push(cb);
         },
         onReconnect: (cb) => {
           reconnectCbs.push(cb);
+        },
+        onLegDead: (cb) => {
+          legDeadCbs.push(cb);
         },
         close: () => stops.push('tunnel.close'),
       };
@@ -207,6 +219,8 @@ function makeDeps(overrides: MakeOpts = {}) {
     stops,
     tunnelUrls,
     reconnectCbs,
+    legDeadCbs,
+    tunnelAlive,
     frameCbs,
     sentFrames,
     hostOpts: (): HostAgentOptions => {
@@ -712,6 +726,34 @@ test('F10：隧道腿计量并入 /status 数据面（成本模型补最贵变�
   } finally {
     await handle.stop();
     await new Promise<void>((r) => httpServer.close(() => r()));
+  }
+});
+
+test('隧道腿活性如实化：tunnelLinks.open 只数心跳活腿；判死写 tunnel_leg_dead 事件', async () => {
+  const ctx = makeDeps();
+  const handle = await runStart({}, ctx.deps);
+  try {
+    const links = () =>
+      (ctx.controlStatus() as { dataPlane: { tunnelLinks: { open: number; total: number } } }).dataPlane.tunnelLinks;
+    assert.deepEqual(links(), { open: 2, total: 2 }, '两腿健康 → 全在线');
+
+    // 腿 0 心跳判死：真客户端此时 isAlive 已落 false，随后回调通知宿主（fake 按同序手动驱动）
+    ctx.tunnelAlive[0] = false;
+    ctx.legDeadCbs[0]!();
+
+    assert.ok(
+      ctx.logLines.some((l) => l.event === 'tunnel_leg_dead' && l.sid === '1.1.1.1'),
+      '心跳判死必须写 tunnel_leg_dead（sid = relay ip，与 tunnel_reconnect 同纪律）',
+    );
+    assert.deepEqual(links(), { open: 1, total: 2 }, 'open 只数心跳活腿，不再以 socket readyState 假绿灯');
+
+    // 事件纪律：token/secret 绝不进事件流
+    const ev = JSON.stringify(ctx.logLines.filter((l) => l.event));
+    for (const s of ['tun-secret-hex', 'at-old', 'at-fresh', 'rt-1']) {
+      assert.ok(!ev.includes(s), `事件泄漏秘密: ${s}`);
+    }
+  } finally {
+    await handle.stop();
   }
 });
 

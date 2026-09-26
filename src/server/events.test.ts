@@ -66,6 +66,7 @@ test('聚合：垃圾容忍——end-without-start / 对未开会话发 cascade_
     { name: 'session_end', sid: 'ghost', reason: 'closed' }, // 无 start 的 end：no-op
     { name: 'cascade_choice', sid: 'ghost', mode: 'p2p', rttMs: 5 }, // 无活跃会话的模式更新：忽略
     { name: 'tunnel_reconnect', sid: '1.1.1.1' }, // 与会话计数无关
+    { name: 'tunnel_leg_dead', sid: '1.1.1.1' }, // 与会话计数无关（隧道腿心跳判死事件）
     { name: 'session_start', sid: '' }, // 空 sid：忽略
   ] as SessionEvent[]);
   assert.deepEqual(agg, { active: 0, byMode: {}, avgRttMs: null });
@@ -116,4 +117,13 @@ test('aggregateSessions 容忍 upgrade 事件：不计 active 不影响 byMode',
     { name: 'upgrade', sid: 'a', from: 'relay', to: 'direct', ms: 800 },
   ]);
   assert.equal(s.active, 1);
+});
+
+// ---- 2026-09-26：tunnel_leg_dead 事件（僵尸腿心跳判死）——直写透传、聚合忽略 ----
+
+test('recordSessionEvent：tunnel_leg_dead 直写 log.event（sid = relay ip）', () => {
+  const lines: [string, any][] = [];
+  const log = { event: (n: string, d: any) => lines.push([n, d]) } as any;
+  recordSessionEvent(log, { name: 'tunnel_leg_dead', sid: '2.2.2.2' });
+  assert.deepEqual(lines, [['tunnel_leg_dead', { sid: '2.2.2.2' }]]);
 });
