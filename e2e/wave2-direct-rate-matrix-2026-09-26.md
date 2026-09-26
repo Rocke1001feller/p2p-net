@@ -82,6 +82,25 @@ c. 短命 relay 会话 wireBytes 明显小于 appBytes（pair 切换期字节归
 - **部署【实测】**：tarball `rocke1001feller-p2p-net-0.2.1.tgz`（sha256 `9b111d69…`）`npm install -g` → `launchctl kickstart -k gui/501/net.p2p-net.server`（≈16:20 CST）；全局包 dist 内核验 heartbeat/tunnel_leg_dead 代码在包；PWA `pwa-dist` rsync 上 VPS（线上 bundle `main-D4P6vgLn.js` 含黄灯文案）；**复测 `/s/3001/` HTTP 200（0.19s）**——僵尸期同请求为 502 `desktop offline`；`tunnel_leg_dead` 计数 0（健康态不触发，符合预期）；Android 真机会话在重启后自然恢复级联。
 - **遗留登记（待拍板立项）**：① W2-7 正修=TURN socket ≤30–60s 保活防 NAT 重映射（对空闲 gather allocation 同样必要）+ 快速失败（refresh 失败不睡满整周期）+ host TURN 层 REFRESH 发送/响应/失败事件（打点参照系=`e2e/w27-refresh-repro`）；② W2-7 手机腿（当窗零 438 形态）需手机侧仪器另判；③ §3.2.2 仪器缺口（隧道腿会话不产生 session 事件）未修。
 
+### 3.7 console-hijack 事件（16:2x–16:4x，部署后双机工作台白屏/卡连接）
+
+用户报告：A/B/C/D 部署后 iPhone Safari + Android 双双不可用——badge 绿但工作台白屏或卡「连接中」，刷新无效，「越迭代越差」。systematic-debugging 四阶段取证，根因**与本次修复无关（非回归），系时间巧合叠加既有架构缺口**：
+
+1. **squatter 实证**：本机 MiMo-Code vite dev server（页面 title=OpenCode，PID 22154，**15:56:12 启动**，监听 :3000）被 scanner 发现（name 取 `<title>`），进入服务清单。
+2. **架构缺口**：control `/services` 的 `console` 字段一期恒为 `[]`（占位）；PWA `openWorkbench` 兜底 = 清单**按端口序**首个含 `/s/` 服务 → :3000 恒赢真工作台 :3001。
+3. **劫持链**：手机工作台 iframe 加载 OpenCode vite 壳（body ~200B、4 scripts、空白）→ `looksBooted`（devanywhere-ui 标记）永不通过 → 重载 3 次 → 「工作台没能加载出来」sheet。iPhone CDP 实证 iframe `title:"OpenCode"`。
+4. **时间巧合**：squatter 15:56 出现；我的部署 16:20 kickstart host → PWA 重连重取清单**才首次踩中**——用户时序上紧贴部署，故误判「越迭代越差」。
+5. **排除本次修复**：`tunnel_leg_dead` 零触发（心跳修复无罪）；transient「三种通道均不可达」= 16:26–16:31 三条 relay session_end failed（重启+蜂窝 churn，16:34 自愈），登记 v0.4.x 观察项。
+
+**修复（TDD，squash main `b7f5309`，全量测试绿 518+1+68）**：
+
+- **host 自述**：`config.json` 可选 `consolePort`（1-65535 校验，畸形 fail-closed）；`startDiscovery` 自述 `console=[{url:'/s/<port>/'}]`——**配置了即恒自述**，缺省保持 `[]`（PWA 兜底链接管）。
+- **PWA 加固**：新增 `pwa/src/consolePick.ts`——`pickFallbackPort`（last-good 在清单内→粘性复用；否则清单首个 `/s/` 服务）+ localStorage `p2p.lastConsolePort` 读写（全静默容错）；`openWorkbench` 兜底链第③级换为 `pickFallbackPort`；`looksBooted` 通过即写 last-good。双保险：自述压过一切；自述缺席时 last-good 粘性防新 squatter。
+
+**部署与端到端复验【全部实测】**：tarball 重装 + `config.json` 加 `"consolePort":3001`（jq 合并，0600 保持）→ kickstart。本机 `curl 127.0.0.1:19728/services` → `console:[{url:"/s/3001/"}]` ✔；iPhone CDP `__p2pNetDebug()` → connected/tunnel、`consolePort:3001`、iframe `/s/3001/`（真工作台 DOM 91KB）✔；Android 两 tab（旧 bundle 残留仍指向 /s/3000/ OpenCode）**刷新后** → connected/turn、`consolePort:3001`、iframe `/s/3001/`、title `DevAnyWhere` ✔。**教训：PWA 修复类部署后双机必须强刷取新 bundle，后台驻留页不自动更新。**
+
+**切割口径（v0.3.x）**：squatter（MiMo-Code vite）未杀，保留无妨——console 自述已压过它；NAT 重映射正修（W2-7）不在本窗，划 v0.4.x。
+
 ## 4. 结论与 cost-model §6.1 回填
 
 （待用户对「样本不足」口径的裁决后填：中继率行维持【弱证据】或升【实测-本仓 N=16 方向性信号】，由用户拍板。）
