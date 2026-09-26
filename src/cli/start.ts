@@ -40,6 +40,7 @@ import { startSelfcheck } from '../server/selfcheck.js';
 import { loadAuth, loadConfig, resolveUpgradeWheel, saveAuth, saveConfig, type AppConfig } from '../server/store.js';
 import { TunnelClient } from '../tunnel/client.js';
 import { TunnelMeter } from '../tunnel/meter.js';
+import { installTurn438Repair } from '../turn-repair.js';
 
 /** 控制面/发现端点的最小收尾面（生产为 node:http Server，测试注入假 server）。 */
 export interface ServerLike {
@@ -116,6 +117,9 @@ const RTT_EMIT_THRESHOLD_MS = 15;
 export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = {}): Promise<StartHandle> {
   const dir = deps.configDir ?? join(homedir(), '.p2p-net');
   const log = deps.log ?? createLogger({ dir: join(dir, 'logs'), comp: 'cli-start' });
+  // W2-7：werift TURN 438 恢复循环（任何 Peer/TurnProtocol 存在之前装上；幂等）。
+  // 根因与证据：e2e/n3-turn-transport-and-coturn-forensics.md §2.5（17min 死亡定时器）。
+  installTurn438Repair({ onEvent: (e) => log.event('turn_438_repair', { ...e }) });
   const out = deps.out ?? ((line: string) => console.log(line));
   const printQr = deps.printQr ?? ((text: string) => qrcode.generate(text, { small: true }, (qr: string) => out(qr)));
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
