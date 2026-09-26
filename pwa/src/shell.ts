@@ -22,7 +22,7 @@
 import jsQR from 'jsqr';
 import { SignalingClient } from 'p2p-net/browser';
 import {
-  fetchTurnCredentials, loginByPassword, loginByTicket, parseScan, bindPhone, supabase,
+  ensureHostLabel, fetchTurnCredentials, loginByPassword, loginByTicket, parseScan, bindPhone, supabase,
   type ScanPayload,
 } from './cloud.js';
 import { loadRuntimeConfig, type RuntimeConfig } from './config.js';
@@ -799,7 +799,8 @@ function setConnTitleSafe(): void {
 // ---- 登录（扫码免密 + 账号密码，Q3 双真） ----
 async function ensureBindPhone(): Promise<void> {
   if (localStorage.getItem(LS_DEVICE_ID)) return;
-  const bound = await bindPhone('p2p-net-pwa');
+  // 设备标签必须每安装唯一（ensureHostLabel）：常量会让同账号所有手机绑到同一行 device（双机撞车根因）
+  const bound = await bindPhone(ensureHostLabel(localStorage));
   localStorage.setItem(LS_DEVICE_ID, bound.deviceId);
   log(`[auth] 已绑定 phone 设备 ${bound.deviceId.slice(0, 8)}…`);
 }
@@ -814,7 +815,7 @@ async function handlePair(raw: string): Promise<void> {
     const { data } = await (await supabase()).auth.getSession();
     if (!data.session) {
       if (statusEl) statusEl.textContent = '扫码登录中…';
-      await loginByTicket(pair.ticket, 'p2p-net-pwa');
+      await loginByTicket(pair.ticket, ensureHostLabel(localStorage));
     }
     await ensureBindPhone();
     const sess = await (await supabase()).auth.getSession();

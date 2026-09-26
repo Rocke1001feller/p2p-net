@@ -9,6 +9,7 @@
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { loadRuntimeConfig, type RuntimeConfig } from './config.js';
+import { LS_HOST_LABEL } from './constants.js';
 
 let cfgPromise: Promise<RuntimeConfig> | null = null;
 function getCfg(): Promise<RuntimeConfig> {
@@ -98,6 +99,23 @@ export async function loginByTicket(ticket: string, deviceLabel: string): Promis
 }
 
 export interface BindResult { deviceId: string }
+
+/**
+ * 每安装稳定的本机设备标签（2026-09-26 双机撞车根修）：bind_device_auth 幂等键是
+ * (user_id, role, hostname)，hostname 传常量 'p2p-net-pwa' 时同账号所有手机绑到同一行
+ * device → 同 deviceId 双活乒乓换绑。首调生成 `p2p-net-pwa-<rand8>` 落 localStorage，
+ * 之后恒返回同一值；bind/login 的设备标签一律取它。
+ */
+export function ensureHostLabel(
+  storage: Pick<Storage, 'getItem' | 'setItem'>,
+  rand: () => string = () => crypto.randomUUID(),
+): string {
+  const existing = storage.getItem(LS_HOST_LABEL);
+  if (existing) return existing;
+  const label = `p2p-net-pwa-${rand().replace(/[^0-9a-f]/gi, '').slice(0, 8).toLowerCase()}`;
+  storage.setItem(LS_HOST_LABEL, label);
+  return label;
+}
 
 /** 账号密码登录（不在电脑旁场景）：Supabase Auth 现成链路，登录后与扫码用户同域。 */
 export async function loginByPassword(email: string, password: string): Promise<void> {

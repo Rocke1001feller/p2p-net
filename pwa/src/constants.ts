@@ -25,6 +25,10 @@ export const LS_DEVICES = 'p2p-net.pwa.devices';
 /** 接入类型手动标注键（Wave 2 W2-1）：「我的」tab select 写入；offer meta.access 优先取它。 */
 export const LS_ACCESS = 'p2p-net.pwa.access';
 
+/** 本机设备标签键（2026-09-26 双机撞车根修）：ensureHostLabel 首调生成后持久；
+ *  bind_device_auth 幂等键 (user_id, role, hostname) 靠它区分同账号多台手机。 */
+export const LS_HOST_LABEL = 'p2p-net.pwa.hostLabel';
+
 /** 级联超时（顺序：P2P 直连 → 反向隧道 → TURN；relay 仅兜底控成本）。 */
 export const CASCADE_TIMEOUT_MS = { p2p: 10_000, p2pFull: 15_000, tunnel: 6_000, turn: 15_000 } as const;
 
