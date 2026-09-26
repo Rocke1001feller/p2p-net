@@ -86,7 +86,31 @@ export function isStallOn(): boolean {
   return stallOn;
 }
 
+/**
+ * 前台探活黄灯（2026-09-26）：回前台探活失败 → 徽章转琥珀「连接待恢复，点我重试」，
+ * 点击标题重试（shell 接线）。与 stall 并存但语义分层：stall=「慢疑似」（在途无回帧），
+ * 本灯=「死已证」（探活请求本身失败）。setStatus 不熄灭本灯——pong 只证明控制面活着，
+ * 只有探活成功或会话变迁（非 connected 状态到达）才能熄灭。
+ */
+let probeDown = false;
+/** 最近一次 setStatus 入参：黄灯点亮/熄灭时按此全权重绘。 */
+let lastStatus: CascadeStatus | null = null;
+let lastDeviceName = '';
+
+export function isProbeDown(): boolean {
+  return probeDown;
+}
+
+export function setProbeDown(on: boolean): void {
+  if (on === probeDown) return;
+  probeDown = on;
+  if (lastStatus) setStatus(lastStatus, lastDeviceName); // 全权重绘（connected 分支据 probeDown 覆盖）
+}
+
 export function setStatus(s: CascadeStatus, deviceName: string): void {
+  lastStatus = s;
+  lastDeviceName = deviceName;
+  if (s.state !== 'connected') probeDown = false; // 会话变迁/断开：探活黄灯作废（新状态已是最真交代）
   const dot = $('connDot');
   const title = $('connTitle');
   const rtt = $('connRtt');
@@ -105,6 +129,13 @@ export function setStatus(s: CascadeStatus, deviceName: string): void {
     title.append(b, ' ', badge);
     rtt.textContent = s.rttMs !== undefined ? `${Math.round(s.rttMs)} ms` : '';
     if (stallOn) dot.style.background = '#B26A00'; // stall 示警优先级高于模式色（双驱动交汇点）
+    if (probeDown) {
+      // 前台探活失败黄灯（覆盖模式徽章与 RTT）：数据面已证死，绿色落点是谎言
+      dot.style.background = '#B26A00';
+      badge.className = 'badge warn';
+      badge.textContent = '连接待恢复，点我重试';
+      rtt.textContent = '';
+    }
     $('btnDisconnect').classList.remove('hidden');
   } else if (s.state === 'connecting') {
     dot.style.background = 'var(--conn)';

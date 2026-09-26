@@ -40,10 +40,11 @@ import { livenessFromQuery } from './livenessConfig.js';
 import {
   hideConnecting, hideSheets, log, renderDevices, setMe, setStatus, showConnecting,
   showOfflineSheet, showPasteSheet, showScreen, showTab, setWorkspaceEnabled, toast,
-  connectingStage, wechatGuard, showBrowserHint, setStall,
+  connectingStage, wechatGuard, showBrowserHint, setStall, setProbeDown, isProbeDown,
   type SavedDevice,
 } from './ui.js';
 import { stallSuspect } from './stall.js';
+import { ForegroundProbe, FOREGROUND_PROBE_HIDDEN_MS, FOREGROUND_PROBE_TIMEOUT_MS } from './foregroundProbe.js';
 import { onConnectFailure, onConnectStopped } from './reconnectPolicy.js';
 import { bootConnectTarget } from './bootPolicy.js';
 
@@ -547,6 +548,47 @@ window.addEventListener('online', () => {
   }
 });
 
+/**
+ * 前台探活（2026-09-26，隧道僵尸腿事件的 PWA 侧兜底；判定/状态机见 foregroundProbe.ts）。
+ *
+ * 要灭掉的谎言：浏览器后台数小时后回前台，host 隧道腿早已被静默回收（网关 502），
+ * 但 PWA 数据面逐请求无状态——没流量就没失败，徽章停在旧绿灯，四大功能静默全灭。
+ * pageshow persisted（bfcache 恢复）与 visibilitychange→visible 双监听（iOS 恢复时
+ * 可能连发，ForegroundProbe 内去抖）；后台时长由 hidden 时刻差值给出，超阈才探。
+ */
+let hiddenAt: number | null = null;
+const foregroundProbe = new ForegroundProbe({
+  sessionActive: () => !!cascade?.isOpen,
+  probe: async () => {
+    // 最轻的现有 session 端点：发现端口 GET /services（tunnel=网关 HTTP，dc=数据通道帧）。
+    // 口径同开窗闸门 dataPlaneAlive：拿到上游真实应答即活；502/503/504（合成失败）即死。
+    log('[probe] 回前台探活…');
+    try {
+      const res = await fetchVia(activeDiscoveryPort ?? DISCOVERY_PORT, '/services', FOREGROUND_PROBE_TIMEOUT_MS);
+      const ok = dataPlaneAlive(res.status);
+      log(`[probe] 探活${ok ? `成功（HTTP ${res.status}）→ 恢复原状态` : `失败（HTTP ${res.status}）→ 黄灯待恢复`}`);
+      return ok;
+    } catch (e) {
+      log(`[probe] 探活失败（${(e as Error).message}）→ 黄灯待恢复`);
+      return false;
+    }
+  },
+  setDown: (on) => setProbeDown(on),
+}, (() => { // ?probehidden=（秒）真机标定，同 livenessFromQuery 惯例
+  const v = Number(Q.get('probehidden'));
+  return Number.isFinite(v) && v > 0 ? Math.round(v * 1000) : FOREGROUND_PROBE_HIDDEN_MS;
+})());
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+  if (document.visibilityState === 'visible') {
+    void foregroundProbe.onForeground(hiddenAt === null ? null : Date.now() - hiddenAt, false);
+  }
+});
+window.addEventListener('pageshow', (ev) => {
+  if (ev.persisted) void foregroundProbe.onForeground(hiddenAt === null ? null : Date.now() - hiddenAt, true);
+});
+
 function stopSession(): void {
   manualStop = true;
   wasConnected = false;
@@ -1037,6 +1079,12 @@ $id('btnEye').onclick = () => {
 $id('btnPasswordLogin').onclick = () => void passwordLogin();
 $id('lnkClaim').onclick = () => toast('账号由初始化（p2p-net init）时创建，请在电脑端查看');
 $id('btnDisconnect').onclick = () => stopSession();
+// 前台探活黄灯「连接待恢复，点我重试」：点击标题即重试探活（仅黄灯亮时响应）
+$id('connTitle').onclick = () => {
+  if (!isProbeDown()) return;
+  log('[probe] 用户点击重试探活');
+  void foregroundProbe.retry();
+};
 $id('btnLogout').onclick = () => {
   void supabase().then((s) => s.auth.signOut()).then(() => {
     localStorage.removeItem(LS_UID);
@@ -1089,6 +1137,7 @@ $id('btnPastePair2').onclick = openPaste;
   gen: cascadeGen,
   inflightSw: inflightSw.size,
   stall: checkStall(),
+  probeDown: isProbeDown(),
   // 帧账本：sent/res 差距大 = 回程丢帧；lastHung 直接给出是哪些路径没回来
   frames: {
     sent: frameLedger.sent,
