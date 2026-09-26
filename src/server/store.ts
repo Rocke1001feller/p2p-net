@@ -16,6 +16,9 @@ export interface AppConfig {
   /** 隧道共享密钥（start 运行时 HMAC(tunnelSecret, deviceId) 拼隧道 token）。0600 落盘，不进日志/stdout。 */
   tunnelSecret: string;
   relays: { ip: string }[];
+  /** 可选：工作台 console 自述端口（/services 的 console 字段由此出）。
+   *  缺省不占位——PWA 按 last-good/清单首个兜底选择；配置后压过清单端口序，防低位端口劫持。 */
+  consolePort?: number;
   deviceId?: string;
   /** 升级轮（W2-6，可选段，缺省全开）：relay 暖场会话后台原位升级直连。 */
   upgradeWheel?: { enabled?: boolean; warmMs?: number; observeMs?: number; maxAttempts?: number };
@@ -50,6 +53,10 @@ export function loadConfig(dir: string): AppConfig {
     !Array.isArray(o.relays) || o.relays.some((r) => typeof (r as { ip?: unknown })?.ip !== 'string')
   ) {
     throw new ConfigError(`配置 ${p} 字段缺失或畸形（需要 supabaseUrl/publishableKey/tunnelSecret/relays），请重跑 p2p-net init 重建`);
+  }
+  if (o.consolePort !== undefined &&
+    (!Number.isInteger(o.consolePort) || (o.consolePort as number) < 1 || (o.consolePort as number) > 65535)) {
+    throw new ConfigError(`配置 ${p} 的 consolePort 必须是 1-65535 的整数（当前：${JSON.stringify(o.consolePort)}），修正后重试或删除该键`);
   }
   return o as AppConfig;
 }

@@ -47,6 +47,7 @@ import { stallSuspect } from './stall.js';
 import { ForegroundProbe, FOREGROUND_PROBE_HIDDEN_MS, FOREGROUND_PROBE_TIMEOUT_MS } from './foregroundProbe.js';
 import { onConnectFailure, onConnectStopped } from './reconnectPolicy.js';
 import { bootConnectTarget } from './bootPolicy.js';
+import { pickFallbackPort, readLastGoodPort, writeLastGoodPort } from './consolePick.js';
 
 const Q = new URLSearchParams(location.search);
 const DEV_MODE = Q.get('dev') === '1';
@@ -686,15 +687,17 @@ async function fetchServices(): Promise<void> {
   });
 }
 
-/** 工作台直载：控制台端口**只能**来自桌面自述（载荷 console / 服务清单）。
- *  console 字段形态：字符串 '/s/<port>/'（旧）或数组占位（p2p-net 一期为 []，字段保留）。 */
+/** 工作台直载：端口解析优先级——①桌面自述（载荷 console：字符串 '/s/<port>/' 或数组 [{url}]，
+ *  host 配置 consolePort 后恒自述）；②清单中 p2p-net 服务；③last-good 兜底（pickFallbackPort：
+ *  上次成功端口仍在清单内则粘性复用，否则清单首个 /s/ 服务）——③防任意低位端口新监听者
+ *  （如本机 vite dev server）抢占「首个服务」把工作台 iframe 劫持到错误应用。 */
 async function openWorkbench(list?: { console?: string | { url?: string }[] }): Promise<void> {
   const consoleField = list?.console;
   const consolePath = typeof consoleField === 'string' ? consoleField
     : Array.isArray(consoleField) ? (consoleField[0]?.url ?? '') : '';
   const cport = Number(consolePath.match(/^\/s\/(\d+)\//)?.[1])
     || currentServices.find((s) => s.name === 'p2p-net')?.port
-    || Number(currentServices.find((s) => (s.url || '').includes('/s/'))?.port);
+    || (pickFallbackPort(currentServices, readLastGoodPort(localStorage)) ?? NaN);
   if (!Number.isInteger(cport) || cport <= 0) {
     showOfflineSheet(deskName, '桌面未自述工作台端口，无法打开。请更新桌面端后重试。', () => {
       servicesFetched = false;
@@ -784,6 +787,7 @@ function scheduleHealthChecks(port: number, tab: TabEntry, step = 0): void {
     if (looksBooted(tab.iframe.contentDocument)) {
       if (!tab.booted) log('[workbench] 首屏已就绪');
       tab.booted = true;
+      writeLastGoodPort(localStorage, port);
       return;
     }
     if (step < HEALTH_CHECK_DELAYS_MS.length - 1) { scheduleHealthChecks(port, tab, step + 1); return; }

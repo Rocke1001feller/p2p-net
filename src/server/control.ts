@@ -3,7 +3,9 @@
  *  - 控制面 CONTROL_PORT：GET /status 透传 getStatus()（{uptime,deviceId,sessions,services,mode}
  *    真聚合形态由 Task 19 在 start.ts 填充；本文件只做原样透传，不理解字段）。
  *  - 发现端点 DISCOVERY_PORT：GET /services → { console, services, self }；
- *    console 一期为空数组占位（字段保留），services 由 Task 15 scanner 清单映射为 { name, url: '/s/<port>/' }。
+ *    console 由可选 consolePort 自述（缺省空数组占位，PWA 按 last-good/清单首个兜底选择；
+ *    配置后压过清单端口序——2026-09-26 console-hijack：低位端口新监听者曾劫持工作台 iframe），
+ *    services 由 Task 15 scanner 清单映射为 { name, url: '/s/<port>/' }。
  *  端口占用必须同步抛人话：node:http 的 EADDRINUSE 只经异步 'error' 事件送达，listen+on('error')
  *  无法满足「启动即知占用」的同步语义，故 listen 前用 execFileSync(lsof/ss) 同步预检
  *  （argv 数组、无 shell——Task 15 已立的 plan 特许 OS 内省先例，此处同例外）；
@@ -40,15 +42,18 @@ export function startControlPlane(opts: { log: Logger; getStatus(): unknown; por
   return srv;
 }
 
-/** 发现端点：GET /services → { console: [], services: [{name,url}], self: {deviceId} }。port 缺省取契约 DISCOVERY_PORT；测试传 0 走 OS 动态端口。 */
-export function startDiscovery(opts: { log: Logger; getServices(): ServiceInfo[]; deviceId(): string; port?: number }): Server {
+/** 发现端点：GET /services → { console, services: [{name,url}], self: {deviceId} }。
+ *  consolePort 可选注入：配置即自述（哪怕该端口当前不在清单——fail-closed 指向正确目标，
+ *  好过被低位端口劫持）；缺省 console=[] 由 PWA 兜底。port 缺省取契约 DISCOVERY_PORT；测试传 0 走 OS 动态端口。 */
+export function startDiscovery(opts: { log: Logger; getServices(): ServiceInfo[]; deviceId(): string; consolePort?: () => number | null; port?: number }): Server {
   const port = opts.port ?? PORTS.DISCOVERY_PORT;
   assertPortFree(port);
   const srv = createServer((req, res) => {
     try {
       if (req.method === 'GET' && pathOf(req.url) === '/services') {
+        const cp = opts.consolePort?.() ?? null;
         sendJson(res, 200, {
-          console: [],
+          console: cp !== null && Number.isInteger(cp) && cp > 0 ? [{ url: `/s/${cp}/` }] : [],
           services: opts.getServices().map((s) => ({ name: s.name, url: `/s/${s.port}/` })),
           self: { deviceId: opts.deviceId() },
         });

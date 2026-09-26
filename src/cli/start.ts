@@ -94,7 +94,7 @@ export interface RunStartDeps {
   bindDeviceFn?: typeof bindDeviceAuth;
   createScannerFn?: typeof createScanner;
   startControlPlaneFn?: (opts: { log: Logger; getStatus(): unknown }) => ServerLike;
-  startDiscoveryFn?: (opts: { log: Logger; getServices(): ServiceInfo[]; deviceId(): string }) => ServerLike;
+  startDiscoveryFn?: (opts: { log: Logger; getServices(): ServiceInfo[]; deviceId(): string; consolePort?: () => number | null }) => ServerLike;
   hostAgentFactory?: (opts: HostAgentOptions) => HostAgentLike;
   tunnelFactory?: () => TunnelClientLike;
   issuePairingTicketFn?: (cfg: AppConfig, accessToken: string) => Promise<{ ticketId: string }>;
@@ -305,7 +305,7 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
     });
     teardowns.push(() => closeServer(control));
     const startDiscoveryFn = deps.startDiscoveryFn ?? startDiscovery;
-    discovery = startDiscoveryFn({ log, getServices: () => scanner.list(), deviceId: () => deviceId! });
+    discovery = startDiscoveryFn({ log, getServices: () => scanner.list(), deviceId: () => deviceId!, consolePort: () => cfg.consolePort ?? null });
     teardowns.push(() => closeServer(discovery));
 
     // 7) HostAgent（WebRTC 主路径；构造后需 start() 才开始信令轮询）

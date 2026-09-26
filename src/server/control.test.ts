@@ -89,3 +89,17 @@ test('发现端口被占时同样同步抛人话', async (t) => {
     new RegExp(`${port} 被占用`),
   );
 });
+
+test('/services：配置 consolePort 时 console 自述该端口（console-hijack 修复）', async (t) => {
+  const srv = startDiscovery({
+    log: nullLogger, port: 0,
+    getServices: () => [{ port: 3000, name: 'OpenCode' }, { port: 3001, name: 'DevAnyWhere' }],
+    deviceId: () => 'd',
+    consolePort: () => 3001,
+  });
+  t.after(() => { srv.close(); srv.closeAllConnections(); });
+  const port = await listening(srv);
+  const r = await fetch(`http://127.0.0.1:${port}/services`).then((x) => x.json());
+  assert.deepEqual(r.console, [{ url: '/s/3001/' }], 'console 自述必须压过清单端口序（防低位端口劫持）');
+  assert.deepEqual(r.services.map((s: { name: string }) => s.name), ['OpenCode', 'DevAnyWhere']);
+});

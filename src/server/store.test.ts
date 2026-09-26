@@ -53,3 +53,17 @@ test('config 落盘回读：upgradeWheel 段原样往返', () => {
   const back = loadConfig(dir);
   assert.deepEqual(back.upgradeWheel, { enabled: false, warmMs: 5000 });
 });
+
+// console-hijack 修复：可选 consolePort（工作台 console 自述端口）校验
+test('config：可选 consolePort 合法值往返、缺省兼容、畸形拒绝', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'p2p-net-store-'));
+  const base = { supabaseUrl: 'https://x.supabase.co', publishableKey: 'k', tunnelSecret: 's', relays: [{ ip: '1.2.3.4' }] };
+  saveConfig(dir, { ...base, consolePort: 3001 });
+  assert.equal(loadConfig(dir).consolePort, 3001);
+  saveConfig(dir, base); // 缺省不写 → 读回无此键（向后兼容既有 config.json）
+  assert.equal(loadConfig(dir).consolePort, undefined);
+  for (const bad of ['3001', 0, 65536, 1.5, -1, true]) {
+    saveConfig(dir, { ...base, consolePort: bad as never });
+    assert.throws(() => loadConfig(dir), /consolePort/, `bad=${JSON.stringify(bad)}`);
+  }
+});

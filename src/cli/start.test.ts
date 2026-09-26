@@ -90,7 +90,7 @@ function makeDeps(overrides: MakeOpts = {}) {
   let savedAuth: unknown;
   let savedConfig: AppConfig | undefined;
   let controlGetStatus: (() => unknown) | undefined;
-  let discoveryArgs: { getServices(): ServiceInfo[]; deviceId(): string } | undefined;
+  let discoveryArgs: { getServices(): ServiceInfo[]; deviceId(): string; consolePort?: () => number | null } | undefined;
   let ensureCalls = 0;
   const tunnelUrls: string[] = [];
   /** 逐条隧道捕获 onReconnect 回调（测试手动触发隧道重连事件）。 */
@@ -161,7 +161,7 @@ function makeDeps(overrides: MakeOpts = {}) {
       controlGetStatus = o.getStatus;
       return fakeServer('control');
     }) as typeof startControlPlane,
-    startDiscoveryFn: ((o: { getServices(): ServiceInfo[]; deviceId(): string }) => {
+    startDiscoveryFn: ((o: { getServices(): ServiceInfo[]; deviceId(): string; consolePort?: () => number | null }) => {
       calls.push('discovery');
       if (overrides.throwAtDiscovery) throw overrides.throwAtDiscovery;
       discoveryArgs = o;
@@ -241,6 +241,10 @@ function makeDeps(overrides: MakeOpts = {}) {
     discoveryDeviceId: () => {
       assert.ok(discoveryArgs);
       return discoveryArgs.deviceId();
+    },
+    discoveryConsolePort: () => {
+      assert.ok(discoveryArgs);
+      return discoveryArgs.consolePort ? discoveryArgs.consolePort() : undefined;
     },
   };
 }
@@ -775,5 +779,22 @@ test('401 续期接线：onAuthFailure 触发即时续期（并发防重入）�
     assert.equal(ctx.ensureCallCount(), n0 + 2, '非在途的再次回调应再次续期');
   } finally {
     await handle.stop();
+  }
+});
+
+test('发现端点 console 自述：cfg.consolePort 透传；缺省为 null 保持空占位（console-hijack 修复）', async () => {
+  const ctx = makeDeps({ cfg: { ...CFG, consolePort: 3001 } });
+  const handle = await runStart({}, ctx.deps);
+  try {
+    assert.equal(ctx.discoveryConsolePort(), 3001, 'consolePort 必须自述给发现端点（压过清单端口序，防低位端口劫持）');
+  } finally {
+    await handle.stop();
+  }
+  const ctx2 = makeDeps();
+  const handle2 = await runStart({}, ctx2.deps);
+  try {
+    assert.equal(ctx2.discoveryConsolePort(), null, '缺省 console 保持空占位（PWA last-good/首服务兜底）');
+  } finally {
+    await handle2.stop();
   }
 });
