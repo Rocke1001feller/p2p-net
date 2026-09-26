@@ -1,6 +1,6 @@
 {
   "name": "@rocke1001feller/p2p-net",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Self-hosted WebRTC remote-access data plane: your Supabase + your VPS = phone-to-desktop in 5 minutes",
   "keywords": [
     "webrtc",
