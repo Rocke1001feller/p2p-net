@@ -143,3 +143,38 @@ c. 短命 relay 会话 wireBytes 明显小于 appBytes（pair 切换期字节归
 **开放观察项（登记 v0.4.x）**：
 - forceTurn × TunnelBackcheck：relay tab 60s 探活成功即触发重级联，但 Q 重解析仍 forceTurn → 落回 turn，呈 ~60-90s 周期级回迁环（host 侧 14:04:14/14:06:13 两条 `session_end replaced` 疑似此形态）。dev-only 路径、生产无感，但 relay 长 soak 会周期重分配——v0.4.x TURN 正修时一并定夺（候选：forceTurn 时禁 arm backcheck）。
 - 实验 tab 与生产 tab 共享同源 `localStorage p2p.lastLinkMode`：实验落点会写入生产记忆键。当前无害（'turn' 不改段序、'tunnel' 即生产期望），登记。
+
+### 3.10 W-A 旁路采纳死亡循环根因定罪与修复（v0.3.1 后 hotfix，`aae0747`）
+
+**现象（v0.3.1 真机，用户双机大规模测试 22:5x–23:3x）**：iPhone ~8 次 / Android ~2 次同形态循环——隧道稳定 → +60s 旁路 p2p 建成并采纳 → ~30–40s 数据停滞 → 看门狗判死重级联 → `[workbench] 数据面已重连 → 重建工作台`（每 ~2min 一轮）。工作台重载冲掉用户工作现场，是 W-B 主诉的最大驱动源。
+
+**根因（行级+日志双证，已定罪）**：
+
+1. host 给每条新 PeerSession 装 UpgradeWheel（`src/host.ts:612`）。旁路会话由 PWA 以 `iceTransportPolicy:'all'`（STUN-only）构造（`pwa/src/shell.ts` attemptP2pUpgrade），在本象限（nat=endpoint-dependent，§4）于 host 侧落 TURN relay → wheel +10s 触发 ICE restart。
+2. PWA 应答侧 `performUpgrade()` → werift 0.24.4 应答侧 `restart()` 将 `nominated=undefined`（`node_modules/werift/lib/ice/src/ice.js:648`）→ `canSendApplicationData()=false`（ice.js:1075）→ `send()` 首行**静默 return**（ice.js:442）——host→PWA 单向黑洞：不抛错、不打日志。
+3. PWA→host 方向经 `userHistory` 旧凭据继续入向（host 侧 bytesUp 涨、bytesDown 冻结），呈「半双工尸检相」。
+4. 蜂窝重新提名耗时 > `livenessMs=15s`（`pwa/src/livenessConfig.ts:19`）→ PWA 判死重级联；wheel +25s 第二次 restart 炸毁第一次的恢复 → 循环。
+5. 在盘证据：`service.log` `ICE consent 复活` 116→120 + 成群 `addIce 兜底成功（去 ufrag）`。同机制解释用户先前报告的「主 p2p 腿落 relay 极度不稳定」——主 p2p 腿落 relay 时 wheel 同样重启杀死它。
+6. 伪影登记：`cascade_choice` 无 rttMs 的 mode=p2p 记录是 `src/cli/start.ts:235` `pairType ?? 'p2p'` 默认值填充，非真实直连——读数时须以有无 rttMs 区分。
+
+**修复（`aae0747`，TDD，全量 npm test 绿）**：
+
+- **Fix C**（`pwa/src/signaling-web.ts` poll 分支）：`upgrade` 帧仅当本会话 `iceTransportPolicy==='relay'`（turn 段，W2-6 升级轮唯一设计对象）才 `performUpgrade()`；`'all'` 起跑（旁路）收到 upgrade 帧直接忽略——host 轮观测窗耗尽落 fallback 终态，无害。测试：原 upgrade 三例迁至 relay 构造面 + 新增两例（'all'/缺省 policy 忽略、零 setConfiguration 零 restart offer），signaling-web 17/17。
+- **Fix B1**（`pwa/src/shell.ts` attemptP2pUpgrade）：采纳门禁——旁路 isOpen 后等 selectedPair stats（复用 `P2P_UPG_WAIT_MS=10s` 总 deadline），`pairTypeFromStats !== 'p2p'`（双侧规则，`src/status.ts:16-27`：local 或 remote 任一端 relay 即判 relay）或超时未明 → **不采纳、保持隧道**，日志 `[p2pupg] 旁路落中继（非直连）→ 不采纳，保持隧道`，finally 拆旁路。harness `installFakeRtc` 新增 `stats:'direct'|'relay'|'none'` 注入；新增 `shell-upgrade-relay.test.ts`（恒隧道+日志+退避重试+stopSession 清场）3/3。
+
+**部署**：`npm run build` + `npm run build:pwa` → rsync 49.233.155.13（新 bundle 指纹 `assets/main-DAA3rQU-.js`）→ 双机 CDP `Page.reload{ignoreCache:true}` 确认加载新构建。host 侧零改动（pid 70675 未重装）。
+
+**真机验证【全部实测】**（23:40:38–23:46:43 本地 13 拍双机 CDP 监视 + 23:52 复查）：
+
+1. **死亡循环清零**：双机 mode 恒 `tunnel`，零工作台重建 / 零重级联 / 零链路终结——对照修复前每 ~2min 一轮。
+2. **门禁实弹拦截**：监视窗内 Android 2 次旁路落 relay 被拦（23:40:36/23:42:45），窗后 Android +1（23:46:51）、iPhone +1（23:46:52）——全部「不采纳，保持隧道」。被拦的正是过去采纳后必死的那类会话（本象限旁路必落 relay，§4）。
+3. iPhone 另有 2 次旁路停在建连阶段（`upgrade_wait_timeout` / `Fetch is aborted`）——§3.9 已建档的 offer 路径抖动，非 W-A 形态，隧道服务无感。
+4. **host 侧窗口实证**：4 条 `upgrade` 事件全 `relay→fallback`（ms≈15001，有界良性终态）；`session_end bytes=0` 的是被拆旁路（零用户字节，零用户影响）；`cascade_choice mode=relay rttMs=44–129` 诚实记录（不再出现伪影 p2p）。
+5. **修复后静默证据**：23:47:20（末次旁路拆除）后 `service.log` 零新增——复活 / 兜底 / 看门狗全静默（对照修复前成群 churn）；`events.jsonl` 持续写入（隧道计量正常）。
+6. **未实机覆盖（如实登记）**：adopt-direct——真直连旁路采纳后存活路径本次未演练（本象限建不成直连旁路，与 §4 0% 直连一致）；该路径由 harness 测试（`shell-upgrade.test.ts` `stats:'direct'`）覆盖，待有直连条件象限实机补验。
+
+**遗留登记**：
+
+- 主 p2p 腿落 relay 的拒绝策略（原 Fix B2）属「中继长程服务」路由决策，按用户切割留 **v0.4.x**；Fix C 已使其脱离死亡循环（非 relay 构造面不再响应 upgrade 帧）。
+- host 对已拆旁路会话仍 emit `upgrade relay→fallback` 事件（ms=15001 后自然终止，无害噪声）——v0.4.x 可在 wheel 侧加会话存活判据消除。
+- W-B（工作台重载解耦）：W-A 已消除最大重载源；剩余重载场景（真实通道切换时的工作台保活）另行 bounded 设计推进。
