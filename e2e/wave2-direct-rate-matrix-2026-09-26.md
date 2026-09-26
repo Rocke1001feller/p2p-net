@@ -119,4 +119,27 @@ c. 短命 relay 会话 wireBytes 明显小于 appBytes（pair 切换期字节归
 - **W2-7 werift 438 修复真机终验**：17min 定时死亡形态修复后**零复发**（§3.4）；新死亡链（NAT 重映射→幽灵 session→未签名 438→完整性丢弃）判别归档，正修（≤30–60s 保活防重映射 + 快速失败 + TURN REFRESH 观测）立项 **v0.4.x**。
 - **W2-6 暖场升级轮**：3 次升级全部 15s 有界回退（to=fallback），会话不中断——回退机制按设计工作；升级成功率待有直连条件的象限（不阻塞收口）。
 - **cost-model §6.1**：隧道 ≈0.94–0.96 元/GB、TURN ≈1.02 元/GB、直连 ≈0（KB 级信令税）【实测-本仓】；隧道与 TURN 同价带，隧道建连快 7.4–12.2×，级联顺序 p2p→tunnel→turn 维持。今日 relay 会话 wire ≈1.5MB（分分钱以下）。
-- **v0.3.0 增量清单**：console-hijack 根治（§3.7，host console 自述 + PWA last-good 兜底）+ 本档案收口；遗留立项：① W2-7 正修（v0.4.x）② 仪器缺口（§3.2.2 隧道腿计量、§3.8.5 helper 变体）③ coturn 端口池扩容→判定为**容量议题**（20 并发 allocation 对双机富余、对规模化不够，非稳定性根因——风暴是信令抖动非端口耗尽，coturn 侧无 487/500），挂 v0.4.x 或容量专项，本窗不动。
+- **v0.3.0 增量清单**：console-hijack 根治（§3.7，host console 自述 + PWA last-good 兜底）+ 本档案收口；遗留立项：① W2-7 正修（v0.4.x）② 仪器缺口——§3.2.2 隧道腿计量【v0.3.1 已闭合，见 §3.9】、§3.8.5 helper 变体【已补 last-match 并投入使用】③ coturn 端口池扩容→判定为**容量议题**（20 并发 allocation 对双机富余、对规模化不够，非稳定性根因——风暴是信令抖动非端口耗尽，coturn 侧无 487/500），挂 v0.4.x 或容量专项，本窗不动。
+
+### 3.9 v0.3.1 增量包（实验徽章 + 隧道计量 + 粘性回迁 + tunnel→p2p 升级）实施与真机验证
+
+**流程**：SDD（计划 `docs/superpowers/plans/2026-09-26-v03x-sticky-tunnel-upgrade.md`）——3 实施者并行（文件集互不相交）→ 3 任务评审 → 2 修复轮 → 终审 → squash `d7cc5e7` → release `2d891af`（v0.3.1）。评审抓到 2 个生产级缺陷并闭环：① **Critical**：实验徽章复位写成「非 connected 即复位」，生产链路（setExperimentMode→connecting 重绘→级联 connecting 帧）两处叠加清零，徽章永不渲染——收窄为 off/failed + 重绘守卫 connected（`924d686` 前）；② **Important**：tunnel-session end 帧按发送时刻 `desk.id` 组房间，双桌切换时错发新桌房间（host A 幽灵 active+1 无自愈）——`activeTunnelSession` 改存 `{sid, room}` 钉死开账房间，双桌用例锁定。
+
+**部署**：`npm pack` 0.3.1 → `install -g` → kickstart（pid 70675）；PWA rsync 49.233.155.13；双机硬刷（SW 注销 + `Page.reload{ignoreCache:true}`）。
+
+**真机验证【全部实测，iPhone=联通蜂窝、Android=电信蜂窝】**：
+
+1. **A 实验徽章**：relay tab 硬刷后徽章 `中继（实验）`（8/9 轮询，1 次瞬时空绘制）；两台 plain tab 诚实显示 `隧道`（自然落点无实验标注）——「实验 tab 与生产落点视觉无区分」的人祸闭环。**教训回填**：relay tab 时间源 09:58 一直在跑**部署前旧 bundle**（SW 控制），`[exp]` 日志行是旧构建已有（514eed8 引入）——「有日志行」不能当「新构建」证据，须查 `performance.timeOrigin`。
+2. **B 隧道计量（§3.2.2 仪器缺口闭合）**：host events.jsonl 三连实证——`13:44:20 tun_79143fc9`、`14:04:35 tun_a734c6f6`（iPhone）、`14:07:49 tun_b9a2913a`（Android），全部 `session_start mode:'tunnel' access=cellular-*`；PWA `#log` 同刻 `[tunnel-session] start` 对齐。
+3. **C 落点粘性**：iPhone 重连 14:04:09、Android 全新启动 14:07:49，均 **隧道直达**（`[tunnel-session] start` 紧跟 boot/services，无 p2p 段 ~40s 空转——对照 13:43 周期 p2p 尝试 43s 后才落隧道）；`localStorage p2p.lastLinkMode='tunnel'` 双机在盘。
+4. **D tunnel→p2p 旁路升级**：iPhone 14:05:20 `[p2pupg] 旁路升级未成（upgrade_wait_timeout）→ 退避待下一拍`——隧道 connected（14:04:10）后 60s 首探、旁路 10s 等候失败静默退避，**隧道服务零中断**（徽章恒隧道、pulse 持续）。旁路未成与本象限 p2p 自然直连 0%（§4）完全一致——nat m:ep-dep 下 p2p 本就不通，看门狗按设计安静退避，不打扰隧道。
+5. **双机当前健康态**：iPhone `隧道` connected gen:6；Android `隧道` connected（新 tab 14:07:36 boot）。
+
+**事故与排障登记（helper 层面）**：
+- Android plain tab 僵尸：部署前旧 bundle + 后台 tab 导航挂起（`readyState:loading`/`vis:hidden` 卡死，CDP `location.reload` 被节流不触发）——`Page.close` + `am start VIEW` 重开恢复；但 `am start` 意图复用了前台 relay tab（relay 实验 tab 被导航回收，v0.4.x 要用需重开 `?transport=relay`）。
+- Android WebView CDP `caches.keys()` 挂起（25s 超时击穿 helper）——强刷流程改为「SW 注销 + `Page.reload{ignoreCache:true}`」两步，绕开 Cache Storage API。
+- 教训：后台 tab 的 JS 定时器被节流，`setTimeout(()=>location.reload())` 不可靠；`Page.reload` 是 CDP 协议层，不经页面计时器。
+
+**开放观察项（登记 v0.4.x）**：
+- forceTurn × TunnelBackcheck：relay tab 60s 探活成功即触发重级联，但 Q 重解析仍 forceTurn → 落回 turn，呈 ~60-90s 周期级回迁环（host 侧 14:04:14/14:06:13 两条 `session_end replaced` 疑似此形态）。dev-only 路径、生产无感，但 relay 长 soak 会周期重分配——v0.4.x TURN 正修时一并定夺（候选：forceTurn 时禁 arm backcheck）。
+- 实验 tab 与生产 tab 共享同源 `localStorage p2p.lastLinkMode`：实验落点会写入生产记忆键。当前无害（'turn' 不改段序、'tunnel' 即生产期望），登记。
