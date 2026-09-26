@@ -541,6 +541,38 @@ test('会话事件映射：session_start 带出 HostStatus.access（W2-1）；�
   }
 });
 
+test('隧道会话计量：onTunnelSession → session_start/session_end（mode=tunnel，access 透传，2026-09-26 仪器缺口 §3.2.2）', async () => {
+  const ctx = makeDeps();
+  const handle = await runStart({}, ctx.deps);
+  try {
+    const ho = ctx.hostOpts();
+    assert.equal(typeof ho.onTunnelSession, 'function', 'onTunnelSession 必须接线（隧道会话否则不进事件流）');
+
+    // phase='start' → session_start + mode:'tunnel' + access 透传；活跃聚合 +1
+    ho.onTunnelSession!({ type: 'tunnel-session', sid: 'phone-t1', phase: 'start', access: 'wifi-home' });
+    const start = ctx.logLines.find((l) => l.event === 'session_start' && l.sid === 'phone-t1');
+    assert.ok(start, 'phase=start 必须记 session_start');
+    assert.equal(start!.mode, 'tunnel', '隧道会话必须带 mode=tunnel（与缺省 p2p 语义的 WebRTC 会话区分）');
+    assert.equal(start!.access, 'wifi-home', '隧道帧的 access 标注应透传进事件');
+    assert.equal((ctx.controlStatus() as { sessions: { active: number } }).sessions.active, 1, '隧道会话应计入活跃聚合');
+
+    // phase='end' → session_end（mode=tunnel）；活跃聚合归零
+    ho.onTunnelSession!({ type: 'tunnel-session', sid: 'phone-t1', phase: 'end' });
+    const end = ctx.logLines.find((l) => l.event === 'session_end' && l.sid === 'phone-t1');
+    assert.ok(end, 'phase=end 必须记 session_end');
+    assert.equal(end!.mode, 'tunnel');
+    assert.equal((ctx.controlStatus() as { sessions: { active: number } }).sessions.active, 0, '隧道 session_end 后活跃聚合应归零');
+
+    // 无 access 的隧道帧（采集降级）：不编造该字段，事件照常
+    ho.onTunnelSession!({ type: 'tunnel-session', sid: 'phone-t2', phase: 'start' });
+    const noAccess = ctx.logLines.find((l) => l.event === 'session_start' && l.sid === 'phone-t2');
+    assert.ok(noAccess, '无 access 的隧道会话 session_start 照常');
+    assert.ok(!('access' in noAccess!), '无 access 时事件不得编造该字段（下游落 unknown 桶）');
+  } finally {
+    await handle.stop();
+  }
+});
+
 test('会话事件环形缓冲：容量 2000 FIFO 丢最旧；events.jsonl 写透不受缓冲影响', async () => {
   const ctx = makeDeps();
   const handle = await runStart({}, ctx.deps);

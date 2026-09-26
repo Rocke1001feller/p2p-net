@@ -96,6 +96,10 @@ export interface HostAgentOptions {
   upgradeWheel?: { enabled?: boolean; warmMs?: number; observeMs?: number; maxAttempts?: number };
   /** 升级轮终态（sid=客户端 deviceId，与 session_start 同键供 access 桶 join；from/to/ms，绝无地址）。 */
   onUpgrade?: (e: { sid: string; from: 'relay'; to: 'direct' | 'fallback'; ms: number }) => void;
+  /** 隧道会话计量帧（2026-09-26 仪器缺口 §3.2.2）：PWA 级联落隧道经信令上报 tunnel-session
+   *  start/end（phase/access 平铺可选）。库层只分发不解释——事件流转换在装配层（start.ts）；
+   *  缺省无回调时该帧静默忽略（旧装配兼容）。 */
+  onTunnelSession?: (msg: SigMessage) => void;
 }
 
 // 调试日志（P2P_NET_DEBUG=1 启用）；错误类日志不受开关限制（轮询/onSignal 失败必须留痕）
@@ -570,6 +574,8 @@ export class HostAgent {
 
   private async onSignal(msg: unknown): Promise<void> {
     if (!isSigMessage(msg)) return;
+    // 隧道会话计量帧：只分发到装配层回调即返回——无 SDP/TURN/PeerSession 可言，绝不落 offer/ice 分支
+    if (msg.type === 'tunnel-session') { this.opts.onTunnelSession?.(msg as SigMessage); return; }
     if (msg.type === 'offer' && msg.sdp) {
       const clientKey = msg.from;
       if (!clientKey) { console.error('[p2p-net] offer 缺 from，无法路由应答（客户端必须带身份）'); return; }

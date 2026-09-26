@@ -350,6 +350,15 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
       // 升级轮（W2-6）：config.json upgradeWheel 段 + env P2P_NET_UPGRADE=0 强关；终态写会话事件流
       upgradeWheel: resolveUpgradeWheel(cfg.upgradeWheel),
       onUpgrade: (e) => record({ name: 'upgrade', sid: e.sid, from: e.from, to: e.to, ms: e.ms }),
+      // 隧道会话计量（2026-09-26 仪器缺口 §3.2.2）：PWA 级联落隧道的 start/end 帧 → 会话事件流，
+      // mode:'tunnel' 与 WebRTC 会话（缺省 p2p 语义）区分；access 与 offer meta 同纪律（无则不编造）。
+      onTunnelSession: (msg) =>
+        record({
+          name: msg.phase === 'start' ? 'session_start' : 'session_end',
+          sid: msg.sid,
+          mode: 'tunnel',
+          ...(msg.access ? { access: msg.access } : {}),
+        }),
     });
     host.start();
     teardowns.push(() => host.stop());

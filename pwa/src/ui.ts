@@ -67,6 +67,24 @@ const MODE_BADGE: Record<string, string> = { p2p: 'p2p', tunnel: 'relay', turn: 
 /** 心跳 pong 的状态帧不带 mode——记住最后一次真实落点，别把中继谎报成"直连"。 */
 let lastMode: string | null = null;
 
+/**
+ * 实验徽章（2026-09-26 v0.3.x）：dev 强制模式（?transport=relay / ?tunnel=1）下
+ * connected 徽章显示「中继（实验）」/「隧道（实验）」，把实验会话与自然会话在状态条上一眼分开。
+ * 非实验（null）保持诚实落点原样；会话终结（off/failed）自动复位为 null
+ * （建连期 connecting 不复位——实验标注必须活过整个建连过程才能在首个 connected 渲染出来）。
+ */
+export type ExperimentMode = 'relay' | 'tunnel' | null;
+const EXPERIMENT_LABEL: Record<'relay' | 'tunnel', string> = { relay: '中继（实验）', tunnel: '隧道（实验）' };
+let experimentMode: ExperimentMode = null;
+
+export function setExperimentMode(kind: ExperimentMode): void {
+  if (kind === experimentMode) return;
+  experimentMode = kind;
+  // 仅 connected 需要全权重绘（屏幕上才有徽章可刷新）；其他状态重绘无徽章可画，
+  // 且会让复位条件立刻把刚设的值抹掉（off/failed 收尾态紧随的 setExperimentMode 会自毁）
+  if (lastStatus?.state === 'connected') setStatus(lastStatus, lastDeviceName);
+}
+
 /** stall 黄灯（spec D5）：徽章照常诚实落点，圆点转琥珀——"疑似卡顿"与"模式"两个维度并存。 */
 let stallOn = false;
 
@@ -111,6 +129,10 @@ export function setStatus(s: CascadeStatus, deviceName: string): void {
   lastStatus = s;
   lastDeviceName = deviceName;
   if (s.state !== 'connected') probeDown = false; // 会话变迁/断开：探活黄灯作废（新状态已是最真交代）
+  // 实验标注仅会话终结（off/failed）复位：建连期 connecting 不得抹掉——startConnect 顶部刚写入
+  // connecting 后 setExperimentMode 的全权重绘、级联阶段 connecting 帧都会途经这里（2026-09-26 评审实锤：
+  // 写成「非 connected 即复位」时两处叠加清零，connected 徽章恒为裸落点，生产链路从不渲染实验标注）。
+  if (s.state === 'off' || s.state === 'failed') experimentMode = null;
   const dot = $('connDot');
   const title = $('connTitle');
   const rtt = $('connRtt');
@@ -125,7 +147,7 @@ export function setStatus(s: CascadeStatus, deviceName: string): void {
     title.innerHTML = ''; // 用 DOM 组装，避免 innerHTML 注入面
     const b = document.createElement('span'); b.textContent = deviceName || '已连接';
     const badge = document.createElement('span'); badge.className = `badge ${MODE_BADGE[mode] ?? 'p2p'}`;
-    badge.textContent = MODE_LABEL[mode] ?? '已连接';
+    badge.textContent = (experimentMode ? EXPERIMENT_LABEL[experimentMode] : MODE_LABEL[mode]) ?? '已连接';
     title.append(b, ' ', badge);
     rtt.textContent = s.rttMs !== undefined ? `${Math.round(s.rttMs)} ms` : '';
     if (stallOn) dot.style.background = '#B26A00'; // stall 示警优先级高于模式色（双驱动交汇点）

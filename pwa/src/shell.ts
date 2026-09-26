@@ -20,7 +20,7 @@
  * window.__p2pNetConnect(deskId?) / __p2pNetOpenService(port) / __p2pNetDebug()。
  */
 import jsQR from 'jsqr';
-import { SignalingClient } from 'p2p-net/browser';
+import { SignalingClient, roomFor } from 'p2p-net/browser';
 import {
   ensureHostLabel, fetchTurnCredentials, loginByPassword, loginByTicket, parseScan, bindPhone, supabase,
   type ScanPayload,
@@ -34,6 +34,9 @@ import {
   HEALTH_CHECK_DELAYS_MS, bootGateDecision, dataPlaneAlive, healthDecision, looksBooted,
 } from './workbenchRecovery.js';
 import { CascadeSession, type LinkMode } from './session.js';
+import { TunnelBackcheck } from './tunnelBackcheck.js';
+import { P2pUpgrade } from './p2pUpgrade.js';
+import { WebRtcSession, upgradeIceServersFor } from './signaling-web.js';
 import { FrameLedger, type HungEntry } from './frameLedger.js';
 import { DataPlaneLiveness } from './dataPlaneLiveness.js';
 import { livenessFromQuery } from './livenessConfig.js';
@@ -41,6 +44,7 @@ import {
   hideConnecting, hideSheets, log, renderDevices, setMe, setStatus, showConnecting,
   showOfflineSheet, showPasteSheet, showScreen, showTab, setWorkspaceEnabled, toast,
   connectingStage, wechatGuard, showBrowserHint, setStall, setProbeDown, isProbeDown,
+  setExperimentMode,
   type SavedDevice,
 } from './ui.js';
 import { stallSuspect } from './stall.js';
@@ -138,6 +142,112 @@ let everConnected = false;
 let reconnectAttempt = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** 落点粘性记忆键（任务C）：connected 落点实时写入，下次 connect 注入 CascadeSession.lastMode。 */
+const LS_LAST_LINK_MODE = 'p2p.lastLinkMode';
+function readLastLinkMode(): LinkMode | null {
+  const v = localStorage.getItem(LS_LAST_LINK_MODE);
+  return v === 'p2p' || v === 'tunnel' || v === 'turn' ? v : null;
+}
+
+/**
+ * turn→tunnel 回迁看门狗装配（任务C；纯逻辑见 tunnelBackcheck.ts）。
+ * 中继只做短程过渡：turn 会话期间按节拍轻量探隧道网关，活 → 重级联迁回。
+ * ?backcheck=（秒）真机标定，同 livenessFromQuery 惯例；缺省 60s。
+ */
+const BACKCHECK_MS = (() => {
+  const v = Number(Q.get('backcheck'));
+  return Number.isFinite(v) && v > 0 ? Math.round(v * 1000) : 60_000;
+})();
+let tunnelBackcheck: TunnelBackcheck | null = null;
+function ensureTunnelBackcheck(): TunnelBackcheck {
+  tunnelBackcheck ??= new TunnelBackcheck({
+    isTurnActive: () => cascade?.mode === 'turn' && cascade.isOpen,
+    probe: () => cascade?.probeTunnelAlive() ?? Promise.resolve(false),
+    onAlive: () => {
+      if (manualStop) return; // 手动断开是最高裁决：在途节拍不得把会话拉回来
+      log('[backcheck] 隧道网关探活成功 → 中继回迁隧道（重级联）');
+      void startConnect({ id: desk.id, tunnelUrl: desk.tunnelUrl, name: deskName }, true);
+    },
+    intervalMs: BACKCHECK_MS,
+  });
+  return tunnelBackcheck;
+}
+
+/**
+ * tunnel→p2p 旁路升级装配（任务D；纯逻辑见 p2pUpgrade.ts）。
+ * 隧道 0.95 元/GB、p2p 零成本：隧道会话期间按节拍旁路试建 p2p，建成才热切
+ * （make-before-break，隧道服务无感），失败仅付 KB 级信令税、连败退避封顶 480s。
+ * ?p2pupg=（首拍秒，缺省 60）/ ?p2pupgwait=（单次尝试超时秒，缺省 10）真机标定，
+ * 同 livenessFromQuery 惯例。
+ */
+const P2P_UPG_FIRST_MS = (() => {
+  const v = Number(Q.get('p2pupg'));
+  return Number.isFinite(v) && v > 0 ? Math.round(v * 1000) : 60_000;
+})();
+const P2P_UPG_WAIT_MS = (() => {
+  const v = Number(Q.get('p2pupgwait'));
+  return Number.isFinite(v) && v > 0 ? Math.round(v * 1000) : 10_000;
+})();
+let p2pUpgrade: P2pUpgrade | null = null;
+function ensureP2pUpgrade(): P2pUpgrade {
+  p2pUpgrade ??= new P2pUpgrade({
+    isTunnelActive: () => cascade?.mode === 'tunnel' && cascade.isOpen,
+    attempt: attemptP2pUpgrade,
+    firstDelayMs: P2P_UPG_FIRST_MS,
+  });
+  return p2pUpgrade;
+}
+
+/**
+ * 一次旁路升级尝试：旁路 WebRtcSession（构造面照抄 session.ts p2p 段）建成并被 adopt → true。
+ * adopt 前旁路的一切状态/帧静默（不得污染隧道态状态条与帧流）；adopt 后接管：
+ * off → 上报链路终结（走既有重连裁决），其余 → mode p2p 透传。
+ * 等待期间被新一代取代/落点已切走 → 拆旁路放弃；任何失败归 finally 拆净（adopt 后归属 cascade）。
+ */
+async function attemptP2pUpgrade(): Promise<boolean> {
+  const gen = cascadeGen;
+  const deskId = desk.id;
+  const uid = currentUid();
+  const myDeviceId = currentDeviceId();
+  if (!deskId || !uid || !myDeviceId) return false;
+  let adopted = false;
+  const web = new WebRtcSession({
+    signaling: makeSignaling(),
+    uid,
+    myDeviceId,
+    iceServers: p2pStunServers,
+    iceTransportPolicy: 'all',
+    upgradeIceServers: upgradeIceServersFor('all', p2pStunServers, p2pStunServers),
+    onStatus: (s) => {
+      if (!adopted || gen !== cascadeGen) return; // adopt 前静默：隧道状态条不得被旁路污染
+      if (s.state === 'off') { onCascadeStatus({ state: 'off', pairType: null }); return; }
+      onCascadeStatus({ ...s, mode: 'p2p' });
+    },
+    onFrame: (m) => { if (adopted && gen === cascadeGen) onDcFrame(m); },
+    onStatsRows: (rows) => { if (adopted && gen === cascadeGen) frameLedger.sampleWireStats(rows); },
+    liveness: LIVE,
+  });
+  try {
+    await web.connect(deskId);
+    const deadline = Date.now() + P2P_UPG_WAIT_MS;
+    while (!web.isOpen) {
+      if (Date.now() >= deadline) throw new Error('upgrade_wait_timeout');
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    const target = cascade;
+    if (gen !== cascadeGen || !target) { log('[p2pupg] 旁路等待期间会话已被取代 → 放弃本轮'); return false; }
+    if (!target.adoptP2pUpgrade(web)) { log('[p2pupg] 旁路建成但落点已离开隧道 → 放弃本轮'); return false; }
+    adopted = true;
+    log('[p2pupg] 旁路 p2p 已建成并采纳 → 隧道热切直连（make-before-break）');
+    return true;
+  } catch (e) {
+    log(`[p2pupg] 旁路升级未成（${e instanceof Error ? e.message : e}）→ 退避待下一拍`);
+    return false;
+  } finally {
+    if (!adopted) web.teardown();
+  }
+}
+
 // ---- 设备表（v1 本机记忆；服务器侧心跳表为后续增强） ----
 function loadDevices(): SavedDevice[] {
   try { return JSON.parse(localStorage.getItem(LS_DEVICES) || '[]') as SavedDevice[]; } catch { return []; }
@@ -181,6 +291,48 @@ function makeSignaling(): SignalingClient {
     publishableKey: cfg().publishableKey,
     accessToken: () => cachedToken,
   });
+}
+
+/**
+ * 隧道会话计量（2026-09-26，tunnel-session 协议）：级联落隧道即上报 start，链路终结
+ * （重连重建/off/failed/手动断开/升级 p2p）上报 end。尽力而为——end 丢失由下一次 start 顶替
+ * （聚合端同 sid 覆盖），计量绝不阻断连接本身。access 读法同「我的」tab 标注键。
+ * room 在开账时随会话存底：startConnect 顶部即改写 desk.id（设备列表点选直达、不经 stopSession），
+ * end 若按发送时刻 desk.id 组房间，切换桌面时会把 A 的 end 错发进 B 的房间（2026-09-26 终审实锤）。
+ */
+let activeTunnelSession: { sid: string; room: string } | null = null;
+let telemetrySig: SignalingClient | null = null;
+
+function sendTunnelSession(phase: 'start' | 'end', sid: string, room: string, myDeviceId: string): void {
+  try {
+    telemetrySig ??= makeSignaling();
+    void telemetrySig.send(room, myDeviceId, {
+      type: 'tunnel-session', sid, phase,
+      access: localStorage.getItem(LS_ACCESS) ?? undefined,
+      from: myDeviceId,
+    }).catch(() => { /* 尽力而为：发送失败静默 */ });
+  } catch { /* 计量绝不阻断连接 */ }
+}
+
+function tunnelSessionStart(): void {
+  if (activeTunnelSession || !desk.id) return;
+  const uid = currentUid();
+  const myDeviceId = currentDeviceId();
+  if (!uid || !myDeviceId) return;
+  const sid = `tun_${globalThis.crypto?.randomUUID?.() ?? String(Date.now())}`;
+  activeTunnelSession = { sid, room: roomFor(uid, desk.id) }; // 开账房间钉死：end 一律发回这里
+  log(`[tunnel-session] start sid=${sid}`);
+  sendTunnelSession('start', sid, activeTunnelSession.room, myDeviceId);
+}
+
+function tunnelSessionEnd(reason: string): void {
+  const cur = activeTunnelSession;
+  if (!cur) return; // 无活跃会话：end 空转
+  activeTunnelSession = null; // 先清后发：同一会话绝不重复 end
+  const myDeviceId = currentDeviceId();
+  if (!myDeviceId) return;
+  log(`[tunnel-session] end（${reason}）sid=${cur.sid}`);
+  sendTunnelSession('end', cur.sid, cur.room, myDeviceId);
 }
 function watchAuthToken(): void {
   void supabase().then((s) => s.auth.getSession()).then(({ data }) => { cachedToken = data.session?.access_token ?? null; }).catch(() => {});
@@ -442,6 +594,7 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
   // 同时旧 pc/定时器长期泄漏。先 ++gen 使旧实例的一切回调失效，再 stop 释放它。
   cascadeGen += 1;
   const gen = cascadeGen;
+  tunnelSessionEnd('reconnect'); // 任务B end 时机①：重建旧实例前终结上一轮隧道计量
   cascade?.stop();
   cascade = new CascadeSession({
     signaling: makeSignaling(),
@@ -450,6 +603,7 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
     getJwt,
     stunServers: p2pStunServers,
     servicesPort: activeDiscoveryPort,
+    lastMode: readLastLinkMode(), // 落点粘性：上次 tunnel 成功 → 本次隧道先行
     onStatus: (s) => { if (gen === cascadeGen) onCascadeStatus(s); },
     onFrame: (m) => { if (gen === cascadeGen) onDcFrame(m); },
     onStatsRows: (rows) => { if (gen === cascadeGen) frameLedger.sampleWireStats(rows); }, // wire 采样（spec D9；僵尸会话作废）
@@ -462,14 +616,17 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
   if (iceOverride) { try { devOpts.p2pIceServers = JSON.parse(iceOverride) as RTCIceServer[]; } catch { /* 忽略 */ } }
   if (Q.get('transport') === 'relay') {
     devOpts.forceTurn = true;
+    setExperimentMode('relay'); // 实验徽章：状态条显示「中继（实验）」
     log('[exp] 强制 TURN 中继模式（只跑 TURN 段）');
     toast('exp: 强制 TURN 中继');
   }
   if (Q.get('tunnel') === '1' || Q.get('notunnel') === '1') {
     devOpts.forceTunnel = true;
+    setExperimentMode('tunnel'); // 实验徽章：状态条显示「隧道（实验）」
     log('[exp] 强制隧道模式（跳过 WebRTC）');
     toast('exp: 强制隧道');
   }
+  if (!devOpts.forceTurn && !devOpts.forceTunnel) setExperimentMode(null); // 非强制路径：无实验标注
   const p2pIce = Q.get('p2pice');
   if (p2pIce === 'full' || p2pIce === 'stun') {
     devOpts.p2pFullIce = p2pIce === 'full';
@@ -512,6 +669,19 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
 function onCascadeStatus(s: Parameters<typeof setStatus>[0]): void {
   setStatus(s, deskName);
   if (s.state === 'connecting' && s.stage && s.stage !== 'done') connectingStage(s.stage);
+  // 任务B 隧道会话计量：落隧道开账（无活跃会话才开，防 pong 重复开账）；链路终结结账
+  if (s.state === 'connected' && s.mode === 'tunnel') tunnelSessionStart();
+  if (s.state === 'off' || s.state === 'failed') tunnelSessionEnd(s.state); // end 时机②
+  // 任务C 落点粘性：connected 落点实时落盘，下次 connect 注入 lastMode（隧道记忆最值钱）
+  if (s.state === 'connected' && s.mode) localStorage.setItem(LS_LAST_LINK_MODE, s.mode);
+  // 任务C 回迁看门狗生命周期：turn connected 启动；mode 变化/非 turn/off/手动断开 停止
+  if (!manualStop && s.state === 'connected' && s.mode === 'turn') ensureTunnelBackcheck().start();
+  else tunnelBackcheck?.stop();
+  // 任务D 旁路升级看门狗生命周期：tunnel connected 启动；adopt/切走/off/手动断开 停止
+  if (!manualStop && s.state === 'connected' && s.mode === 'tunnel') ensureP2pUpgrade().start();
+  else p2pUpgrade?.stop();
+  // 任务D 计量补全：落点离开隧道（升级 p2p）即结隧道账——不过账到 p2p 时段（end 幂等空转）
+  if (s.state === 'connected' && s.mode && s.mode !== 'tunnel') tunnelSessionEnd('upgrade');
   // 断线自愈（Q16）：曾连接、非手动断开 → 指数退避重连
   if (s.state === 'off' && wasConnected && !manualStop && desk.id) {
     toast('连接断开，正在重连…');
@@ -594,7 +764,17 @@ function stopSession(): void {
   manualStop = true;
   wasConnected = false;
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  tunnelBackcheck?.stop(); // 任务C：手动断开终结回迁看门狗
+  p2pUpgrade?.stop(); // 任务D：手动断开终结旁路升级看门狗
+  tunnelSessionEnd('stop'); // 任务B end 时机③：手动断开
   cascade?.stop();
+  // 在途 shell 请求（服务发现/免登）即刻结算：旧会话已死回帧永不到来，
+  // 否则每条挂 30s 超时定时器，到点后还驱动 fetchServices 重试链、手动断开后弹离线条
+  for (const [gid, e] of pendingFetch) {
+    clearTimeout(e.timer);
+    pendingFetch.delete(gid);
+    e.resolve({ status: 504, body: new Uint8Array() }); // 形态同 fetchVia 超时兜底
+  }
   setStatus({ state: 'off', pairType: null }, deskName);
   setWorkspaceEnabled(false);
   toast('已断开');
@@ -675,6 +855,7 @@ async function fetchServices(): Promise<void> {
   // 全部候选都失败：**不再**打开 0.9.x 老端口 3002（那等于把用户丢进白屏）。
   // 明确告知 + 可重试，是这里唯一正确的兜底。
   log(`[services] 候选全失败：${(lastErr as Error).message}`);
+  if (manualStop) return; // 手动断开是最高裁决：不排重试、不弹离线条（在途请求已被 stopSession 结算）
   if (fetchRetries < 3) {
     fetchRetries += 1;
     setTimeout(() => { void fetchServices(); }, 2000);

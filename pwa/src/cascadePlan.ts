@@ -12,8 +12,14 @@
  */
 export type StageMode = 'p2p' | 'tunnel' | 'turn';
 
-export function planStageModes(opts: { forceTurn?: boolean; forceTunnel?: boolean; p2pFullIce?: boolean }): StageMode[] {
+export function planStageModes(
+  opts: { forceTurn?: boolean; forceTunnel?: boolean; p2pFullIce?: boolean },
+  lastMode?: StageMode | null,
+): StageMode[] {
   if (opts.forceTunnel) return ['tunnel'];
   if (opts.forceTurn) return ['turn'];
+  // 记忆化重级联（2026-09-26 用户裁决）：上次隧道成功 → 隧道先行，跳过 10s p2p 白等；
+  // p2p/turn/无记忆维持原序（p2p 值得先赌，中继记忆不值钱）。dev 覆盖在上方先行返回，不受影响。
+  if (lastMode === 'tunnel') return ['tunnel', 'p2p', 'turn'];
   return ['p2p', 'tunnel', 'turn'];
 }

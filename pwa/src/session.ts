@@ -17,7 +17,7 @@ import { SignalingClient } from 'p2p-net/browser';
 import { CASCADE_TIMEOUT_MS, DISCOVERY_PORT, isPlausibleTunnelUrl } from './constants.js';
 import { fetchTurnCredentials } from './cloud.js';
 import { WebRtcSession, upgradeIceServersFor, type LightStatus } from './signaling-web.js';
-import { planStageModes } from './cascadePlan.js';
+import { planStageModes, type StageMode } from './cascadePlan.js';
 import type { LivenessConfig } from './livenessConfig.js';
 
 export type LinkMode = 'p2p' | 'tunnel' | 'turn';
@@ -54,6 +54,9 @@ export interface CascadeOptions {
   servicesPort?: number;
   /** N4 活性阈值（spec D7）：透传进两段 WebRtcSession；缺省 DEFAULT_LIVENESS。 */
   liveness?: Partial<Pick<LivenessConfig, 'pingMs' | 'livenessMs'>>;
+  /** 落点粘性记忆（2026-09-26 用户裁决）：上次成功落点（shell 从 localStorage 注入）。
+   *  'tunnel' → 段序 tunnel→p2p→turn（跳过 10s p2p 白等）；其余/缺省维持原序。 */
+  lastMode?: StageMode | null;
 }
 
 const isOk = (s: LightStatus) => s.state === 'connected';
@@ -94,7 +97,7 @@ export class CascadeSession {
     this.teardownWeb();
 
     const stages: { mode: LinkMode; run: () => Promise<void> }[] = [];
-    for (const m of planStageModes(this.opts)) {
+    for (const m of planStageModes(this.opts, this.opts.lastMode)) {
       if (m === 'tunnel') {
         stages.push({ mode: 'tunnel', run: () => this.runTunnelStage() });
       } else if (m === 'p2p') {
@@ -157,6 +160,21 @@ export class CascadeSession {
     this.emit({ state: 'off', pairType: null });
   }
 
+  /**
+   * tunnel→p2p 热切换（任务D，P2pUpgrade 旁路建成后的采纳入口）。
+   * make-before-break：仅隧道态接受——拆掉隧道期残留（wsMap 网关 WS），接管旁路为数据面，
+   * 补发 connected(p2p) 让状态条/落盘链路按新落点刷新。非隧道态拒绝且不动传入实例
+   * （旁路由调用方 teardown）。
+   */
+  adoptP2pUpgrade(web: WebRtcSession): boolean {
+    if (this.mode !== 'tunnel') return false;
+    this.teardownWeb();
+    this.web = web;
+    this.mode = 'p2p';
+    this.emit({ state: 'connected', pairType: 'p2p', mode: 'p2p', stage: 'done' });
+    return true;
+  }
+
   /** proxy 通道出站（仅 WebRTC 段；tunnel 段由 shell 走网关 fetch）。 */
   async send(frame: unknown): Promise<void> {
     await this.web?.send(frame);
@@ -189,15 +207,23 @@ export class CascadeSession {
       onStatsRows: this.opts.onStatsRows,
       liveness: this.opts.liveness,
     });
+    let cleanup: () => void = () => {};
     const done = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`webrc_timeout_${timeoutMs}`)), timeoutMs);
       const check = setInterval(() => {
         if (this.stopped) { clearInterval(check); clearTimeout(timer); reject(new Error('stopped')); return; }
         if (web.isOpen) { clearInterval(check); clearTimeout(timer); resolve(); }
       }, 150);
+      // connect 抛错（如无 RTC 环境）时 done 永不落定：句柄登记到实例上，finally 统一清理，
+      // 否则 150ms 轮询永久泄漏钉住调用方进程（2026-09-26 单测实证）。
+      cleanup = () => { clearInterval(check); clearTimeout(timer); };
     });
-    await web.connect(deskDeviceId);
-    await done;
+    try {
+      await web.connect(deskDeviceId);
+      await done;
+    } finally {
+      cleanup();
+    }
   }
 
   private pendingStage(iceServers: RTCIceServer[], policy: RTCIceTransportPolicy): Stage {
@@ -212,6 +238,18 @@ export class CascadeSession {
     }
     this.emit({ state: 'connecting', pairType: null, mode: 'tunnel', stage: 'tunnel' });
     await this.probeTunnel(CASCADE_TIMEOUT_MS.tunnel);
+  }
+
+  /** turn→tunnel 回迁探针（任务C，TunnelBackcheck 注入用）：6s 超时语义同建连段；
+   *  网关活 true、死/无网关/抛错 false——看门狗只关心布尔，不关心错误形态。 */
+  async probeTunnelAlive(): Promise<boolean> {
+    if (!this.tunnelUrl) return false;
+    try {
+      await this.probeTunnel(CASCADE_TIMEOUT_MS.tunnel);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // ---- tunnel 段：网关 HTTP 探活（发现端点；失败再试工作台 /health 形态的根路径） ----
