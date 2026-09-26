@@ -178,3 +178,24 @@ c. 短命 relay 会话 wireBytes 明显小于 appBytes（pair 切换期字节归
 - 主 p2p 腿落 relay 的拒绝策略（原 Fix B2）属「中继长程服务」路由决策，按用户切割留 **v0.4.x**；Fix C 已使其脱离死亡循环（非 relay 构造面不再响应 upgrade 帧）。
 - host 对已拆旁路会话仍 emit `upgrade relay→fallback` 事件（ms=15001 后自然终止，无害噪声）——v0.4.x 可在 wheel 侧加会话存活判据消除。
 - W-B（工作台重载解耦）：W-A 已消除最大重载源；剩余重载场景（真实通道切换时的工作台保活）另行 bounded 设计推进。
+
+### 3.11 W-B 工作台重载解耦：①探活后决策 + ②工作区位置记忆——双机真机验证（2026-09-27 01:0x–01:2x）
+
+**改动**：① p2p-net `036ffe7`（`pwa/src/shell.ts` 重连时 `looksBooted` 探活，存活不重建；测试 `shell-reconnect-probe.test.ts` 5/5，全量 68/68）。② devanywhere-ui PR #67 squash 合并 main（`24c57ab`，`workspace-location` localStorage 记忆，选中落盘/启动恢复/消费即清/失效自愈；vitest 6/6 + 五门禁绿）。PWA rsync VPS（指纹 `main-DnBuMexI.js`）；3001 工作台新构建重启（bundle `index-bAaJAw3R.js`）。
+
+**iPhone（CDP 直证，全部实测）**：
+
+1. **① host 硬重启（17:08:25 kickstart）→ 工作台零重建**：iframe 内 JS 标记 `__wbMarker` 重启后仍在；离线 sheet 从未弹出（transform 屏外）；徽章恒隧道。**机制实录：隧道在 VPS 桥下层透明愈合**——host 重启后 PWA 隧道会话（`tun_7c2ff621`，17:04:02 起）未重建、shell 未进入任何重连路径，数据面直通实证 `GET /s/3001/api/projects` → host 3001 后端亲答 `AUTH_TOKEN_INVALID`（非 VPS 回落 HTML）。①的探活代码本次未被触发（愈合发生在其感知层之下），用户目标（不闪不丢）以更强形式达成。
+2. **② 整页重载（17:17:15）→ 自动恢复会话现场**：新隧道会话 `tun_ad2070c5` 6s 就绪；新 iframe（src=`/s/3001/` 无指引）自动落在重载前的会话页 `/s/3001/session/5e757c49-…`；`workspace-location` 恢复后由选中副作用重写同值。
+3. **观察项（登记，非本次目标）**：host 重启后 iPhone 旁路 p2p 升级探针两次未成（17:07:16 `Fetch is aborted` 重启窗口内；17:11:34 `upgrade_wait_timeout`）且未触达 host（无 cellular-cu session_start）——主隧道服务无感，旁路退避续行，v0.4.x 观察。
+
+**Android（CDP 死，screencap 视觉取证，证据强度弱一档）**：
+
+1. 两次手动重载后 SW 换新（此前旧包级联仍会落 relay：17:11:59/17:22:57 `cascade_choice relay` 均为旧探针行为）。
+2. 进入会话「核验 remote 并清理 GitHub 记录」→ host 硬重启（01:21:59）+45s：会话页完整在位、滚动位置不变、徽章隧道——①视觉通过。
+3. 整页重载 +25s：自动回到同一会话页（对照组为「Choose Your Project」首页）——②视觉通过。
+4. host 侧新隧道会话 `tun_eb74a411`（17:23:12，cellular-ct）确证重载后主通道。
+
+**仪器缺口登记**：Android CDP 在本机 MIUI 浏览器（`com.android.browser`）不可用——`webview_devtools_remote_<pid>` socket 接受连接但空回复（raw socket 0 字节，Host 头/重启浏览器/重开 PWA 均无效）；设备无 Chrome 包。Android 端后续验证一律降级 screencap + input tap，结论标注证据强度。
+
+**结论**：W-B 双件套在双机双运营商（CU/CT）蜂窝象限全部达成用户目标——通道中断/恢复不再冲掉工作台现场；重建场景 6s 内自动回到原会话。①的探活分支真机未触发（愈合层级更低），由单测覆盖，留待真实通道切换场景实机观察。
