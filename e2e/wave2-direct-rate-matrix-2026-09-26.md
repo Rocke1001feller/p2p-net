@@ -50,7 +50,7 @@
 
 ### 3.3 未决项（登记追查）
 
-a. Android p2p 段 10s 超时根因未定性（offer 是否到 host、answer 是否回、ICE 是否败于 ep-dep——host 分层日志无 WebRTC 层，PWA 侧日志已灭失）；下次复现抓 PWA console + host signaling 双侧。
+a. ~~Android p2p 段 10s 超时根因未定性~~ **已闭环（见 §3.8）**：17:22–17:26 重连风暴双侧取证齐备——offer 去程丢失（×6）+ answer/ICE 回程超时（×1）两形态实证；信令往返预算 vs 蜂窝抖动为根因族。
 b. iPhone replaced×2 的链路缺口：05:26:14Z replaced 后 8min 无 session_start（疑 PWA 落隧道腿后 05:34:00Z 重试 WebRTC），replace 语义（offer 到即杀旧 or 新会话成活才杀旧）需读码钉死。
 c. 短命 relay 会话 wireBytes 明显小于 appBytes（pair 切换期字节归属碎片化）——计量口径 caveat，勿用于因子估计；因子以 wave1 浸泡/W2-4 为准。
 
@@ -101,6 +101,22 @@ c. 短命 relay 会话 wireBytes 明显小于 appBytes（pair 切换期字节归
 
 **切割口径（v0.3.x）**：squatter（MiMo-Code vite）未杀，保留无妨——console 自述已压过它；NAT 重映射正修（W2-7）不在本窗，划 v0.4.x。
 
+### 3.8 Android 重连风暴双侧取证（17:22–17:26，§3.3.a 闭环）
+
+用户回报：Android 实机「漫长反复重连」后稳定中继，体感不如 iPhone 隧道流畅。PWA `#log` DOM（CDP 直读，未灭失）× host events.jsonl/selfcheck 双侧对齐【全部实测】：
+
+1. **风暴形态**：17:23:04–17:26:47 共 **8 次级联失败**（全部 `turn=webrc_timeout_15000`，`?transport=relay` 强制 TURN tab），间隔呈 **1→2→4→8→15s 指数退避**（shell.ts:526，按设计工作，非无退避猛撞）；17:26:52 第 9 次 **3s 成功**后稳定 ≥14min（pulse 回帧持续增长）。
+2. **失败双形态**：① 17:23:04 offer 到 host（host 同刻记 `session_end replaced`）但 PWA 15s 超时——answer/ICE **回程**失败；② 其余 ×6 host **无任何记录**——offer **去程**未到 host。同期 host selfcheck signaling 零 alert（host↔Supabase 通畅）→ 瓶颈在 **Android↔Supabase 去程/回程抖动**（cascade_choice rtt 同期 54↔896ms 剧烈波动）。
+3. **超时预算边际【读码+实测】**：`CASCADE_TIMEOUT_MS.turn=15s`（pwa/src/constants.ts:33）；成功样本级联耗时 3–12s——17:22:15→27 首连 **12s 已贴近上限**。WiFi 富余、蜂窝抖动期击穿上限。
+4. **隧道 vs 中继体感差【方向性】**：iPhone=tunnel（HTTPS 逐请求，TCP 443 一等公民）全程稳；Android=TURN（UDP 承载，蜂窝对 UDP 不友好，与 W2-7 NAT 映射回收同族）。根治归 v0.4.x（TURN 保活 + 快速失败 + 超时预算联动设计），v0.3.0 不动。
+5. **仪器改进登记**：relay tab 本次日志未灭失的关键 = `#log` DOM 驻留；plain tab 因 CDP helper urlMatch 前缀撞车（'49.233.155.13/' 同时命中 `?transport=relay`）从未被刷新、日志停在 13:34——helper 已补 last-match 变体（/tmp/p2p-cdp-last.mjs），后续真机操作注意 tab 区分。
+
 ## 4. 结论与 cost-model §6.1 回填
 
-（待用户对「样本不足」口径的裁决后填：中继率行维持【弱证据】或升【实测-本仓 N=16 方向性信号】，由用户拍板。）
+用户裁决（2026-09-26 17:4x）：「样本不足」口径定性为 **【实测-本仓 N=16 方向性信号】**——双机双运营商（Android/电信蜂窝 + iPhone/联通蜂窝 × Mac 家宽，nat=endpoint-dependent）足以说明问题，不再做更多时段跑批；更多时段若有新问题归运营商变量，不改变本组合定性。**门禁收口，随 v0.3.0 发布。**
+
+- **直连率矩阵（W2-5 本体）**：本组合自然级联 **0% 直连**（16 会话 100% relay/tunnel），升级直连 0/3——定性方向性信号，不外推其他 NAT 组合。机制解释：endpoint-dependent 映射下打洞原理性低产，与 wave1 门禁 §2.1 勘误互洽。
+- **W2-7 werift 438 修复真机终验**：17min 定时死亡形态修复后**零复发**（§3.4）；新死亡链（NAT 重映射→幽灵 session→未签名 438→完整性丢弃）判别归档，正修（≤30–60s 保活防重映射 + 快速失败 + TURN REFRESH 观测）立项 **v0.4.x**。
+- **W2-6 暖场升级轮**：3 次升级全部 15s 有界回退（to=fallback），会话不中断——回退机制按设计工作；升级成功率待有直连条件的象限（不阻塞收口）。
+- **cost-model §6.1**：隧道 ≈0.94–0.96 元/GB、TURN ≈1.02 元/GB、直连 ≈0（KB 级信令税）【实测-本仓】；隧道与 TURN 同价带，隧道建连快 7.4–12.2×，级联顺序 p2p→tunnel→turn 维持。今日 relay 会话 wire ≈1.5MB（分分钱以下）。
+- **v0.3.0 增量清单**：console-hijack 根治（§3.7，host console 自述 + PWA last-good 兜底）+ 本档案收口；遗留立项：① W2-7 正修（v0.4.x）② 仪器缺口（§3.2.2 隧道腿计量、§3.8.5 helper 变体）③ coturn 端口池扩容→判定为**容量议题**（20 并发 allocation 对双机富余、对规模化不够，非稳定性根因——风暴是信令抖动非端口耗尽，coturn 侧无 487/500），挂 v0.4.x 或容量专项，本窗不动。
