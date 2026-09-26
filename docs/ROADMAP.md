@@ -84,8 +84,8 @@ Mac/Linux Server + VPS(A类) 入口 + Supabase 全自动引导 + 扫码即登录
 - 状态：已登记。
 
 ### OPS-1 VPS 证书续期（运维，非代码）
-- 49.233.155.13 HTTPS 证书 2026-09-27 起剩 5 天（doctor 实测）。不续期则 PWA 入口全灭。
-- 状态：**待办，时限最紧**。
+- 49.233.155.13 HTTPS 证书（Let's Encrypt shortlived IP 证书，6 天期）。
+- 状态：**已闭环（自动续期实证，零人工动作）**。2026-09-27 勘察：Caddy（pid 30204，Sep 22 起常驻）已于 **Sep 26 02:24:25 自动续期成功**（journalctl `tls.renew certificate renewed successfully`，进程未重启）；ARI 机制在位，下一次续期排程 selected_time≈Sep 29，远早于当前证书 Oct 2 09:25 GMT 到期。续期窗口内唯一风险是 LE/网络瞬时故障，Caddy 会持续重试，无需值守；9-30 前后抽查一次 `openssl s_client` 到期日即可。
 
 ## 三期及以后（远期想法，备忘）
 
