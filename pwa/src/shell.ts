@@ -137,7 +137,7 @@ const desk: { id: string; tunnelUrl: string | null; ticket: string | null; disco
 let activeDiscoveryPort: number | null = null;
 let manualStop = false;
 let wasConnected = false;
-/** 是否成功连上过（用于区分"首次连上"与"重连"：重连必须重建工作台首屏）。 */
+/** 是否成功连上过（区分"首次连上"与"重连"：重连先探活，工作台已死才重建——W-B①）。 */
 let everConnected = false;
 let reconnectAttempt = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -802,18 +802,24 @@ async function afterConnected(): Promise<void> {
   setWorkspaceEnabled(true);
   // 本轮之前连过 → 说明这是**重连**（黑洞拆连/换网/断网恢复）。此时：
   //   ① 服务清单与免登票据要重新取（票据可能已过期、console 端口可能变了）；
-  //   ② 工作台 iframe 很可能在黑洞窗口里被打死（资源 504）——必须**强制重载**，
-  //      否则就是用户看到的"永远白屏"（2026-09-12 真机 CDP 取证）。
+  //   ② 工作台先探活再定夺（W-B①，2026-09-27 用户裁决「②为主、①为辅」）：
+  //      DOM 仍存活（黑洞期没被 504 打死）→ 不重建，保住工作台现场；
+  //      已死（白屏/空文档）→ 强制重载，否则就是用户看到的"永远白屏"（2026-09-12 真机 CDP 取证）。
   const isReconnect = everConnected;
   if (isReconnect) { servicesFetched = false; fetchRetries = 0; }
   await fetchServices();
   if (isReconnect && consolePort) {
     const tab = tabs.get(consolePort);
     if (tab) {
-      tab.booted = false;
-      tab.reloads = 0;
-      log('[workbench] 数据面已重连 → 重建工作台（清首屏残骸）');
-      await openService(consolePort);
+      if (looksBooted(tab.iframe.contentDocument)) {
+        tab.booted = true; // 探活坐实：同步闩锁，止住后续健康检查链的空转
+        log('[workbench] 数据面已重连 → 工作台仍存活，不重建');
+      } else {
+        tab.booted = false;
+        tab.reloads = 0;
+        log('[workbench] 数据面已重连 → 重建工作台（清首屏残骸）');
+        await openService(consolePort);
+      }
     }
   }
   everConnected = true;
