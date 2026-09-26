@@ -75,8 +75,9 @@ export interface ShellHarness {
   textLog: Record<string, string[]>;
   /** 轮询条件成立（5ms 步进），超时抛错。 */
   waitFor(cond: () => boolean, timeoutMs?: number, what?: string): Promise<void>;
-  /** 安装假 RTCPeerConnection。autoOpen=false → dc 永不开（升级失败路径用）。 */
-  installFakeRtc(opts?: { autoOpen?: boolean }): void;
+  /** 安装假 RTCPeerConnection。autoOpen=false → dc 永不开（升级失败路径用）。
+   *  stats：'direct'|'relay' 时 getStats 返回对应候选对的展平行（旁路采纳门禁取证用）；缺省空表。 */
+  installFakeRtc(opts?: { autoOpen?: boolean; stats?: 'direct' | 'relay' | 'none' }): void;
 }
 
 function def(name: string, value: unknown): void {
@@ -204,6 +205,15 @@ export function installShellHarness(opts: { search: string; services?: unknown; 
       }
     },
     installFakeRtc: (rtcOpts) => {
+      // 采纳门禁（W-A）取证形态：direct=本地 srflx×远端 host（pairType 'p2p'）；
+      // relay=本地 srflx×远端 relay（host 侧 TURN，pairType 'relay'）——与 status.ts 判据逐键对齐。
+      const statsRows: Record<string, unknown>[] = !rtcOpts?.stats || rtcOpts.stats === 'none' ? [] : [
+        { type: 'candidate-pair', id: 'pair1', state: 'succeeded', nominated: true, localCandidateId: 'L1', remoteCandidateId: 'R1' },
+        { type: 'local-candidate', id: 'L1', candidateType: 'srflx', address: '203.0.113.10', port: 40000 },
+        rtcOpts.stats === 'relay'
+          ? { type: 'remote-candidate', id: 'R1', candidateType: 'relay', address: '49.233.155.13', port: 50001 }
+          : { type: 'remote-candidate', id: 'R1', candidateType: 'host', address: '192.168.1.10', port: 51000 },
+      ];
       class FakeDc {
         binaryType = 'arraybuffer';
         readyState = 'connecting';
@@ -231,7 +241,7 @@ export function installShellHarness(opts: { search: string; services?: unknown; 
         async setRemoteDescription(): Promise<void> {}
         async addIceCandidate(): Promise<void> {}
         setConfiguration(): void {}
-        async getStats(): Promise<{ forEach: (cb: (v: unknown) => void) => void }> { return { forEach: () => {} }; }
+        async getStats(): Promise<{ forEach: (cb: (v: unknown) => void) => void }> { return { forEach: (cb) => statsRows.forEach(cb) }; }
         close(): void {}
       }
       def('RTCPeerConnection', FakePc);

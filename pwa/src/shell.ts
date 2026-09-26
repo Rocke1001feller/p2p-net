@@ -211,6 +211,7 @@ async function attemptP2pUpgrade(): Promise<boolean> {
   const myDeviceId = currentDeviceId();
   if (!deskId || !uid || !myDeviceId) return false;
   let adopted = false;
+  let bypassPair: 'p2p' | 'relay' | null = null; // 采纳门禁取证：adopt 前静默只限状态条/帧流，不挡本地取证
   const web = new WebRtcSession({
     signaling: makeSignaling(),
     uid,
@@ -219,6 +220,7 @@ async function attemptP2pUpgrade(): Promise<boolean> {
     iceTransportPolicy: 'all',
     upgradeIceServers: upgradeIceServersFor('all', p2pStunServers, p2pStunServers),
     onStatus: (s) => {
+      if (s.pairType) bypassPair = s.pairType;
       if (!adopted || gen !== cascadeGen) return; // adopt 前静默：隧道状态条不得被旁路污染
       if (s.state === 'off') { onCascadeStatus({ state: 'off', pairType: null }); return; }
       onCascadeStatus({ ...s, mode: 'p2p' });
@@ -234,6 +236,16 @@ async function attemptP2pUpgrade(): Promise<boolean> {
       if (Date.now() >= deadline) throw new Error('upgrade_wait_timeout');
       await new Promise((r) => setTimeout(r, 150));
     }
+    // 采纳门禁（W-A 根因修复，2026-09-26）：旁路必须落在**真直连**（pairType 'p2p'）才接管——
+    // ① host 侧 TURN 的「假 p2p」相对隧道零优势：同走 VPS 流量、UDP 更脆、徽章说谎（中继顶 p2p 名）；
+    // ② 落 relay 的旁路会被 host 升级轮 ICE restart（werift 应答侧 nominated 清空 → host→PWA
+    //    静默黑洞 > 15s 看门狗 → ~40s 死亡循环 → 全序重级联 → 工作台重建）。
+    // 判不明（stats 迟迟不出）按不采纳论：隧道是安全落点，退避后下一拍重试。
+    while (bypassPair === null) {
+      if (Date.now() >= deadline) { log('[p2pupg] 旁路 pairType 未明 → 不采纳，保持隧道'); return false; }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    if (bypassPair !== 'p2p') { log('[p2pupg] 旁路落中继（非直连）→ 不采纳，保持隧道'); return false; }
     const target = cascade;
     if (gen !== cascadeGen || !target) { log('[p2pupg] 旁路等待期间会话已被取代 → 放弃本轮'); return false; }
     if (!target.adoptP2pUpgrade(web)) { log('[p2pupg] 旁路建成但落点已离开隧道 → 放弃本轮'); return false; }

@@ -14,7 +14,7 @@ const h = installShellHarness({
   observeTextIds: ['connStageTxt'],
 });
 
-h.installFakeRtc(); // dc 5ms 自动开：旁路 p2p 段能建成
+h.installFakeRtc({ stats: 'direct' }); // dc 5ms 自动开 + 直连候选对：旁路 p2p 段能建成且过采纳门禁
 await import('./shell.js');
 
 const win = h.window as unknown as {

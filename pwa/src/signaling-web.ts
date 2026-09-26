@@ -316,7 +316,8 @@ export class WebRtcSession {
   }
 
   /** 升级执行手（W2-6）：host 信令请求 → 翻转 policy 全量 + iceRestart 重协商。
-   *  spike §2.4：浏览器运行期 setConfiguration 有效；restart 只能由 PWA 发起（werift host 禁发起）。 */
+   *  spike §2.4：浏览器运行期 setConfiguration 有效；restart 只能由 PWA 发起（werift host 禁发起）。
+   *  调用门禁（W-A 修复，2026-09-26）：仅 relay 起跑会话可达——'all' 起跑的 upgrade 帧在 poll 分支即被忽略。 */
   private async performUpgrade(): Promise<void> {
     const pc = this.pc;
     if (!pc || !this.sid || !this.deskDeviceId || this.restartPending) return;
@@ -354,7 +355,14 @@ export class WebRtcSession {
         } else if (m.type === 'ice' && m.cand) {
           await this.addIce(m.cand);
         } else if (m.type === 'upgrade') {
-          void this.performUpgrade();
+          // W-A 根因修复（2026-09-26）：只有 relay 起跑（turn 段，W2-6 升级轮唯一设计对象）
+          // 的会话才执行 restart——翻全量 STUN+TURN 迁移直连有真新信息。'all' 起跑的会话
+          // （主 p2p 段 / 旁路）建连时已试过直连，落 relay 是直连失败的**结果**而非配置降级，
+          // restart 只是再走一遍失败；且 werift 应答侧 nominated 清空 → host→本端发送被静默
+          // 吞包（ice.js canSendApplicationData=false）直至重新提名，蜂窝链路超过 livenessMs
+          // 看门狗窗口 → 会话被判死（被采纳旁路 ~40s 死亡循环与「中继极度不稳定」同根）。
+          // 忽略后 host 观测窗耗尽 → 轮落 fallback 终态，本端会话毫发无损。
+          if (this.opts.iceTransportPolicy === 'relay') void this.performUpgrade();
         }
       }
     } catch (e) { console.log(`[sig] 轮询失败（下一 tick 重试）: ${e instanceof Error ? e.message : e}`); }

@@ -244,7 +244,7 @@ interface UpgradeCaptures {
 
 /** 假 PC/DC + 可编排行内存信令：connect 后经私有缝驱动 poll()
  *  （私有触达照 host.integration.test.ts:182 同款 as-unknown-as 先例）。 */
-async function connectForUpgrade(extra: { iceServers: RTCIceServer[]; upgradeIceServers?: RTCIceServer[] }): Promise<{
+async function connectForUpgrade(extra: { iceServers: RTCIceServer[]; upgradeIceServers?: RTCIceServer[]; iceTransportPolicy?: RTCIceTransportPolicy }): Promise<{
   session: WebRtcSession; sent: SentMsg[]; caps: UpgradeCaptures; sid: string;
   pollRows: (rows: Array<{ payload: unknown }>) => void;
   drivePoll: () => Promise<void>;
@@ -291,6 +291,7 @@ async function connectForUpgrade(extra: { iceServers: RTCIceServer[]; upgradeIce
     uid: 'uid-1', myDeviceId: 'phone-1',
     iceServers: extra.iceServers,
     ...(extra.upgradeIceServers ? { upgradeIceServers: extra.upgradeIceServers } : {}),
+    ...(extra.iceTransportPolicy ? { iceTransportPolicy: extra.iceTransportPolicy } : {}),
     onStatus: () => {}, onFrame: () => {},
     natProbe: async () => undefined, // 本组不关 NAT 采集，注入缝保持 hermetic
   });
@@ -316,10 +317,11 @@ async function connectForUpgrade(extra: { iceServers: RTCIceServer[]; upgradeIce
 /** performUpgrade 在 poll 分支里是 fire-and-forget——等一个宏任务让微任务链落定再断言。 */
 const flushMicrotasks = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-test('upgrade 帧 → setConfiguration 全量翻转 + iceRestart offer（同 sid、无 meta）', async () => {
+test('upgrade 帧（relay 起跑）→ setConfiguration 全量翻转 + iceRestart offer（同 sid、无 meta）', async () => {
   const stun: RTCIceServer[] = [{ urls: 'stun:stun.example.com' }];
   const turn: RTCIceServer[] = [{ urls: 'turn:turn.example.com', username: 'u', credential: 'p' }];
-  const h = await connectForUpgrade({ iceServers: turn, upgradeIceServers: [...stun, ...turn] });
+  // relay 起跑（turn 段构造面）= W2-6 升级轮的唯一设计对象
+  const h = await connectForUpgrade({ iceServers: turn, upgradeIceServers: [...stun, ...turn], iceTransportPolicy: 'relay' });
   try {
     h.pollRows([{ payload: { type: 'upgrade', sid: h.sid } }]);
     await h.drivePoll();
@@ -341,10 +343,10 @@ test('upgrade 帧 → setConfiguration 全量翻转 + iceRestart offer（同 sid
   }
 });
 
-test('restartPending 闸：pending 中第二个 upgrade 帧不再 createOffer；answer 到达后复位', async () => {
+test('restartPending 闸（relay 起跑）：pending 中第二个 upgrade 帧不再 createOffer；answer 到达后复位', async () => {
   const stun: RTCIceServer[] = [{ urls: 'stun:stun.example.com' }];
   const turn: RTCIceServer[] = [{ urls: 'turn:turn.example.com', username: 'u', credential: 'p' }];
-  const h = await connectForUpgrade({ iceServers: turn, upgradeIceServers: [...stun, ...turn] });
+  const h = await connectForUpgrade({ iceServers: turn, upgradeIceServers: [...stun, ...turn], iceTransportPolicy: 'relay' });
   try {
     // 首 answer 落定 remoteSet=true（模拟活会话）
     h.pollRows([{ payload: { type: 'answer', sid: h.sid, sdp: { type: 'answer', sdp: 'v=0 a1' } } }]);
@@ -385,9 +387,9 @@ test('sid 守卫：非本 sid 的 upgrade 帧静默忽略', async () => {
   }
 });
 
-test('缺 upgradeIceServers：setConfiguration 回传 opts.iceServers 原表（整体替换防呆，Review Focus #5）', async () => {
+test('缺 upgradeIceServers（relay 起跑）：setConfiguration 回传 opts.iceServers 原表（整体替换防呆，Review Focus #5）', async () => {
   const iceServers: RTCIceServer[] = [{ urls: 'stun:stun.example.com' }];
-  const h = await connectForUpgrade({ iceServers });
+  const h = await connectForUpgrade({ iceServers, iceTransportPolicy: 'relay' });
   try {
     h.pollRows([{ payload: { type: 'upgrade', sid: h.sid } }]);
     await h.drivePoll();
@@ -407,4 +409,40 @@ test('upgradeIceServersFor：relay → [stun…, stage…]；all → undefined�
   const stage: RTCIceServer[] = [{ urls: 'turn:turn.example.com', username: 'u', credential: 'p' }];
   assert.deepEqual(upgradeIceServersFor('relay', stun, stage), [...stun, ...stage], 'relay 暖场段升级翻全量 STUN+TURN');
   assert.equal(upgradeIceServersFor('all', stun, stage), undefined, '非 relay 段回传 opts.iceServers 原表（调用方 ?? 落定）');
+});
+
+/**
+ * W-A 根因修复（2026-09-26）：'all' 起跑的会话必须忽略 upgrade 帧。
+ * werift 应答侧 ICE restart 把 nominated 清空 → host→PWA 静默黑洞 > livenessMs → 会话判死；
+ * 'all' 起跑建连时已试过直连，落 relay 是直连失败的结果——restart 无新信息只有破坏。
+ * （被采纳旁路 ~40s 死亡循环；主 p2p 腿「中继极度不稳定」同根。）
+ */
+test("upgrade 帧忽略：'all' 起跑（旁路/p2p 段构造面）零 setConfiguration、零 restart offer", async () => {
+  const stun: RTCIceServer[] = [{ urls: 'stun:stun.example.com' }];
+  const h = await connectForUpgrade({ iceServers: stun, iceTransportPolicy: 'all' });
+  try {
+    const offersBefore = h.sent.filter((m) => m.msg?.type === 'offer').length;
+    h.pollRows([{ payload: { type: 'upgrade', sid: h.sid } }]);
+    await h.drivePoll();
+    await flushMicrotasks();
+    assert.equal(h.caps.setConfigurationCalls.length, 0, "'all' 起跑不得 setConfiguration");
+    assert.equal(h.caps.createOfferOpts.length, 1, '不得再起 offer（[0] 为 connect 首 offer）');
+    assert.equal(h.sent.filter((m) => m.msg?.type === 'offer').length, offersBefore, '不得发 restart offer');
+  } finally {
+    h.restore();
+  }
+});
+
+test("upgrade 帧忽略：缺省 policy（未传 iceTransportPolicy 亦按 'all' 论）", async () => {
+  const stun: RTCIceServer[] = [{ urls: 'stun:stun.example.com' }];
+  const h = await connectForUpgrade({ iceServers: stun });
+  try {
+    h.pollRows([{ payload: { type: 'upgrade', sid: h.sid } }]);
+    await h.drivePoll();
+    await flushMicrotasks();
+    assert.equal(h.caps.setConfigurationCalls.length, 0, '缺省 policy 不得执行 restart');
+    assert.equal(h.caps.createOfferOpts.length, 1);
+  } finally {
+    h.restore();
+  }
 });
