@@ -57,9 +57,23 @@ c. 短命 relay 会话 wireBytes 明显小于 appBytes（pair 切换期字节归
 ### 3.4 W2-7 真机终验（438 修复）
 
 - 终验臂：06:18:56Z Android 强制 relay（?transport=relay）浸泡，目标 ≥20min。
-- 判据：会话跨过 ≈06:36Z（1016s 老死亡点）不死 + events.jsonl 出现 `turn_438_repair{outcome:recovered}` + coturn 同时段 438 簇。
-- 结果：观察中（/tmp/w27-soak.log，25min 窗口）。
+- 结果【实测】：**跨过 17min 老死亡点**（1016s），但 **+1190s（19分50秒）仍死**（session_end reason=failed）。死法与旧 host 不同：coturn 窗口**零 438**，allocation 于 +1113s 死于「allocation timeout」（= 仅 +497s 完成一次 REFRESH，+997s 的第二次 REFRESH 未到达 coturn，600s 静默判死）；**`turn_438_repair` 事件 0 条**（438 修复循环从未被触发——本次根本不是 438 死法）。
+- 未定性：REFRESH#2 缺席原因三候选——Android 页面 ~20min 被冻结（浏览器侧 TURN 客户端停发）/ UDP 单包丢失无重传 / host werift REFRESH 链缺陷。判别实验登记：桌面 werift loopback 复现（排除手机因素）+ host 加 TURN 层 REFRESH 发送日志。
+- 附带：06:38:51Z 一条 upgrade fallback 落在垂死会话上（session_end 后 5s），升级轮对濒死会话的触发纪律待查。
+
+### 3.5 隧道腿僵尸事件（14:0x–14:4x，iPhone 前台四大功能全灭）
+
+用户报告：iPhone Safari 后台转前台，badge「隧道」绿，Chats/Files/Shell/Source Control 全灭。取证链【全部实测】：
+
+1. PWA 侧 fetch `/s/3001/` → **HTTP 502，body = `desktop offline`**（VPS 隧道网关对无腿 deviceId 的固定响应，relay.ts:289）。
+2. VPS `ss`：重启前 443 上**无任何来自 Mac 出口的 TCP**（106.37.77.254 / 144.168.58.189 均无）——host 腿在 VPS 侧不存在。
+3. host 自报「隧道兜底腿 1/1 在线」、日志 05:59:24Z 重连成功后 46+min 零记录——**半开僵尸：VPS 侧已死，Mac 侧 ESTAB 不自知**。
+4. `launchctl kickstart -k` 重启 host → 腿重建（VPS 443 出现 106.37.77.254 连接）→ **iPhone 同一页面（未刷新）复测 HTTP 200**。
+5. 代码根因【读码】：`src/tunnel/client.ts` **只有 close 事件驱动重连（指数退避 1→30s），无任何应用层 ping/pong 活性检测**；relay.ts:206 注明 ping/pong 帧纯转发——client 从不发 ping。中间设备（家用 NAT/代理）静默回收会话后，close 事件可迟到数小时（TCP keepalive 默认 2h 量级）→ host 假绿 + 全量隧道客户端 502。今晨 tunnel_reconnect 10–65min 间隔（00:07–05:59Z 共 10 次）= 同一盲区的历史发作记录。
+6. 架构事实（纠正直觉）：**PWA 隧道模式数据面 = 逐请求经网关的无状态设计**（session.ts:261 `fetch(${gw}/s/port/path)`），手机侧无持久连接可被 iOS 后台杀死——本次事件与 iPhone 后台**无关**，纯属 host 腿单点。WebRTC 模式（p2p/relay）才有持久 PC 怕后台。
+
+**登记修复项（待用户拍板立项）**：client.ts 加应用层心跳（ws 标准模式：15–30s `ping()` + pong 看门狗，连续缺席 `terminate()` 触发既有退避重连）+ host status 如实化（腿活性以 pong 为准，不以 readyState 为准）。~30 行 + 单测，与 WebRTC 层 15s pong 看门狗同构，零新增复杂度类别。
 
 ## 4. 结论与 cost-model §6.1 回填
 
-（待 §3.4 终验与用户对「样本不足」口径的裁决后填：中继率行维持【弱证据】或升【实测-本仓 N=16 方向性信号】，由用户拍板。）
+（待 §3.4 判别实验与用户对「样本不足」口径的裁决后填：中继率行维持【弱证据】或升【实测-本仓 N=16 方向性信号】，由用户拍板。）
