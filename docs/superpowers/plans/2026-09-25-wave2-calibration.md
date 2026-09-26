@@ -245,6 +245,8 @@ import { benchRamp, summarize } from './ramp.mjs';
 
 ### Task W2-6: 暖场升级轮 spike（杠杆轨，spike 先行，不进实现）
 
+> **状态（2026-09-26）：实现已合入**——spike 裁决获批后另立实现计划已落地（见 docs/superpowers/plans/2026-09-26-upgrade-wheel.md；spike 裁决 e2e/wave2-upgrade-wheel-spike-2026-09-26.md §2.4）。遗留三项见文末「遗留登记」。
+
 **Files:**
 - Create: `scripts/spike/ice-restart.probe.mjs`（werift 能力探针，throwaway）
 - Create: `e2e/wave2-upgrade-wheel-spike-<date>.md`（spike 报告）
@@ -277,3 +279,11 @@ W2-6 spike（与一切并行；报告获批后另立实现计划）
 ```
 
 每任务：独立分支 `wave2/<name>` → TDD → 主会话 squash 回 main → 部署管线（build → 全量测试 → install -g → kickstart → status 验证）。Wave 门禁（spec §5 四条）全过后 bump v0.3.0 发布。
+
+---
+
+## 遗留登记（W2-6 实现合入后，2026-09-26）
+
+1. **coturn 端口池扩容 + 池水位监控**——生产 coturn 配置改动**待用户决策**（证据：spike §2.3，cost-model §6.1 TURN 行）。
+2. **relay-first 级联倒置**（首段即 relay 的「真暖场」）——留待 A/B 矩阵证据后评估，本期不做。
+3. **切换中断时长指标**——不进常设事件流，A/B 战役真机专项测量（spike 基线 28–121ms）。

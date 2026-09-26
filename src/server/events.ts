@@ -12,7 +12,7 @@
  *  - 垃圾容忍：end-without-start / 对未开会话发 cascade_choice / 空 sid 一律忽略，绝不抛。
  *    （事件环形缓冲满后旧 start 被挤出，后到的 end 天然会撞上 end-without-start。）
  *
- *  纪律：SessionEvent 只带 sid/mode/rtt/bytes/reason/pathType——token/secret/URL 绝不进事件（start.ts
+ *  纪律：SessionEvent 只带 sid/mode/rtt/bytes/reason/pathType/from/to/ms——token/secret/URL 绝不进事件（start.ts
  *  装配处同纪律）。
  */
 
@@ -20,7 +20,7 @@ import type { Logger } from '../log/logger.js';
 import type { PathType } from '../pathType.js';
 
 export interface SessionEvent {
-  name: 'session_start' | 'session_end' | 'cascade_choice' | 'tunnel_reconnect';
+  name: 'session_start' | 'session_end' | 'cascade_choice' | 'tunnel_reconnect' | 'upgrade';
   /** 会话标识：WebRTC 会话为客户端 deviceId；tunnel_reconnect 为 relay ip。 */
   sid: string;
   mode?: 'p2p' | 'relay' | 'tunnel';
@@ -37,6 +37,11 @@ export interface SessionEvent {
   /** NAT facts 紧凑串（Wave 2 W2-2）：offer meta.nat 原样透传（如 `m:ep-ind,servers:2`）。
    *  只带聚合语义，srflx 的 ip 绝不进事件（序列化点 formatNatFacts 保证，同 events.ts:15 纪律）。 */
   nat?: string;
+  /** 升级轮终态（W2-6）：from 恒 'relay'（暖场路径）；to='direct' 升级成功 / 'fallback' 回退；
+   *  ms = 本次 attempt 起的驻留时长。绝无地址（host.ts onUpgrade 注释同纪律）。 */
+  from?: 'relay';
+  to?: 'direct' | 'fallback';
+  ms?: number;
   reason?: string;
 }
 

@@ -78,6 +78,16 @@ npx @rocke1001feller/p2p-net doctor --json   # 机器可读输出；退出码 = 
 
 日志位置：`~/.p2p-net/logs/`（`current.jsonl` 运行日志、`events.jsonl` 会话事件、`service.log` 常驻服务 stdout/stderr；自动轮转）。常驻服务日志也可以 `npx @rocke1001feller/p2p-net service logs -f` 跟随。
 
+## 配置开关
+
+### 暖场升级轮（W2-6，默认开）
+relay（TURN）暖场建连的会话，host 会在暖场稳定后请求 PWA 发起 ICE restart，后台原位升级为直连；
+失败自动留在 relay（每会话最多 2 次尝试），不中断既有会话。
+- `config.json`：`upgradeWheel: { enabled?: boolean; warmMs?: number; observeMs?: number; maxAttempts?: number }`
+  （默认 `{enabled:true, warmMs:10000, observeMs:15000, maxAttempts:2}`）
+- 环境变量 `P2P_NET_UPGRADE=0` 强制全关（排障用，压过 config）。
+- 观测：`events.jsonl` 的 `upgrade{sid,from,to,ms}` 事件；`node scripts/access-matrix.mjs` 出分桶成功率/回退率。
+
 ## 配额说明
 
 信令 = **PostgREST 轮询**（默认 800ms 一次增量轮询）：HostAgent 常驻期间会持续产生 Supabase 读请求，免费额度（Free tier）下请注意用量；长时间不用时建议 `service uninstall` 或 Ctrl+C 停掉前台进程。WebRTC 只在 **PWA 打开时**才建立——合上手机页面即断开，不占 TURN 流量。

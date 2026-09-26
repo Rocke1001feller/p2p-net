@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "desc": "信令消息守卫双端同构语料（W2-6）：valid=经 isSigMessage 应为 true；type=valid 时的消息类型。",
+  "cases": [
+    { "raw": { "type": "upgrade", "sid": "s1" }, "valid": true, "type": "upgrade" },
+    { "raw": { "type": "upgrade", "sid": "s1", "from": "desk1" }, "valid": true, "type": "upgrade" },
+    { "raw": { "type": "upgrade" }, "valid": false, "note": "缺 sid" },
+    { "raw": { "type": "restart", "sid": "s3" }, "valid": false, "note": "未知类型拒绝（旧版静默忽略的前提）" },
+    { "raw": { "type": "offer", "sid": "s4", "sdp": { "type": "offer", "sdp": "v=0 x" } }, "valid": true, "type": "offer", "note": "offer 无 meta：旧版兼容" },
+    { "raw": { "type": "offer", "sid": "s5", "sdp": { "type": "offer", "sdp": "v=0 x" }, "meta": { "access": "wifi-home" } }, "valid": true, "type": "offer" },
+    { "raw": { "type": "answer", "sid": "s6", "sdp": { "type": "answer", "sdp": "v=0 x" } }, "valid": true, "type": "answer" },
+    { "raw": { "type": "ice", "sid": "s7", "cand": { "candidate": "candidate:x 1 udp 1 1.1.1.1 9 typ relay", "sdpMid": "0" } }, "valid": true, "type": "ice" }
+  ]
+}

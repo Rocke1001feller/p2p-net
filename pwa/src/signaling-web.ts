@@ -68,11 +68,22 @@ export interface SessionOptions {
   /** NAT facts 探针（Wave 2 W2-2）：默认 offerNat（浏览器双 PC 采集 + 紧凑串序列化）。
    *  返回 undefined/抛错均静默降级——offer 照发，meta 不带 nat 键。测试注入缝。 */
   natProbe?: (iceServers: RTCIceServer[]) => Promise<string | undefined>;
+  /** 升级时 setConfiguration 用的全量 iceServers（STUN+TURN）；缺省回传 opts.iceServers 原表。 */
+  upgradeIceServers?: RTCIceServer[];
 }
 
 const POLL_MS = 800;          // plan Task 4：800ms 增量轮询
 const PURGE_MS = 60_000;
 const STATS_MS = 5_000;
+
+/** 升级 iceServers 决策（W2-6）：relay 暖场段 → STUN+TURN 全量；其余段 → undefined（回传原表）。 */
+export function upgradeIceServersFor(
+  policy: RTCIceTransportPolicy,
+  stun: RTCIceServer[],
+  stage: RTCIceServer[],
+): RTCIceServer[] | undefined {
+  return policy === 'relay' ? [...stun, ...stage] : undefined;
+}
 
 /**
  * proxy 通道入站帧处理（抽成纯函数便于单测，2026-09-23 心跳误判整改）。
@@ -113,6 +124,7 @@ export class WebRtcSession {
   private sid: string | null = null;
   private deskDeviceId: string | null = null;
   private remoteSet = false;
+  private restartPending = false;
   private readonly iceQueue: RTCIceCandidateInit[] = [];
   private cursor = 0;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -303,6 +315,31 @@ export class WebRtcSession {
     return true;
   }
 
+  /** 升级执行手（W2-6）：host 信令请求 → 翻转 policy 全量 + iceRestart 重协商。
+   *  spike §2.4：浏览器运行期 setConfiguration 有效；restart 只能由 PWA 发起（werift host 禁发起）。 */
+  private async performUpgrade(): Promise<void> {
+    const pc = this.pc;
+    if (!pc || !this.sid || !this.deskDeviceId || this.restartPending) return;
+    this.restartPending = true;
+    try {
+      // setConfiguration 整体替换语义：iceServers 必须显式回传，否则回落空表丢 TURN/STUN。
+      pc.setConfiguration({
+        iceServers: this.opts.upgradeIceServers ?? this.opts.iceServers,
+        iceTransportPolicy: 'all',
+      });
+      await pc.setLocalDescription(await pc.createOffer({ iceRestart: true }));
+      const local = pc.localDescription;
+      if (!local) throw new Error('restart offer 后无 localDescription');
+      await this.opts.signaling.send(roomFor(this.opts.uid, this.deskDeviceId), this.opts.myDeviceId, {
+        type: 'offer', sid: this.sid,
+        sdp: { type: local.type, sdp: local.sdp },
+        from: this.opts.myDeviceId, // restart offer 不带 meta（旧版兼容；access 已随首 offer 入桶）
+      });
+    } catch {
+      this.restartPending = false; // 本轮作废；host 观测窗到期按 maxAttempts 重发
+    }
+  }
+
   private async poll(): Promise<void> {
     try {
       const { msgs, cursor } = await this.opts.signaling.poll(roomFor(this.opts.uid, this.opts.myDeviceId), this.cursor);
@@ -310,11 +347,14 @@ export class WebRtcSession {
       for (const row of msgs) {
         const m = row.payload;
         if (!this.sid || m.sid !== this.sid) continue;   // 规则③ sid 守卫
-        if (m.type === 'answer' && m.sdp && this.pc && !this.remoteSet) {
+        if (m.type === 'answer' && m.sdp && this.pc && (!this.remoteSet || this.restartPending)) {
           await this.pc.setRemoteDescription(m.sdp as RTCSessionDescriptionInit);
-          await this.flushIce();
+          if (!this.remoteSet) await this.flushIce();
+          this.restartPending = false;
         } else if (m.type === 'ice' && m.cand) {
           await this.addIce(m.cand);
+        } else if (m.type === 'upgrade') {
+          void this.performUpgrade();
         }
       }
     } catch (e) { console.log(`[sig] 轮询失败（下一 tick 重试）: ${e instanceof Error ? e.message : e}`); }
@@ -347,6 +387,7 @@ export class WebRtcSession {
     if (this.pc) { try { this.pc.close(); } catch { /* 忽略 */ } this.pc = null; }
     this.sid = null;
     this.remoteSet = false;
+    this.restartPending = false;
     this.iceQueue.length = 0;
     this.lastPairType = null;
     this.lastRelayAddr = undefined;

@@ -157,6 +157,17 @@ export class Peer {
     await pc.setLocalDescription(await pc.createAnswer());
   }
 
+  /** 升级轮重协商（W2-6，spike §1.4-1：host 只作受控应答方）：同一 PC 原位应答 ICE restart offer。
+   *  不 dispose、不换 PC、不重挂 handlers（ondatachannel/onicecandidate/onconnectionstatechange/statusCb 全部存续），
+   *  不动 iceQueue/remoteSet——werift setRemoteDescription 见新 ufrag 自动对称 restart（spike §1.1），
+   *  新 ufrag 候选经 addIce→addIceTolerant 常态链路被吸收。sid 守卫：只认当前会话。 */
+  async acceptRestartOffer(sid: string, sdp: SdpLike): Promise<boolean> {
+    if (sid !== this.curSid || !this.pc) return false;
+    await this.pc.setRemoteDescription(sdp);
+    await this.pc.setLocalDescription(await this.pc.createAnswer());
+    return true;
+  }
+
   async addIce(cand: IceCandidateLike): Promise<void> {
     if (!this.remoteSet) { this.iceQueue.add(cand); return; }
     if (!this.pc) return;

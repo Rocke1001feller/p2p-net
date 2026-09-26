@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildAccessMatrix, renderAccessMatrix } from '../../scripts/access-matrix.mjs';
+import { buildAccessMatrix, buildUpgradeMatrix, renderAccessMatrix, renderUpgradeMatrix } from '../../scripts/access-matrix.mjs';
 
 const FIXTURE = [
   { name: 'session_start', sid: 'a', access: 'cellular-ct' },
@@ -49,4 +49,35 @@ test('buildAccessMatrix：垃圾容忍——坏对象/缺 sid/空 access 不抛�
   ]);
   assert.equal(samples.get('unknown'), 1);
   assert.equal(matrix.get('unknown')?.get('unknown'), 1, '缺 pathType 的 end 落 unknown 列');
+});
+
+// ---- Wave 2 W2-6：升级轮 A/B 矩阵——upgrade×start 按 sid join 分桶；孤儿/畸形忽略；ms 分位 ----
+
+test('buildUpgradeMatrix：upgrade×start 按 sid join 分桶；孤儿忽略；ms 分位数', () => {
+  const fx = [
+    { name: 'session_start', sid: 'a', access: 'cellular-ct' },
+    { name: 'upgrade', sid: 'a', from: 'relay', to: 'direct', ms: 800 },
+    { name: 'session_start', sid: 'b', access: 'cellular-ct' },
+    { name: 'upgrade', sid: 'b', from: 'relay', to: 'fallback', ms: 15000 },
+    { name: 'upgrade', sid: 'ghost', from: 'relay', to: 'direct', ms: 500 }, // 孤儿：无 start，忽略
+    { name: 'session_start', sid: 'c' }, // 旧版无 access → unknown 桶
+    { name: 'upgrade', sid: 'c', from: 'relay', to: 'direct', ms: 1200 },
+    { name: 'upgrade', sid: 'a', from: 'relay', to: 'direct' }, // 缺 ms：畸形忽略
+  ];
+  const m = buildUpgradeMatrix(fx);
+  const ct = m.get('cellular-ct');
+  assert.equal(ct.n, 2); assert.equal(ct.direct, 1); assert.equal(ct.fallback, 1);
+  assert.equal(ct.msP50, 800); assert.equal(ct.msP95, 15000); // 最近秩 [800,15000]
+  assert.equal(m.get('unknown').n, 1);
+  assert.equal([...m.values()].reduce((s, r) => s + r.n, 0), 3, '孤儿与畸形一律不进矩阵');
+});
+
+test('renderUpgradeMatrix：N<20 的桶派生指标标 N不足（禁止外推纪律同 access 矩阵）', () => {
+  const out = renderUpgradeMatrix(new Map([
+    ['cellular-ct', { n: 2, direct: 1, fallback: 1, msP50: 800, msP95: 15000 }],
+  ]));
+  assert.match(out, /bucket/);
+  assert.match(out, /成功率/);
+  assert.match(out, /cellular-ct/);
+  assert.match(out, /N不足/, '样本 <20 的桶派生指标必须标注 N不足');
 });

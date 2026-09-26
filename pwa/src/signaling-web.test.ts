@@ -233,3 +233,178 @@ test('offer meta.nat 采集失败（探针抛错/返回 undefined）→ 静默�
     undef.session.teardown();
   }
 });
+
+// ---- Wave 2 W2-6：升级执行手——upgrade 帧 → setConfiguration 翻转 + iceRestart 重协商 ----
+
+interface UpgradeCaptures {
+  setConfigurationCalls: RTCConfiguration[];
+  createOfferOpts: Array<{ iceRestart?: boolean } | undefined>;
+  setRemoteCount: number;
+}
+
+/** 假 PC/DC + 可编排行内存信令：connect 后经私有缝驱动 poll()
+ *  （私有触达照 host.integration.test.ts:182 同款 as-unknown-as 先例）。 */
+async function connectForUpgrade(extra: { iceServers: RTCIceServer[]; upgradeIceServers?: RTCIceServer[] }): Promise<{
+  session: WebRtcSession; sent: SentMsg[]; caps: UpgradeCaptures; sid: string;
+  pollRows: (rows: Array<{ payload: unknown }>) => void;
+  drivePoll: () => Promise<void>;
+  restore: () => void;
+}> {
+  const caps: UpgradeCaptures = { setConfigurationCalls: [], createOfferOpts: [], setRemoteCount: 0 };
+  class FakeDc {
+    binaryType = 'arraybuffer';
+    readyState = 'connecting';
+    bufferedAmount = 0;
+    onmessage: ((ev: { data: string | ArrayBuffer }) => void) | null = null;
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    send(): void {}
+    close(): void { this.readyState = 'closed'; }
+  }
+  class FakePc {
+    onicecandidate: ((ev: { candidate: null }) => void) | null = null;
+    onconnectionstatechange: (() => void) | null = null;
+    localDescription: { type: string; sdp: string } | null = null;
+    createDataChannel(): FakeDc { return new FakeDc(); }
+    setConfiguration(cfg: RTCConfiguration): void { caps.setConfigurationCalls.push(cfg); }
+    async createOffer(opts?: { iceRestart?: boolean }): Promise<{ type: string; sdp: string }> {
+      caps.createOfferOpts.push(opts);
+      return { type: 'offer', sdp: 'v=0 fake' };
+    }
+    async setLocalDescription(d: { type: string; sdp: string }): Promise<void> { this.localDescription = d; }
+    async setRemoteDescription(_d: unknown): Promise<void> { caps.setRemoteCount += 1; }
+    async addIceCandidate(): Promise<void> {}
+    close(): void {}
+  }
+  const g = globalThis as { RTCPeerConnection?: unknown };
+  const prevPc = g.RTCPeerConnection;
+  g.RTCPeerConnection = FakePc;
+  const sent: SentMsg[] = [];
+  let rows: Array<{ payload: unknown }> = [];
+  const signaling = {
+    send: async (room: string, sender: string, msg: unknown) => { sent.push({ room, sender, msg }); },
+    poll: async (_room: string, cursor: number) => ({ msgs: rows.splice(0) as unknown[], cursor }),
+    purgeExpired: async () => {},
+  };
+  const session = new WebRtcSession({
+    signaling: signaling as any,
+    uid: 'uid-1', myDeviceId: 'phone-1',
+    iceServers: extra.iceServers,
+    ...(extra.upgradeIceServers ? { upgradeIceServers: extra.upgradeIceServers } : {}),
+    onStatus: () => {}, onFrame: () => {},
+    natProbe: async () => undefined, // 本组不关 NAT 采集，注入缝保持 hermetic
+  });
+  const restorePc = (): void => {
+    if (prevPc === undefined) delete g.RTCPeerConnection;
+    else g.RTCPeerConnection = prevPc;
+  };
+  try {
+    await withLocalStorage(undefined, () => session.connect('desk-1'));
+  } catch (e) {
+    restorePc();
+    throw e;
+  }
+  const sid = (sent.find((m) => m.msg?.type === 'offer')!.msg as { sid: string }).sid;
+  return {
+    session, sent, caps, sid,
+    pollRows: (r) => { rows = r; },
+    drivePoll: () => (session as unknown as { poll: () => Promise<void> }).poll(),
+    restore: () => { session.teardown(); restorePc(); },
+  };
+}
+
+/** performUpgrade 在 poll 分支里是 fire-and-forget——等一个宏任务让微任务链落定再断言。 */
+const flushMicrotasks = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+test('upgrade 帧 → setConfiguration 全量翻转 + iceRestart offer（同 sid、无 meta）', async () => {
+  const stun: RTCIceServer[] = [{ urls: 'stun:stun.example.com' }];
+  const turn: RTCIceServer[] = [{ urls: 'turn:turn.example.com', username: 'u', credential: 'p' }];
+  const h = await connectForUpgrade({ iceServers: turn, upgradeIceServers: [...stun, ...turn] });
+  try {
+    h.pollRows([{ payload: { type: 'upgrade', sid: h.sid } }]);
+    await h.drivePoll();
+    await flushMicrotasks();
+    assert.equal(h.caps.setConfigurationCalls.length, 1, 'upgrade 帧必须触发一次 setConfiguration');
+    assert.deepEqual(h.caps.setConfigurationCalls[0], { iceServers: [...stun, ...turn], iceTransportPolicy: 'all' },
+      '整体替换：全量 STUN+TURN（顺序齐）+ policy 翻转 all，键齐无多余');
+    assert.deepEqual(h.caps.createOfferOpts[1], { iceRestart: true }, '重协商必须 iceRestart（[0] 为 connect 首 offer）');
+    const offers = h.sent.filter((m) => m.msg?.type === 'offer');
+    assert.equal(offers.length, 2, '首 offer + restart offer');
+    const msg = offers[1]!.msg;
+    assert.equal(msg.sid, h.sid, 'restart offer 必须与活会话同 sid（双端守卫都按 sid 路由）');
+    assert.equal(msg.from, 'phone-1');
+    assert.deepEqual(msg.sdp, { type: 'offer', sdp: 'v=0 fake' });
+    assert.ok(!('meta' in msg), 'restart offer 不带 meta（旧版兼容；access 已随首 offer 入桶）');
+    assert.deepEqual(Object.keys(msg).sort(), ['from', 'sdp', 'sid', 'type'], '帧纪律钉死：无任何多余键');
+  } finally {
+    h.restore();
+  }
+});
+
+test('restartPending 闸：pending 中第二个 upgrade 帧不再 createOffer；answer 到达后复位', async () => {
+  const stun: RTCIceServer[] = [{ urls: 'stun:stun.example.com' }];
+  const turn: RTCIceServer[] = [{ urls: 'turn:turn.example.com', username: 'u', credential: 'p' }];
+  const h = await connectForUpgrade({ iceServers: turn, upgradeIceServers: [...stun, ...turn] });
+  try {
+    // 首 answer 落定 remoteSet=true（模拟活会话）
+    h.pollRows([{ payload: { type: 'answer', sid: h.sid, sdp: { type: 'answer', sdp: 'v=0 a1' } } }]);
+    await h.drivePoll();
+    assert.equal(h.caps.setRemoteCount, 1);
+    // 连发两行 upgrade → createOffer 仅 1 次（[0] 首 offer + [1] restart）
+    h.pollRows([{ payload: { type: 'upgrade', sid: h.sid } }, { payload: { type: 'upgrade', sid: h.sid } }]);
+    await h.drivePoll();
+    await flushMicrotasks();
+    assert.equal(h.caps.createOfferOpts.length, 2, 'pending 中第二个 upgrade 帧不得再 createOffer');
+    assert.deepEqual(h.caps.createOfferOpts[1], { iceRestart: true });
+    // restart answer（remoteSet 已 true）仍须 setRemoteDescription——重协商 answer 不得被 !remoteSet 吞掉
+    h.pollRows([{ payload: { type: 'answer', sid: h.sid, sdp: { type: 'answer', sdp: 'v=0 a2' } } }]);
+    await h.drivePoll();
+    assert.equal(h.caps.setRemoteCount, 2, '重协商 answer 必须再调一次 setRemoteDescription');
+    // pending 已复位 → 第三个 upgrade 帧 → createOffer 第 2 次（总第 3 次）
+    h.pollRows([{ payload: { type: 'upgrade', sid: h.sid } }]);
+    await h.drivePoll();
+    await flushMicrotasks();
+    assert.equal(h.caps.createOfferOpts.length, 3, 'answer 复位 pending 后须能再次升级');
+    assert.deepEqual(h.caps.createOfferOpts[2], { iceRestart: true });
+  } finally {
+    h.restore();
+  }
+});
+
+test('sid 守卫：非本 sid 的 upgrade 帧静默忽略', async () => {
+  const h = await connectForUpgrade({ iceServers: [{ urls: 'stun:stun.example.com' }] });
+  try {
+    h.pollRows([{ payload: { type: 'upgrade', sid: 'other-sid' } }]);
+    await h.drivePoll();
+    await flushMicrotasks();
+    assert.equal(h.caps.setConfigurationCalls.length, 0, '非本 sid 不得触达 setConfiguration');
+    assert.equal(h.caps.createOfferOpts.length, 1, '只有 connect 首 offer，零额外 pc 调用');
+    assert.equal(h.sent.filter((m) => m.msg?.type === 'offer').length, 1, '不得发出任何 restart offer');
+  } finally {
+    h.restore();
+  }
+});
+
+test('缺 upgradeIceServers：setConfiguration 回传 opts.iceServers 原表（整体替换防呆，Review Focus #5）', async () => {
+  const iceServers: RTCIceServer[] = [{ urls: 'stun:stun.example.com' }];
+  const h = await connectForUpgrade({ iceServers });
+  try {
+    h.pollRows([{ payload: { type: 'upgrade', sid: h.sid } }]);
+    await h.drivePoll();
+    await flushMicrotasks();
+    assert.equal(h.caps.setConfigurationCalls.length, 1);
+    assert.equal(h.caps.setConfigurationCalls[0]!.iceServers, iceServers,
+      '必须显式回传原表（引用同）——省略会回落空表静默丢 STUN/TURN');
+    assert.equal(h.caps.setConfigurationCalls[0]!.iceTransportPolicy, 'all');
+  } finally {
+    h.restore();
+  }
+});
+
+test('upgradeIceServersFor：relay → [stun…, stage…]；all → undefined（回传原表）', async () => {
+  const { upgradeIceServersFor } = await import('./signaling-web.js');
+  const stun: RTCIceServer[] = [{ urls: 'stun:stun.example.com' }];
+  const stage: RTCIceServer[] = [{ urls: 'turn:turn.example.com', username: 'u', credential: 'p' }];
+  assert.deepEqual(upgradeIceServersFor('relay', stun, stage), [...stun, ...stage], 'relay 暖场段升级翻全量 STUN+TURN');
+  assert.equal(upgradeIceServersFor('all', stun, stage), undefined, '非 relay 段回传 opts.iceServers 原表（调用方 ?? 落定）');
+});

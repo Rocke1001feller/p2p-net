@@ -16,7 +16,7 @@
 import { SignalingClient } from 'p2p-net/browser';
 import { CASCADE_TIMEOUT_MS, DISCOVERY_PORT, isPlausibleTunnelUrl } from './constants.js';
 import { fetchTurnCredentials } from './cloud.js';
-import { WebRtcSession, type LightStatus } from './signaling-web.js';
+import { WebRtcSession, upgradeIceServersFor, type LightStatus } from './signaling-web.js';
 import { planStageModes } from './cascadePlan.js';
 import type { LivenessConfig } from './livenessConfig.js';
 
@@ -173,6 +173,7 @@ export class CascadeSession {
       myDeviceId: this.opts.myDeviceId,
       iceServers,
       iceTransportPolicy: policy,
+      upgradeIceServers: upgradeIceServersFor(policy, this.opts.stunServers, iceServers),
       onStatus: (s) => {
         if (web !== this.web) return; // 旧 web 会话的迟到事件作废（重连后不得污染当前状态）
         if (s.state === 'off') {

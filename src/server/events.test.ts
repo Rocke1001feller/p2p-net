@@ -107,3 +107,13 @@ test('session_start 带 nat 紧凑串透传进 events.jsonl 数据', () => {
   recordSessionEvent(log, { name: 'session_start', sid: 'a', access: 'cellular-ct', nat: 'm:ep-ind,servers:2' });
   assert.deepEqual(lines, [['session_start', { sid: 'a', access: 'cellular-ct', nat: 'm:ep-ind,servers:2' }]]);
 });
+
+// ---- Wave 2 W2-6：upgrade 事件——聚合层容忍（switch 未命中即忽略，不进 active/byMode） ----
+
+test('aggregateSessions 容忍 upgrade 事件：不计 active 不影响 byMode', () => {
+  const s = aggregateSessions([
+    { name: 'session_start', sid: 'a' },
+    { name: 'upgrade', sid: 'a', from: 'relay', to: 'direct', ms: 800 },
+  ]);
+  assert.equal(s.active, 1);
+});

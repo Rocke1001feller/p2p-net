@@ -69,6 +69,63 @@ export function renderAccessMatrix({ matrix, samples }, minN = MIN_SAMPLE) {
   return [line(header), ...rows.map(line)].join('\n') + '\n';
 }
 
+/** 升级轮 A/B 矩阵（W2-6）：upgrade 事件 × session_start(access) 按 sid join 分桶。
+ *  口径同 buildAccessMatrix：孤儿忽略、无 access 落 unknown、N<20 标 N不足（渲染层）。
+ *  A/B 阈值（spec §5 门禁 4 + spike §4.2）：成功率 ≥ 桶直连率×80%；回退率 < 10%；
+ *  中断 p95 < 1.5s 由真机专项测量（不在本矩阵）。 */
+export function buildUpgradeMatrix(events) {
+  const accessBySid = new Map();
+  for (const e of events) {
+    if (e?.name === 'session_start' && typeof e.sid === 'string' && e.sid) {
+      accessBySid.set(e.sid, typeof e.access === 'string' && e.access ? e.access : 'unknown');
+    }
+  }
+  const rows = new Map();
+  for (const e of events) {
+    if (e?.name !== 'upgrade' || typeof e.sid !== 'string' || !e.sid) continue;
+    if (e.to !== 'direct' && e.to !== 'fallback') continue;
+    if (typeof e.ms !== 'number' || !Number.isFinite(e.ms)) continue;
+    const bucket = accessBySid.get(e.sid);
+    if (!bucket) continue; // 孤儿忽略（与 buildAccessMatrix 同口径）
+    const r = rows.get(bucket) ?? { n: 0, direct: 0, fallback: 0, ms: [] };
+    r.n += 1;
+    if (e.to === 'direct') r.direct += 1; else r.fallback += 1;
+    r.ms.push(e.ms);
+    rows.set(bucket, r);
+  }
+  const q = (sorted, p) => sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)];
+  const out = new Map();
+  for (const [bucket, r] of rows) {
+    const sorted = [...r.ms].sort((a, b) => a - b);
+    out.set(bucket, { n: r.n, direct: r.direct, fallback: r.fallback, msP50: q(sorted, 0.5), msP95: q(sorted, 0.95) });
+  }
+  return out;
+}
+
+/** upgrade 矩阵 → 文本表（照 renderAccessMatrix 风格）：bucket|n|成功率|回退率|msP50|msP95。
+ *  N<minN 的桶派生指标一律标 N不足（cost-model §6.1：小样本点估计禁止外推）。 */
+export function renderUpgradeMatrix(m, minN = MIN_SAMPLE) {
+  const buckets = [...m.keys()].sort();
+  const pct = (x) => `${(x * 100).toFixed(1)}%`;
+  const header = ['bucket', 'n', '成功率', '回退率', 'msP50', 'msP95'];
+  const rows = buckets.map((b) => {
+    const r = m.get(b);
+    const bad = r.n < minN;
+    return [
+      b,
+      String(r.n),
+      bad ? 'N不足' : pct(r.direct / r.n),
+      bad ? 'N不足' : pct(r.fallback / r.n),
+      bad ? 'N不足' : String(r.msP50),
+      bad ? 'N不足' : String(r.msP95),
+    ];
+  });
+  if (rows.length === 0) rows.push(['（无 upgrade 事件）', '0', '—', '—', '—', '—']);
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
+  const line = (cols) => cols.map((c, i) => c.padEnd(widths[i])).join('  ').trimEnd();
+  return [line(header), ...rows.map(line)].join('\n') + '\n';
+}
+
 const invokedAsScript = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (invokedAsScript) {
   const path = process.argv[2] ?? join(homedir(), '.p2p-net', 'logs', 'events.jsonl');
@@ -80,4 +137,6 @@ if (invokedAsScript) {
     } catch { /* 坏行跳过：轮转截断/写一半的尾行不得杀死分析 */ }
   }
   process.stdout.write(renderAccessMatrix(buildAccessMatrix(events)));
+  process.stdout.write('\n升级轮 A/B（W2-6）\n');
+  process.stdout.write(renderUpgradeMatrix(buildUpgradeMatrix(events)));
 }

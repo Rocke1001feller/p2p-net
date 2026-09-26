@@ -23,6 +23,7 @@ import { decodeFrame, decodeBinFrame, isPing, isReq, isReqAbort, isWsClose, isWs
 import { SignalingClient, SignalingHttpError, type PollResult } from './signaling/client.js';
 import { isSigMessage, roomFor, type SigMessage } from './signaling/protocol.js';
 import { selectedPairStats, type PathType } from './pathType.js';
+import { UpgradeWheel, type UpgradePath, type UpgradeAction } from './upgradeWheel.js';
 
 export interface TurnCredentials {
   iceServers: RTCIceServer[];
@@ -91,6 +92,10 @@ export interface HostAgentOptions {
   onAuthFailure?: () => void;
   /** onAuthFailure 冷却期（默认 60s；测试注入小值）。 */
   authRetryMs?: number;
+  /** 升级轮（W2-6）：relay 暖场会话后台原位升级直连。缺省开；enabled:false 全关。 */
+  upgradeWheel?: { enabled?: boolean; warmMs?: number; observeMs?: number; maxAttempts?: number };
+  /** 升级轮终态（sid=客户端 deviceId，与 session_start 同键供 access 桶 join；from/to/ms，绝无地址）。 */
+  onUpgrade?: (e: { sid: string; from: 'relay'; to: 'direct' | 'fallback'; ms: number }) => void;
 }
 
 // 调试日志（P2P_NET_DEBUG=1 启用）；错误类日志不受开关限制（轮询/onSignal 失败必须留痕）
@@ -154,7 +159,7 @@ export function makeLedger(): SessionLedger {
 }
 
 export class PeerSession {
-  readonly peer = new Peer([], { transport: 'all' });
+  readonly peer: Peer; // ctor 赋值（第三参为测试缝；生产恒缺省 real Peer）
   readonly httpBridge = new HttpBridge();
   readonly wsBridge: WsBridge;
   /** 本会话最近一次成功状态（换绑/断开时重置）。 */
@@ -177,8 +182,15 @@ export class PeerSession {
   access?: string;
   /** NAT facts 紧凑串（Wave 2 W2-2）：来自 offer meta.nat；采集降级/旧版为 undefined。 */
   nat?: string;
+  /** 会话信令 sid（offer 带入）：upgrade 帧路由回 PWA 的唯一凭据。 */
+  sid?: string;
+  /** 升级轮（Wave 2 W2-6）：暖场状态机；门控关（upgradeWheel.enabled===false）时为 undefined。 */
+  wheel?: UpgradeWheel;
+  private wheelWarmTimer?: ReturnType<typeof setTimeout>;
+  private wheelObserveTimer?: ReturnType<typeof setTimeout>;
 
-  constructor(wsPort?: number, isPortAllowed?: (port: number) => boolean) {
+  constructor(wsPort?: number, isPortAllowed?: (port: number) => boolean, peer?: Peer) {
+    this.peer = peer ?? new Peer([], { transport: 'all' });
     this.wsPort = wsPort;
     this.isPortAllowed = isPortAllowed;
     this.wsBridge = new WsBridge({ port: wsPort });
@@ -324,6 +336,8 @@ export class PeerSession {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.clearWheelTimers();
+    this.wheel?.close();
     this.clearGrace();
     if (this.wireTimer) { clearInterval(this.wireTimer); this.wireTimer = undefined; }
     try { this.peer.close(); } catch { /* 已关闭 */ }
@@ -343,6 +357,26 @@ export class PeerSession {
 
   clearGrace(): void {
     if (this.graceTimer) { clearTimeout(this.graceTimer); this.graceTimer = undefined; }
+  }
+
+  /** 暖场计时（幂等，只 arm 一次）。 */
+  armWheelWarmTimer(ms: number, fn: () => void): void {
+    if (this.disposed || this.wheelWarmTimer) return;
+    this.wheelWarmTimer = setTimeout(() => { this.wheelWarmTimer = undefined; fn(); }, ms);
+    this.wheelWarmTimer.unref?.();
+  }
+
+  /** 观测窗计时（重发时重置——arm 前清旧）。 */
+  armWheelObserveTimer(ms: number, fn: () => void): void {
+    if (this.disposed) return;
+    if (this.wheelObserveTimer) clearTimeout(this.wheelObserveTimer);
+    this.wheelObserveTimer = setTimeout(() => { this.wheelObserveTimer = undefined; fn(); }, ms);
+    this.wheelObserveTimer.unref?.();
+  }
+
+  clearWheelTimers(): void {
+    if (this.wheelWarmTimer) { clearTimeout(this.wheelWarmTimer); this.wheelWarmTimer = undefined; }
+    if (this.wheelObserveTimer) { clearTimeout(this.wheelObserveTimer); this.wheelObserveTimer = undefined; }
   }
 }
 
@@ -539,8 +573,19 @@ export class HostAgent {
     if (msg.type === 'offer' && msg.sdp) {
       const clientKey = msg.from;
       if (!clientKey) { console.error('[p2p-net] offer 缺 from，无法路由应答（客户端必须带身份）'); return; }
-      const ice = await this.getIceServers();
       const existing = this.sessions.get(clientKey);
+      // 升级轮重协商（spike §1.4-1：host 只作受控应答方）：同一 PC 原位应答，不换绑/不新建/不动账本——
+      // 不 dispose、不换 PC、handlers 全存续（见 Peer.acceptRestartOffer），重协商期数据面不拆。
+      // 本分支整体上提至 getIceServers 之前：原位应答不复用 ICE 配置，省一次 TURN 凭据取数。
+      if (existing?.wheel && existing.wheel.state === 'upgrading') {
+        const ok = await existing.peer.acceptRestartOffer(msg.sid, msg.sdp);
+        if (!ok) { dbg('restart offer 被拒（sid 不符或无 PC）', clientKey); return; }
+        existing.sid = msg.sid; // 防御：sid 与轮/帧回路由对齐（同 sid 裁决下为 no-op）
+        const local = existing.peer.localDescription;
+        if (local) this.reply(clientKey, msg.sid, { type: 'answer', sid: msg.sid, sdp: local, from: this.opts.deviceId });
+        return;
+      }
+      const ice = await this.getIceServers();
       // 同设备换绑：dispose 旧会话并新建 PeerSession（POC「最新 offer 优先」语义限定在单设备内）。
       // dispose 不可逆（disposed 永久置位），复用旧对象会挡死宽限回调并让后续 dispose 早退。
       if (existing) {
@@ -557,6 +602,8 @@ export class HostAgent {
         this.sessions.delete(clientKey);
       }
       const session = new PeerSession(this.opts.wsPort, this.opts.isPortAllowed);
+      session.sid = msg.sid;
+      if (this.opts.upgradeWheel?.enabled !== false) session.wheel = new UpgradeWheel(this.opts.upgradeWheel);
       session.access = msg.meta?.access; // W2-1：offer meta → 会话条目（旧版无 meta 为 undefined，不拦）
       session.nat = msg.meta?.nat; // W2-2：NAT facts 紧凑串同链路透传（采集降级为 undefined，不拦）
       this.sessions.set(clientKey, session);
@@ -588,6 +635,44 @@ export class HostAgent {
       .catch(() => {});
   }
 
+  /** 升级轮驱动（每个状态 tick）：首连定路径；warm+relay arm 暖场计时；upgrading 见 direct 终态 emit。 */
+  private driveWheel(clientKey: string, session: PeerSession, s: LinkStatus): void {
+    const wheel = session.wheel;
+    if (!wheel || wheel.closed || s.state !== 'connected' || !s.pairType) return;
+    const path: UpgradePath = s.pairType === 'relay' ? 'relay' : 'direct';
+    wheel.onConnected(path, Date.now());
+    if (wheel.state === 'warm' && path === 'relay') {
+      session.armWheelWarmTimer(wheel.warmMs, () => this.onWheelWarm(clientKey, session));
+    } else if (wheel.state === 'upgrading' && path === 'direct') {
+      const act = wheel.onPairType(path, Date.now());
+      if (act?.kind === 'emit') { session.clearWheelTimers(); this.emitUpgrade(clientKey, act); }
+    }
+  }
+
+  private onWheelWarm(clientKey: string, session: PeerSession): void {
+    if (this.sessions.get(clientKey) !== session || !session.wheel) return;
+    if (session.wheel.onWarmTimeout(Date.now())?.kind === 'send-upgrade') this.sendUpgradeFrame(clientKey, session);
+  }
+
+  private onWheelObserve(clientKey: string, session: PeerSession): void {
+    if (this.sessions.get(clientKey) !== session || !session.wheel) return;
+    const act: UpgradeAction | null = session.wheel.onObserveTimeout(Date.now());
+    if (act?.kind === 'send-upgrade') this.sendUpgradeFrame(clientKey, session);
+    else if (act?.kind === 'emit') { session.clearWheelTimers(); this.emitUpgrade(clientKey, act); }
+  }
+
+  /** 帧纪律：{type:'upgrade', sid, from} 三键，绝无 token/URL/地址。 */
+  private sendUpgradeFrame(clientKey: string, session: PeerSession): void {
+    const wheel = session.wheel;
+    if (!wheel || !session.sid) return;
+    this.reply(clientKey, session.sid, { type: 'upgrade', sid: session.sid, from: this.opts.deviceId });
+    session.armWheelObserveTimer(wheel.observeMs, () => this.onWheelObserve(clientKey, session));
+  }
+
+  private emitUpgrade(clientKey: string, act: { from: 'relay'; to: 'direct' | 'fallback'; ms: number }): void {
+    this.opts.onUpgrade?.({ sid: clientKey, from: act.from, to: act.to, ms: act.ms });
+  }
+
   /** 摘除并释放一个客户端会话（幂等；宽限到期或客户端明确关闭时调用）。 */
   private dropSession(key: string, session: PeerSession): void {
     if (this.sessions.get(key) === session) this.sessions.delete(key);
@@ -603,6 +688,7 @@ export class HostAgent {
   private onSessionStatus(clientKey: string, session: PeerSession, s: LinkStatus): void {
     if (this.sessions.get(clientKey) !== session) return;
     session.lastStatus = s;
+    this.driveWheel(clientKey, session, s);
     // 2026-09-12 根因修复：只有 closed 立即摘；connecting/disconnected/failed 走宽限期，
     // 抖动期保留 ICE 路由与在途请求（旧行为把 disconnected 当 failed 秒摘 → 请求全挂）。
     const verdict = sessionDisposition(s.state);

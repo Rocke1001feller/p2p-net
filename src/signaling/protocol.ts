@@ -5,7 +5,7 @@
  *   `sig:<auth.uid>:<deviceId>` —— 同账号多设备互写对方房间即信令通路。
  */
 
-export type SigMessageType = 'offer' | 'answer' | 'ice' | 'hello' | 'bye' | 'tunnel';
+export type SigMessageType = 'offer' | 'answer' | 'ice' | 'hello' | 'bye' | 'tunnel' | 'upgrade';
 
 /** 会话描述线格式（浏览器 RTCSessionDescription / werift 同形）。 */
 export interface SdpLike {
@@ -47,7 +47,8 @@ export function parseRoom(room: string): { uid: string; deviceId: string } | nul
   return { uid: m[1], deviceId: m[2] };
 }
 
-const TYPES = new Set<SigMessageType>(['offer', 'answer', 'ice', 'hello', 'bye', 'tunnel']);
+/** 'upgrade' = host→PWA 请求发起 ICE restart（W2-6）；复用 sid/from，无其他字段。 */
+const TYPES = new Set<SigMessageType>(['offer', 'answer', 'ice', 'hello', 'bye', 'tunnel', 'upgrade']);
 
 export function isSigMessage(x: unknown): x is SigMessage {
   if (typeof x !== 'object' || x === null) return false;

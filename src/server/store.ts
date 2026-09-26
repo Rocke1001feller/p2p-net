@@ -17,6 +17,8 @@ export interface AppConfig {
   tunnelSecret: string;
   relays: { ip: string }[];
   deviceId?: string;
+  /** 升级轮（W2-6，可选段，缺省全开）：relay 暖场会话后台原位升级直连。 */
+  upgradeWheel?: { enabled?: boolean; warmMs?: number; observeMs?: number; maxAttempts?: number };
 }
 
 /** 本地配置缺失/损坏时的统一错误：message 必带可操作的下一步。 */
@@ -54,6 +56,21 @@ export function loadConfig(dir: string): AppConfig {
 
 export function saveConfig(dir: string, cfg: AppConfig): void {
   writeJson0600(join(dir, CONFIG_FILE), cfg);
+}
+
+/** 升级轮配置归一（W2-6）：config.json 可选段 + env P2P_NET_UPGRADE=0 强制关（P2P_NET_GZIP=0 先例）。
+ *  只带实际存在的数值键——缺省键不出现，下游 HostAgent 用 ?? 默认值。 */
+export function resolveUpgradeWheel(
+  cfg: AppConfig['upgradeWheel'] | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): { enabled: boolean; warmMs?: number; observeMs?: number; maxAttempts?: number } {
+  const enabled = env.P2P_NET_UPGRADE === '0' ? false : cfg?.enabled !== false;
+  return {
+    enabled,
+    ...(cfg?.warmMs !== undefined ? { warmMs: cfg.warmMs } : {}),
+    ...(cfg?.observeMs !== undefined ? { observeMs: cfg.observeMs } : {}),
+    ...(cfg?.maxAttempts !== undefined ? { maxAttempts: cfg.maxAttempts } : {}),
+  };
 }
 
 /** 登录态读取：文件缺失返回 null（未登录是正常状态，不是错误）。AuthState 见 Task 14。 */

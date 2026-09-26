@@ -37,7 +37,7 @@ import { aggregateSessions, recordSessionEvent, type SessionEvent } from '../ser
 import { bindDeviceAuth, fetchTurnCredentials, startPairingLoop, type PairingHandle, type TicketStatus } from '../server/pairing.js';
 import { createScanner, DEFAULT_WHITELIST, NEVER_PORTS, type Scanner, type ServiceInfo } from '../server/scanner.js';
 import { startSelfcheck } from '../server/selfcheck.js';
-import { loadAuth, loadConfig, saveAuth, saveConfig, type AppConfig } from '../server/store.js';
+import { loadAuth, loadConfig, resolveUpgradeWheel, saveAuth, saveConfig, type AppConfig } from '../server/store.js';
 import { TunnelClient } from '../tunnel/client.js';
 import { TunnelMeter } from '../tunnel/meter.js';
 
@@ -336,6 +336,9 @@ export async function runStart(opts: RunStartOptions = {}, deps: RunStartDeps = 
       onAuthFailure: () => {
         void refreshNow('auth-failure');
       },
+      // 升级轮（W2-6）：config.json upgradeWheel 段 + env P2P_NET_UPGRADE=0 强关；终态写会话事件流
+      upgradeWheel: resolveUpgradeWheel(cfg.upgradeWheel),
+      onUpgrade: (e) => record({ name: 'upgrade', sid: e.sid, from: e.from, to: e.to, ms: e.ms }),
     });
     host.start();
     teardowns.push(() => host.stop());

@@ -121,6 +121,34 @@ test('旧会话的候选缓冲不污染新会话', async () => {
   assert.equal(stubs[1].calls.addedIce.length, 0);
 });
 
+// ---- 升级轮重协商原位应答（W2-6：同 sid 不拆 PC，异 sid/无 PC 拒绝）----
+
+test('acceptRestartOffer：同 sid 同一 pc 原位再应答（不 close/不新建/不动 handlers）；异 sid 与无 PC 拒绝', async () => {
+  const stubs = [makeStubPc(), makeStubPc()];
+  const peer = new Peer([], { pcFactory: stubFactoryQueue(stubs) });
+  await peer.acceptOffer('sid-1', OFFER, noopHandlers());
+  assert.equal(stubs[0].calls.remoteDescriptions.length, 1);
+  let answers = 0;
+  const origAnswer = stubs[0].pc.createAnswer.bind(stubs[0].pc);
+  stubs[0].pc.createAnswer = async () => { answers += 1; return origAnswer(); };
+
+  const ok = await peer.acceptRestartOffer('sid-1', { type: 'offer', sdp: 'v=0 restart' });
+  assert.equal(ok, true, '同 sid 必须受理');
+  assert.equal(stubs[0].calls.remoteDescriptions.length, 2, '同一 pc 原位再咽一次 restart SDP');
+  assert.equal(answers, 1, 'createAnswer 在同一 pc 上被调（新 answer）');
+  assert.equal(stubs[0].calls.closeCount, 0, '原位应答不得拆 PC（数据面存续）');
+  assert.equal(stubs[1].calls.remoteDescriptions.length, 0, '不得新建 pc');
+
+  const reject = await peer.acceptRestartOffer('sid-2', { type: 'offer', sdp: 'v=0 restart-2' });
+  assert.equal(reject, false, '异 sid 必须拒绝（sid 守卫只认当前会话）');
+  assert.equal(stubs[0].calls.remoteDescriptions.length, 2, '异 sid 零 pc 交互');
+  assert.equal(answers, 1);
+  assert.equal(stubs[0].calls.closeCount, 0, '拒绝路径同样不拆 PC');
+
+  const idle = new Peer([], { pcFactory: stubFactoryQueue([makeStubPc()]) });
+  assert.equal(await idle.acceptRestartOffer('sid-x', OFFER), false, '无会话无 PC 必须拒绝');
+});
+
 // ---- 数据通道/候选回调接线 ----
 
 test('ondatachannel/onicecandidate 接线（候选以平铺字典下发）', async () => {
