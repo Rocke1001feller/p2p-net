@@ -25,6 +25,9 @@ export const LS_DEVICES = 'p2p-net.pwa.devices';
 /** 隐藏服务清单键（P1 减法模型）：Record<deviceId, number[]>，按设备隔离。 */
 export const LS_HIDDEN_SERVICES = 'p2p-net.pwa.hiddenServices';
 
+/** 上次选中服务端口键（P1）：Record<deviceId, number>，按设备隔离（last-good 的 per-device 扩展）。 */
+export const LS_LAST_SERVICE = 'p2p-net.pwa.lastService';
+
 /** 接入类型手动标注键（Wave 2 W2-1）：「我的」tab select 写入；offer meta.access 优先取它。 */
 export const LS_ACCESS = 'p2p-net.pwa.access';
 
