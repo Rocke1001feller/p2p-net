@@ -84,7 +84,7 @@ button{font-family:inherit}
 #connBar .disc{border:none;background:rgba(229,73,58,.1);color:var(--err);font-size:12.5px;font-weight:700;
   border-radius:8px;padding:6px 10px;cursor:pointer}
 #appHost{flex:1;position:relative;background:#fff}
-#svcGuide{position:absolute;inset:56px 0 0 0;background:var(--bg,#f6f7f9);text-align:center;padding-top:38%;z-index:5}
+#svcGuide{position:absolute;inset:0;background:var(--bg,#f6f7f9);text-align:center;padding-top:38%;z-index:5}
 #svcGuideTxt{display:inline-block;padding:12px 20px;border-radius:999px;background:#fff;color:var(--ink2,#666);font-size:14px;box-shadow:0 1px 6px rgba(0,0,0,.08)}
 #svcDrawerMask{position:absolute;inset:0;z-index:7;background:rgba(20,22,25,.18);display:none}
 #svcDrawerMask.show{display:block}
@@ -200,8 +200,11 @@ iframe.app{position:absolute;inset:0;width:100%;height:100%;border:0;display:non
       <span class="lat" id="connRtt"></span>
       <button class="disc hidden" id="btnDisconnect">断开</button>
     </div>
-    <div id="appHost"></div>
-    <div id="svcGuide" style="display:none"><span id="svcGuideTxt">☰ 从侧栏挑一个服务</span></div>
+    <!-- svcGuide 必须在 appHost 内（appHost 位于 connBar 之下）：写死 inset 魔数会在刘海屏
+         上盖住 connBar 里的 ☰/断开——而引导页文案恰恰让用户点 ☰（评审 I6） -->
+    <div id="appHost">
+      <div id="svcGuide" style="display:none"><span id="svcGuideTxt">☰ 从侧栏挑一个服务</span></div>
+    </div>
     <div id="svcDrawerMask"></div>
     <div id="svcDrawer">
       <div class="svc-drawer-head"><b id="svcDrawerName">设备</b><button id="svcDrawerClose">收起 ⟨</button></div>
