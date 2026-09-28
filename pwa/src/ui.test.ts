@@ -146,27 +146,107 @@ test('opts 缺省 → 全部卡片旧行为（纯连接入口），不报错（R
 });
 
 // ---- 评审修复 C1（2026-09-28）：抽屉 ✕ 必须断冒泡 ----
+// 2026-09-28 多设备侧栏树：模型改为 {groups: DeviceGroup[]}，handlers 带 deviceId。
 import { renderServiceTree } from './ui.js';
+import type { DeviceGroup } from './serviceTree.js';
+
+const grp = (over: Partial<DeviceGroup>): DeviceGroup => ({
+  deviceId: 'mac', name: 'MacBook Pro', online: true, visible: [], hidden: [], gone: [], ...over,
+});
+const srow = (port: number, name = `svc${port}`) =>
+  ({ port, name, isConsole: false, isSelected: false, isGone: false });
+
+/** 在 svcTree 里按 deviceId + port 找到服务行（组容器 → 行两级结构）。 */
+function findRow(deviceId: string, port: number): FakeEl {
+  for (const g of el('svcTree').children as FakeEl[]) {
+    if (g.dataset.deviceId !== deviceId) continue;
+    const row = (g.children as FakeEl[]).find((r) => r.dataset.port === String(port));
+    if (row) return row;
+  }
+  throw new Error(`row not found: ${deviceId}:${port}`);
+}
 
 test('服务树 ✕ 按钮断冒泡：点 ✕ 只触发 onHide，不得触发行 onPick', () => {
-  const picked: number[] = [];
-  const hidden: number[] = [];
+  const picked: unknown[] = [];
+  const hidden: [string, number][] = [];
   renderServiceTree(
-    {
-      deviceName: 'MacBook Pro',
-      visible: [{ port: 3000, name: 'vite dev', isConsole: false, isSelected: false, isGone: false }],
-      hidden: [],
-      gone: [],
-    },
-    { onPick: (p) => picked.push(p), onHide: (p) => hidden.push(p), onUnhide: () => {} },
+    { groups: [grp({ visible: [srow(3000, 'vite dev')] })] },
+    { onPick: (d, p) => picked.push([d, p]), onHide: (d, p) => hidden.push([d, p]), onUnhide: () => {} },
   );
-  const row = (el('svcTree').children as FakeEl[]).find((r) => r.dataset.port === '3000')!;
+  const row = findRow('mac', 3000);
   const x = (row.children as FakeEl[]).find((c) => c.className.includes('svc-hide'))!;
   assert.ok(x, '普通服务行必须有 ✕');
   let stopped = false;
   x.onclick!({ stopPropagation: () => { stopped = true; } });
   assert.equal(stopped, true,
     '✕ 必须 stopPropagation——真机上不阻断则冒泡到 row.onclick=onPick，把用户刚隐藏的服务当场打开（harness 无冒泡模型，此断言钉的是契约）');
-  assert.deepEqual(hidden, [3000]);
+  assert.deepEqual(hidden, [['mac', 3000]]);
   assert.deepEqual(picked, []);
+});
+
+test('多设备分组：组头渲染名称与在线态；离线组行可点，onPick 带 deviceId', () => {
+  const picked: [string, number | null][] = [];
+  renderServiceTree(
+    {
+      groups: [
+        grp({ deviceId: 'mac', name: 'MacBook Pro', online: true, visible: [srow(3001)] }),
+        grp({ deviceId: 'win', name: 'Windows 台式机', online: false, snapAt: 1, visible: [srow(8888, 'Win 报表')] }),
+      ],
+    },
+    { onPick: (d, p) => picked.push([d, p]), onHide: () => {}, onUnhide: () => {} },
+  );
+  const groups = el('svcTree').children as FakeEl[];
+  assert.equal(groups.length, 2);
+  const headText = (g: FakeEl) => (g.children as FakeEl[])[0].children.map((c) => (c as FakeEl).textContent).join('|');
+  assert.ok(headText(groups[0]).includes('MacBook Pro') && headText(groups[0]).includes('在线'));
+  assert.ok(headText(groups[1]).includes('Windows 台式机') && headText(groups[1]).includes('离线'));
+  assert.ok(groups[1].className.includes('off'), '离线组必须带 off 类（灰显）');
+  findRow('win', 8888).onclick!();
+  assert.deepEqual(picked, [['win', 8888]], '点离线组服务 = 切机直达该服务');
+});
+
+test('多设备分组：无快照空组渲染「点我连入」提示行，点击 onPick(deviceId, null)', () => {
+  const picked: [string, number | null][] = [];
+  renderServiceTree(
+    { groups: [grp({ deviceId: 'mini', name: 'Mac mini（家里）', online: false })] },
+    { onPick: (d, p) => picked.push([d, p]), onHide: () => {}, onUnhide: () => {} },
+  );
+  const g = (el('svcTree').children as FakeEl[])[0];
+  const hint = (g.children as FakeEl[]).find((c) => c.className.includes('svc-empty'))!;
+  assert.ok(hint, '空组必须有提示行');
+  assert.ok(hint.textContent.includes('点我连入'));
+  hint.onclick!();
+  assert.deepEqual(picked, [['mini', null]], '点提示行 = 连入该设备（不指定服务）');
+});
+
+test('多设备分组：隐藏小节在组内渲染，恢复按钮触发 onUnhide(deviceId, port)', () => {
+  const unhidden: [string, number][] = [];
+  renderServiceTree(
+    { groups: [grp({ hidden: [srow(3002)] })] },
+    { onPick: () => {}, onHide: () => {}, onUnhide: (d, p) => unhidden.push([d, p]) },
+  );
+  const g = (el('svcTree').children as FakeEl[])[0];
+  const row = (g.children as FakeEl[]).find((r) => r.dataset.port === '3002')!;
+  const un = (row.children as FakeEl[]).find((c) => c.className.includes('svc-unhide'))!;
+  un.onclick!();
+  assert.deepEqual(unhidden, [['mac', 3002]]);
+});
+
+test('多设备分组：组容器注入分组色 --grp/--grpSoft；抽屉名单组显示设备名、多组显示「全部服务」', () => {
+  renderServiceTree(
+    {
+      groups: [
+        grp({ deviceId: 'mac' }),
+        grp({ deviceId: 'win', name: 'Windows 台式机', online: false }),
+      ],
+    },
+    { onPick: () => {}, onHide: () => {}, onUnhide: () => {} },
+  );
+  const groups = el('svcTree').children as FakeEl[];
+  assert.ok(groups[0].style['--grp'], '组容器必须注入 --grp');
+  assert.ok(groups[0].style['--grpSoft'], '组容器必须注入 --grpSoft');
+  assert.notEqual(groups[0].style['--grp'], groups[1].style['--grp'], '不同设备分组色应不同（mac/win 实测不撞色）');
+  assert.equal(el('svcDrawerName').textContent, '全部服务');
+  renderServiceTree({ groups: [grp({})] }, { onPick: () => {}, onHide: () => {}, onUnhide: () => {} });
+  assert.equal(el('svcDrawerName').textContent, 'MacBook Pro', '单组时抽屉头回退设备名');
 });

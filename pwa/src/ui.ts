@@ -337,80 +337,99 @@ export function setConnTitle(name: string): void {
   ($('connTitle') as HTMLElement).dataset.name = name;
 }
 
-// ---- 侧栏服务树（2026-09-28 P1 多服务工作台：设备→服务树 + 隐藏/恢复）----
-import type { ServiceRow } from './serviceTree.js';
+// ---- 侧栏服务树（2026-09-28 多设备版：全部设备 × 各自服务分组渲染）----
+import type { DeviceGroup, ServiceRow } from './serviceTree.js';
 
 export interface ServiceTreeModel {
-  deviceName: string;
-  /** 分组色锚点（抽屉头圆点/选中行衬底取它的色）；缺省回落品牌绿。 */
-  deviceId?: string;
-  visible: ServiceRow[];
-  hidden: ServiceRow[];
-  gone: ServiceRow[];
+  groups: DeviceGroup[];
 }
 export interface ServiceTreeHandlers {
-  onPick(port: number): void;
-  onHide(port: number): void;
-  onUnhide(port: number): void;
+  /** port=null 表示「连入该设备（不指定服务）」——空组提示行用。 */
+  onPick(deviceId: string, port: number | null): void;
+  onHide(deviceId: string, port: number): void;
+  onUnhide(deviceId: string, port: number): void;
+}
+
+function svcRow(r: ServiceRow, deviceId: string, handlers: ServiceTreeHandlers): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'svc-row' + (r.isGone ? ' gone' : r.isSelected ? ' sel' : '');
+  row.dataset.port = String(r.port);
+  const nm = document.createElement('span');
+  nm.className = 'svc-nm';
+  nm.textContent = r.isGone ? `${r.name}（已离线）` : r.name;
+  row.appendChild(nm);
+  if (!r.isGone && !r.isConsole) {
+    const x = document.createElement('button');
+    x.className = 'svc-hide';
+    x.textContent = '✕';
+    x.title = '隐藏（可在本组下方恢复）';
+    // 必须断冒泡：✕ 嵌在可点行内，真机上不阻断会冒泡到 row.onclick=onPick，
+    // 把用户刚隐藏的服务当场打开（2026-09-28 评审 C1；launch-grid 同款模式）。
+    x.onclick = (e) => { e?.stopPropagation(); handlers.onHide(deviceId, r.port); };
+    row.appendChild(x);
+  }
+  if (!r.isGone) row.onclick = () => handlers.onPick(deviceId, r.port);
+  return row;
 }
 
 export function renderServiceTree(model: ServiceTreeModel, handlers: ServiceTreeHandlers): void {
-  $('svcDrawerName').textContent = model.deviceName || '设备';
-  const drawer = $('svcDrawer');
-  const gc = deviceColor(model.deviceId ?? '');
-  drawer.style.setProperty('--grp', gc.fg);
-  drawer.style.setProperty('--grpSoft', gc.soft);
+  $('svcDrawerName').textContent =
+    model.groups.length > 1 ? '全部服务' : model.groups[0]?.name || '设备';
   const tree = $('svcTree');
   tree.innerHTML = '';
-  for (const r of model.visible) {
-    const row = document.createElement('div');
-    row.className = 'svc-row' + (r.isSelected ? ' sel' : '');
-    row.dataset.port = String(r.port);
+  for (const g of model.groups) {
+    const box = document.createElement('div');
+    box.className = 'svc-group' + (g.online ? '' : ' off');
+    box.dataset.deviceId = g.deviceId;
+    const gc = deviceColor(g.deviceId);
+    box.style.setProperty('--grp', gc.fg);
+    box.style.setProperty('--grpSoft', gc.soft);
+
+    const head = document.createElement('div');
+    head.className = 'svc-group-head';
+    const dot = document.createElement('span');
+    dot.className = 'gdot';
     const nm = document.createElement('span');
-    nm.className = 'svc-nm';
-    nm.textContent = r.name;
-    row.appendChild(nm);
-    if (!r.isConsole) {
-      const x = document.createElement('button');
-      x.className = 'svc-hide';
-      x.textContent = '✕';
-      x.title = '隐藏（可在下方恢复）';
-      // 必须断冒泡：✕ 嵌在可点行内，真机上不阻断会冒泡到 row.onclick=onPick，
-      // 把用户刚隐藏的服务当场打开（2026-09-28 评审 C1；launch-grid 同款模式）。
-      x.onclick = (e) => { e?.stopPropagation(); handlers.onHide(r.port); };
-      row.appendChild(x);
+    nm.className = 'gname';
+    nm.textContent = g.name;
+    const st = document.createElement('span');
+    st.className = 'gstate';
+    st.textContent = g.online ? '在线' : '离线';
+    head.append(dot, nm, st);
+    box.appendChild(head);
+
+    for (const r of g.visible) box.appendChild(svcRow(r, g.deviceId, handlers));
+    for (const r of g.gone) box.appendChild(svcRow(r, g.deviceId, handlers));
+
+    if (g.hidden.length) {
+      const sub = document.createElement('div');
+      sub.className = 'svc-subhead';
+      sub.textContent = '已隐藏（点「恢复」重新显示）';
+      box.appendChild(sub);
+      for (const r of g.hidden) {
+        const row = document.createElement('div');
+        row.className = 'svc-row';
+        row.dataset.port = String(r.port);
+        const hn = document.createElement('span');
+        hn.className = 'svc-nm';
+        hn.textContent = r.name;
+        const un = document.createElement('button');
+        un.className = 'svc-unhide';
+        un.textContent = '恢复';
+        un.onclick = () => handlers.onUnhide(g.deviceId, r.port);
+        row.append(hn, un);
+        box.appendChild(row);
+      }
     }
-    row.onclick = () => handlers.onPick(r.port);
-    tree.appendChild(row);
-  }
-  const goneBox = $('svcGone');
-  goneBox.innerHTML = '';
-  for (const r of model.gone) {
-    const row = document.createElement('div');
-    row.className = 'svc-row gone';
-    row.dataset.port = String(r.port);
-    const nm = document.createElement('span');
-    nm.className = 'svc-nm';
-    nm.textContent = `${r.name}（已离线）`;
-    row.appendChild(nm);
-    goneBox.appendChild(row);
-  }
-  $('svcHiddenHead').style.display = model.hidden.length ? 'block' : 'none';
-  const hid = $('svcHidden');
-  hid.innerHTML = '';
-  for (const r of model.hidden) {
-    const row = document.createElement('div');
-    row.className = 'svc-row';
-    row.dataset.port = String(r.port);
-    const nm = document.createElement('span');
-    nm.className = 'svc-nm';
-    nm.textContent = r.name;
-    const un = document.createElement('button');
-    un.className = 'svc-unhide';
-    un.textContent = '恢复';
-    un.onclick = () => handlers.onUnhide(r.port);
-    row.append(nm, un);
-    hid.appendChild(row);
+
+    if (!g.visible.length && !g.hidden.length && !g.gone.length) {
+      const hint = document.createElement('div');
+      hint.className = 'svc-row svc-empty';
+      hint.textContent = '暂无服务记录 · 点我连入';
+      hint.onclick = () => handlers.onPick(g.deviceId, null);
+      box.appendChild(hint);
+    }
+    tree.appendChild(box);
   }
 }
 

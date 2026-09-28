@@ -29,9 +29,16 @@ const win = h.window as unknown as {
   __p2pNetConnect?: (deskId?: string) => Promise<void>;
   __p2pNetDebug?: () => { selectedPort: number | null };
 };
-const rows = (id: string): FakeEl[] => h.el(id).children as FakeEl[];
-const rowOf = (id: string, port: number): FakeEl | undefined =>
-  rows(id).find((r) => r.dataset.port === String(port));
+// 2026-09-28 多设备侧栏树：svcTree 下是「组容器（dataset.deviceId）→ 组头+服务行」两层结构；
+// 隐藏行在组内（带 .svc-unhide 子按钮），不再有独立 svcHidden 容器。
+const svcRows = (): FakeEl[] => (h.el('svcTree').children as FakeEl[])
+  .flatMap((g) => (g.children as FakeEl[]).filter((r) => r.dataset.port));
+const rowOf = (port: number): FakeEl | undefined => svcRows().find((r) => r.dataset.port === String(port));
+const isHiddenRow = (r: FakeEl): boolean =>
+  (r.children as FakeEl[]).some((c) => c.className.includes('svc-unhide'));
+const visibleRows = (): FakeEl[] => svcRows().filter((r) => !isHiddenRow(r));
+const hiddenRowOf = (port: number): FakeEl | undefined =>
+  svcRows().find((r) => r.dataset.port === String(port) && isHiddenRow(r));
 const hideBtn = (r: FakeEl): FakeEl | undefined =>
   (r.children as FakeEl[]).find((c) => c.className.includes('svc-hide'));
 
@@ -39,33 +46,33 @@ test('连接成功：默认选中 console 3001；抽屉渲染全部 3 个服务�
   await h.waitFor(() => typeof win.__p2pNetConnect === 'function', 5_000, '__p2pNetConnect 导出');
   await win.__p2pNetConnect!();
   await h.waitFor(() => win.__p2pNetDebug!().selectedPort === 3001, 5_000, 'selectedPort=3001');
-  await h.waitFor(() => rows('svcTree').length === 3, 5_000, 'svcTree 渲染 3 行');
-  assert.ok(rowOf('svcTree', 3001), 'console 3001 在树里');
-  assert.equal(hideBtn(rowOf('svcTree', 3001)!), undefined, 'console 行不得有 ✕（不可隐藏）');
-  assert.ok(hideBtn(rowOf('svcTree', 3000)!), '普通服务行有 ✕');
-  assert.ok(hideBtn(rowOf('svcTree', 3002)!), '普通服务行有 ✕');
+  await h.waitFor(() => visibleRows().length === 3, 5_000, 'svcTree 渲染 3 行');
+  assert.ok(rowOf(3001), 'console 3001 在树里');
+  assert.equal(hideBtn(rowOf(3001)!), undefined, 'console 行不得有 ✕（不可隐藏）');
+  assert.ok(hideBtn(rowOf(3000)!), '普通服务行有 ✕');
+  assert.ok(hideBtn(rowOf(3002)!), '普通服务行有 ✕');
 });
 
 test('隐藏非当前服务 3002 → 进隐藏段并持久化；选中不受影响', async () => {
-  hideBtn(rowOf('svcTree', 3002)!)!.onclick!();
-  assert.equal(rows('svcTree').length, 2);
-  assert.ok(rowOf('svcHidden', 3002), '3002 进隐藏段');
+  hideBtn(rowOf(3002)!)!.onclick!();
+  assert.equal(visibleRows().length, 2);
+  assert.ok(hiddenRowOf(3002), '3002 进隐藏段');
   assert.match(h.localStorage.getItem('p2p-net.pwa.hiddenServices') ?? '', /3002/);
   assert.equal(win.__p2pNetDebug!().selectedPort, 3001, '选中不受影响');
 });
 
 test('恢复 3002 → 回到可见段', async () => {
-  const unhide = (rowOf('svcHidden', 3002)!.children as FakeEl[])
+  const unhide = (hiddenRowOf(3002)!.children as FakeEl[])
     .find((c) => c.className.includes('svc-unhide'));
   unhide!.onclick!();
-  assert.equal(rows('svcTree').length, 3, '3002 回到可见段');
-  assert.equal(rows('svcHidden').length, 0);
+  assert.equal(visibleRows().length, 3, '3002 回到可见段');
+  assert.equal(hiddenRowOf(3002), undefined);
 });
 
 test('☰ 开合抽屉；点服务行 → 收起抽屉并选中该服务', async () => {
   h.el('btnSvcTree').onclick!();
   assert.equal(h.el('svcDrawer').classList.contains('show'), true, '☰ 打开抽屉');
-  rowOf('svcTree', 3000)!.onclick!();
+  rowOf(3000)!.onclick!();
   await h.waitFor(() => win.__p2pNetDebug!().selectedPort === 3000, 5_000, 'selectedPort=3000');
   assert.equal(h.el('svcDrawer').classList.contains('show'), false, '点服务即收起抽屉');
   const svc3000 = (h.el('appHost').children as FakeEl[]).find((f) => f.id === 'svc-3000');
@@ -74,7 +81,7 @@ test('☰ 开合抽屉；点服务行 → 收起抽屉并选中该服务', async
 
 test('隐藏当前选中服务 3000 → 立即回引导页，iframe 保留不销毁', async () => {
   h.el('btnSvcTree').onclick!(); // 重新打开抽屉
-  hideBtn(rowOf('svcTree', 3000)!)!.onclick!();
+  hideBtn(rowOf(3000)!)!.onclick!();
   await h.waitFor(() => h.el('svcGuide').style.display === 'block', 5_000, '引导页显示');
   assert.ok(h.el('svcGuideTxt').textContent.includes('侧栏'), 'no-selection 文案');
   assert.equal(win.__p2pNetDebug!().selectedPort, null);

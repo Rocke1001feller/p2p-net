@@ -25,6 +25,10 @@ export const LS_DEVICES = 'p2p-net.pwa.devices';
 /** 隐藏服务清单键（P1 减法模型）：Record<deviceId, number[]>，按设备隔离。 */
 export const LS_HIDDEN_SERVICES = 'p2p-net.pwa.hiddenServices';
 
+/** 服务清单快照键（2026-09-28 多设备侧栏树）：Record<deviceId, {at, services[]}>，
+ *  每连上一台设备即刷新其活清单，未连接设备靠它呈现「上次所见」。 */
+export const LS_SERVICE_SNAPSHOTS = 'p2p-net.pwa.serviceSnapshots';
+
 /** 上次选中服务端口键（P1）：Record<deviceId, number>，按设备隔离（last-good 的 per-device 扩展）。 */
 export const LS_LAST_SERVICE = 'p2p-net.pwa.lastService';
 

@@ -47,7 +47,8 @@ import {
   setExperimentMode, renderServiceTree, openSvcDrawer, closeSvcDrawer, onTabChange,
   type SavedDevice,
 } from './ui.js';
-import { buildServiceTree } from './serviceTree.js';
+import { buildDeviceGroups } from './serviceTree.js';
+import { readSnapshots, saveSnapshot } from './serviceSnapshot.js';
 import { stallSuspect } from './stall.js';
 import { ForegroundProbe, FOREGROUND_PROBE_HIDDEN_MS, FOREGROUND_PROBE_TIMEOUT_MS } from './foregroundProbe.js';
 import { onConnectFailure, onConnectStopped } from './reconnectPolicy.js';
@@ -72,6 +73,11 @@ interface TabEntry {
 
 const swPorts = new Map<number, MessagePort>();
 const tabs = new Map<number, TabEntry>();
+/** tabs 所属设备（2026-09-28 多设备侧栏树）：tabs 只按 port 键，Mac:3000 与 Win:3000 会撞号——
+ *  换机时必须销毁全部旧 iframe（它们指向旧设备网关），否则打开的是上一台设备的同名端口。 */
+let tabsDeviceId: string | null = null;
+/** 跨机直达目标（侧栏点其他设备的服务）：连接成功后在 openWorkbench 里优先于默认选中链消费。 */
+let pendingOpenPort: number | null = null;
 const pendingSw = new Map<number, { swPort: MessagePort; origId: number; timer: ReturnType<typeof setTimeout> }>();
 /**
  * 数据面"挂起"看门狗（2026-09-12 真机实证修复）。
@@ -588,6 +594,14 @@ async function startConnect(d: SavedDevice, isRetry = false): Promise<void> {
   const myDeviceId = currentDeviceId();
   if (!uid || !myDeviceId) { showScreen('screen-login'); return; }
   desk.id = d.id;
+  if (tabsDeviceId !== d.id) {
+    // 换机：旧设备的 iframe 全部指向旧网关，销毁重建（含体检定时器，防幽灵重载）。
+    // selectedPort 一并清空：旧选中属于旧设备，换机后走 pendingOpenPort 或默认选中链。
+    for (const t of tabs.values()) { if (t.healthTimer) clearTimeout(t.healthTimer); t.iframe.remove(); }
+    tabs.clear();
+    selectedPort = null;
+    tabsDeviceId = d.id;
+  }
   desk.tunnelUrl = d.tunnelUrl ?? desk.tunnelUrl;
   // 发现端口三级来源：URL dsc（配对二维码刚给的新鲜事实）→ 设备记忆 → 契约端口
   activeDiscoveryPort = pickDiscoveryPort(Q.get('dsc'), d.discoveryPort ?? null);
@@ -866,6 +880,8 @@ async function fetchServices(): Promise<void> {
         ...s,
         port: Number.isFinite(s.port) ? Number(s.port) : Number((s.url || '').match(/^\/s\/(\d+)\//)?.[1]),
       })).filter((s) => Number.isFinite(s.port) && s.port > 0);
+      // 多设备侧栏树（2026-09-28）：活清单落快照——未连接设备的服务面全靠它渲染。
+      saveSnapshot(localStorage, desk.id, currentServices.map((s) => ({ name: s.name, port: s.port })));
       // 成功端口落进设备记忆：下次（含账号登录/设备列表重连、换网重连）直接用，
       // 不必再靠 URL 里的 ?dsc= ——这正是"二维码能连、重连必白屏"的根治点。
       const changed = desk.discoveryPort !== dscPort;
@@ -929,6 +945,14 @@ async function openWorkbench(list?: { console?: string | { url?: string }[] }): 
   // 在清单 → 该端口；自述了但不在清单（console 死了）/清单无 console → null。
   // 不得写成 chosen——chosen 可能来自 lastService，会把一个普通服务错误豁免成「不可隐藏」。
   consolePort = inList(consoleCandidate) ? consoleCandidate : null;
+  // 跨机直达（2026-09-28 多设备侧栏树）：侧栏点了其他设备的服务 → 换机连接后直达它，
+  // 优先于一切默认选中与 C2 重连保护（这是用户显式意图，不是系统自作主张的选中变更）。
+  if (pendingOpenPort !== null) {
+    const p = pendingOpenPort;
+    pendingOpenPort = null;
+    if (inList(p)) { await openService(p); return; }
+    log(`[services] 跨机直达目标端口 ${p} 不在新设备清单 → 落默认选中链`);
+  }
   // 评审 C2（2026-09-28）：重连且用户有在看的服务 → 不抢选中。默认选中链是「开工作台」语义
   // （spec §2.4 初始选中）；蜂窝闪断后把用户从当前服务拽回 console 首页 = 选中丢失（用户红线）。
   // 选中服务的死活由 afterConnected 的 W-B① 探活块处置（探活对象=selectedPort，此刻起名副其实）。
@@ -954,33 +978,47 @@ async function openWorkbench(list?: { console?: string | { url?: string }[] }): 
 
 type GuideKind = 'empty' | 'no-selection' | 'all-hidden';
 
-/** 侧栏服务树渲染（P1）：清单/隐藏/选中/已打开 → 三段行。fetchServices 成功、openService、
- *  showGuide 后都要重渲染（W-B① 不重建路径不经过 openService，靠 fetchServices 那一下兜底）。 */
+/** 侧栏服务树渲染（2026-09-28 多设备版）：全部设备 × 各自服务分组——已连接设备用活清单
+ *  （含 console/selected/gone 语义），其余设备用本机快照。点本机服务 = 直接打开；
+ *  点其他设备服务 = 置 pendingOpenPort 并切机直达；点空快照组 = 连入该设备。
+ *  fetchServices 成功、openService、showGuide 后都要重渲染（W-B① 不重建路径不经过 openService）。 */
 function refreshServiceTree(): void {
+  const connectedId = cascade?.isOpen ? desk.id : null;
   renderServiceTree(
     {
-      deviceName: deskName,
-      deviceId: desk.id,
-      ...buildServiceTree({
-        services: currentServices,
-        hidden: readHidden(localStorage, desk.id),
+      groups: buildDeviceGroups({
+        devices: loadDevices().map((d) => ({ id: d.id, name: d.name || `${d.id.slice(0, 8)}…`, lastAt: d.lastAt ?? 0 })),
+        connectedId,
+        live: currentServices,
+        snapshots: readSnapshots(localStorage),
+        hiddenOf: (deviceId) => readHidden(localStorage, deviceId),
         consolePort,
         selectedPort,
         openPorts: [...tabs.keys()],
       }),
     },
     {
-      onPick: (port) => { closeSvcDrawer(); void openService(port); },
-      onHide: (port) => {
-        hideService(localStorage, desk.id, port);
-        if (selectedPort === port) {
+      onPick: (deviceId, port) => {
+        closeSvcDrawer();
+        if (deviceId === connectedId) {
+          if (port !== null) void openService(port);
+          return; // 点就是本机（port=null = 空组提示行，本机不可能空组——有活清单）
+        }
+        const target = loadDevices().find((x) => x.id === deviceId);
+        if (!target) { toast('设备记录不存在，请重新配对'); return; }
+        pendingOpenPort = port; // null = 只切机不直达（空组提示行语义）
+        void startConnect(target);
+      },
+      onHide: (deviceId, port) => {
+        hideService(localStorage, deviceId, port);
+        if (deviceId === connectedId && selectedPort === port) {
           // 隐藏正在看的服务：允许，立即回引导页；iframe 保留不销毁（恢复后现场还在，spec §4.5）
           selectedPort = null;
           showGuide('no-selection');
         }
         refreshServiceTree();
       },
-      onUnhide: (port) => { unhideService(localStorage, desk.id, port); refreshServiceTree(); },
+      onUnhide: (deviceId, port) => { unhideService(localStorage, deviceId, port); refreshServiceTree(); },
     },
   );
 }
@@ -1440,7 +1478,8 @@ $id('lnkClaim').onclick = () => toast('账号由初始化（p2p-net init）时�
 $id('btnDisconnect').onclick = () => stopSession();
 $id('btnSvcTree').onclick = () => {
   const d = document.getElementById('svcDrawer')!;
-  if (d.classList.contains('show')) closeSvcDrawer(); else openSvcDrawer();
+  if (d.classList.contains('show')) closeSvcDrawer();
+  else { refreshServiceTree(); openSvcDrawer(); } // 未连接也要渲染全部设备分组（快照面）
 };
 // 抽屉关闭路径（评审 I5）：点遮罩（点抽屉外）或头部「收起」按钮——☰ 在抽屉打开时被盖住
 $id('svcDrawerMask').onclick = () => closeSvcDrawer();

@@ -30,9 +30,16 @@ const win = h.window as unknown as {
   __p2pNetConnect?: (deskId?: string) => Promise<void>;
   __p2pNetDebug?: () => { selectedPort: number | null; consolePort: number | null };
 };
-const rows = (id: string): FakeEl[] => h.el(id).children as FakeEl[];
 const frameOf = (port: number): FakeEl | undefined =>
   (h.el('appHost').children as FakeEl[]).find((f) => f.id === `svc-${port}`);
+// 2026-09-28 多设备侧栏树：svcTree 下是组容器两层结构，按端口找行要下钻一层
+const svcRowOf = (port: number): FakeEl | undefined => {
+  for (const g of h.el('svcTree').children as FakeEl[]) {
+    const r = (g.children as FakeEl[]).find((x) => x.dataset.port === String(port));
+    if (r) return r;
+  }
+  return undefined;
+};
 const logText = (): string => h.textLog['log']?.at(-1) ?? '';
 const bootedDoc = (): unknown => ({
   getElementById: (id: string) => (id === 'root' ? { childElementCount: 1 } : null),
@@ -46,8 +53,7 @@ test('连接：默认选中 console 3001', async () => {
 });
 
 test('用户从侧栏切到 vite dev 3000（lastService 写入 3000）', async () => {
-  const row = rows('svcTree').find((r) => r.dataset.port === '3000')!;
-  row.onclick!();
+  svcRowOf(3000)!.onclick!();
   await h.waitFor(() => win.__p2pNetDebug!().selectedPort === 3000, 5_000, 'selectedPort=3000');
   assert.match(h.localStorage.getItem('p2p-net.pwa.lastService') ?? '', /3000/);
 });

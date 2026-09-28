@@ -33,7 +33,14 @@ const win = h.window as unknown as {
   __p2pNetConnect?: (deskId?: string) => Promise<void>;
   __p2pNetDebug?: () => { selectedPort: number | null };
 };
-const rows = (id: string): FakeEl[] => h.el(id).children as FakeEl[];
+// 2026-09-28 多设备侧栏树：svcTree 下是组容器两层结构，按端口找行要下钻一层
+const svcRowOf = (port: number): FakeEl | undefined => {
+  for (const g of h.el('svcTree').children as FakeEl[]) {
+    const r = (g.children as FakeEl[]).find((x) => x.dataset.port === String(port));
+    if (r) return r;
+  }
+  return undefined;
+};
 const frameOf = (port: number): FakeEl | undefined =>
   (h.el('appHost').children as FakeEl[]).find((f) => f.id === `svc-${port}`);
 const logs = (): string => (h.textLog['log'] ?? []).join('\n');
@@ -48,7 +55,7 @@ test('boot：数据面活着 → console 3001 默认选中且 src 落位（开�
 });
 
 test('用户切到 3000 后：console 体检重载在后台进行，不抢选中/视图/记忆（I4 ①）', async () => {
-  rows('svcTree').find((r) => r.dataset.port === '3000')!.onclick!();
+  svcRowOf(3000)!.onclick!();
   await h.waitFor(() => win.__p2pNetDebug!().selectedPort === 3000, 5_000, 'selectedPort=3000');
   await h.waitFor(() => /首屏未起来（第 1 次）→ 重载/.test(logs()), 5_000, '体检重载发生');
   await sleep(200); // 让两条体检链多走几拍（console 后台重载含其中）
