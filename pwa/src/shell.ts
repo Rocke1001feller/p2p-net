@@ -924,8 +924,16 @@ async function openWorkbench(list?: { console?: string | { url?: string }[] }): 
   const selfPort = Number(consolePath.match(/^\/s\/(\d+)\//)?.[1]) || null;
   const inList = (p: number | null): p is number =>
     p !== null && currentServices.some((s) => s.port === p);
-  const hidden = readHidden(localStorage, desk.id);
   const consoleCandidate = selfPort ?? currentServices.find((s) => s.name === 'p2p-net')?.port ?? null;
+  // consolePort 是「console 身份簿记」（服务树不可隐藏豁免标记 + 排障面板），按身份更新：
+  // 在清单 → 该端口；自述了但不在清单（console 死了）/清单无 console → null。
+  // 不得写成 chosen——chosen 可能来自 lastService，会把一个普通服务错误豁免成「不可隐藏」。
+  consolePort = inList(consoleCandidate) ? consoleCandidate : null;
+  // 评审 C2（2026-09-28）：重连且用户有在看的服务 → 不抢选中。默认选中链是「开工作台」语义
+  // （spec §2.4 初始选中）；蜂窝闪断后把用户从当前服务拽回 console 首页 = 选中丢失（用户红线）。
+  // 选中服务的死活由 afterConnected 的 W-B① 探活块处置（探活对象=selectedPort，此刻起名副其实）。
+  if (everConnected && selectedPort !== null) return;
+  const hidden = readHidden(localStorage, desk.id);
   let chosen: number | null = null;
   if (consoleCandidate !== null) {
     // console 服务不可隐藏（spec §4.1 裁决）：hidden 记录对它无效；死了（不在清单）则落空，不下滑。
@@ -941,7 +949,6 @@ async function openWorkbench(list?: { console?: string | { url?: string }[] }): 
       : 'no-selection');
     return;
   }
-  consolePort = chosen;
   await openService(chosen);
 }
 

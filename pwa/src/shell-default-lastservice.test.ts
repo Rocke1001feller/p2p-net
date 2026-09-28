@@ -39,6 +39,10 @@ test('boot：写入 lastService=3002 后连接 → 粘性选中 3002（不盲选
 });
 
 test('lastService 已被隐藏 → 不选中它，落空进引导页（iframe 保留不销毁）', async () => {
+  // 评审 C2 后：重连不再重跑选中链（有选中即保留现场）；选中链只在「无选中」时运行。
+  // 故先断开（stopSession 复位 selectedPort，评审 C3），以「新会话」语义驱动选中链——
+  // Review Focus 2 钉的是「链运行时跳过已隐藏的 lastService」，与重连保留现场不冲突。
+  h.el('btnDisconnect').onclick!();
   hideService(h.localStorage, 'desk-1', 3002);
   await win.__p2pNetConnect!();
   await h.waitFor(() => h.el('svcGuide').style.display === 'block', 5_000, '引导页显示');
