@@ -218,13 +218,22 @@ export function hideConnecting(): void {
 }
 
 // ---- 设备列表 ----
-export function renderDevices(devices: SavedDevice[], onConnect: (d: SavedDevice) => void): void {
+export function renderDevices(
+  devices: SavedDevice[],
+  onConnect: (d: SavedDevice) => void,
+  opts?: {
+    connectedId?: string | null;
+    services?: { name: string; port: number }[];
+    onOpenService?: (port: number) => void;
+  },
+): void {
   const list = $('devList');
   list.innerHTML = '';
   $('devEmpty').style.display = devices.length ? 'none' : 'block';
   for (const d of devices) {
     const card = document.createElement('div');
     card.className = 'dev-card';
+    card.dataset.devId = d.id;
     const top = document.createElement('div'); top.className = 'top';
     const ic = document.createElement('div'); ic.className = 'dev-ic';
     ic.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="5" width="16" height="10" rx="1.6"/><path d="M2 18h20"/></svg>';
@@ -235,6 +244,27 @@ export function renderDevices(devices: SavedDevice[], onConnect: (d: SavedDevice
     nm.append(b, span);
     top.append(ic, nm);
     card.appendChild(top);
+    // P1 启动台：仅已连接设备有活清单，渲染服务网格直达；未连接设备只显卡片（不缓存僵尸清单）
+    if (opts?.connectedId === d.id && opts.services?.length) {
+      const grid = document.createElement('div');
+      grid.className = 'launch-grid';
+      for (const s of opts.services) {
+        const item = document.createElement('button');
+        item.className = 'launch-item';
+        item.dataset.port = String(s.port);
+        const box = document.createElement('span'); box.className = 'launch-ic';
+        box.textContent = s.name.slice(0, 1);
+        const label = document.createElement('span'); label.className = 'launch-nm';
+        label.textContent = s.name;
+        item.append(box, label);
+        item.onclick = (e?: { stopPropagation(): void }) => {
+          e?.stopPropagation(); // 图标直达服务，不透传成卡片连接
+          opts.onOpenService?.(s.port);
+        };
+        grid.appendChild(item);
+      }
+      card.appendChild(grid);
+    }
     card.onclick = () => onConnect(d);
     list.appendChild(card);
   }

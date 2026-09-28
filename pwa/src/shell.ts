@@ -276,7 +276,11 @@ function upsertDevice(d: SavedDevice): SavedDevice[] {
   return list;
 }
 function refreshDevicesUI(): void {
-  renderDevices(loadDevices(), (d) => void startConnect(d));
+  renderDevices(loadDevices(), (d) => void startConnect(d), {
+    connectedId: cascade?.isOpen ? desk.id : null,
+    services: currentServices,
+    onOpenService: (port) => { showTab('workspace'); void openService(port); },
+  });
 }
 
 // ---- dev 直连冒烟钩子（driver 兼容面）----
@@ -791,6 +795,7 @@ function stopSession(): void {
   }
   setStatus({ state: 'off', pairType: null }, deskName);
   setWorkspaceEnabled(false);
+  refreshDevicesUI(); // 断开：启动台网格随 connectedId=null 消失
   toast('已断开');
 }
 
@@ -871,6 +876,7 @@ async function fetchServices(): Promise<void> {
       log(`[services] ${currentServices.length} 个；console=${list.console ?? '（载荷未带）'}`);
       await openWorkbench(list);
       refreshServiceTree(); // W-B① 不重建路径不经过 openService，在这里兜底重渲染树
+      refreshDevicesUI(); // 启动台：已连接设备的服务网格随清单刷新
       return;
     } catch (e) {
       lastErr = e;

@@ -10,7 +10,9 @@ class FakeEl {
   className = '';
   textContent = '';
   style: Record<string, string> = {};
+  dataset: Record<string, string> = {};
   children: unknown[] = [];
+  onclick: ((e?: { stopPropagation(): void }) => void) | null = null;
   private classSet = new Set<string>();
   classList = {
     add: (...cs: string[]) => cs.forEach((c) => this.classSet.add(c)),
@@ -20,6 +22,7 @@ class FakeEl {
   set innerHTML(v: string) { if (v === '') this.children = []; }
   get innerHTML(): string { return ''; }
   append(...nodes: unknown[]): void { this.children.push(...nodes); }
+  appendChild<T>(n: T): T { this.children.push(n); return n; }
 }
 
 const els = new Map<string, FakeEl>();
@@ -91,4 +94,50 @@ test('探活黄灯优先级高于实验徽章（probeDown 覆盖文案不变）'
   assert.equal(lastBadge().textContent, '连接待恢复，点我重试');
   setProbeDown(false);
   setStatus({ state: 'off', pairType: null }, '桌面A'); // 收尾复位，别污染后续用例
+});
+
+// ---- P1 启动台：renderDevices 服务网格（2026-09-28）----
+import { renderDevices } from './ui.js';
+
+const gridOf = (card: FakeEl): FakeEl | undefined =>
+  (card.children as FakeEl[]).find((c) => c.className.includes('launch-grid'));
+
+test('renderDevices：connectedId 命中的卡片渲染服务网格，其余卡片无网格', () => {
+  renderDevices([{ id: 'd1', name: 'MacBook Pro' }, { id: 'd2', name: 'Windows 台式机' }], () => {}, {
+    connectedId: 'd1',
+    services: [{ name: 'Claude 工作台', port: 3001 }, { name: 'vite dev', port: 3000 }],
+    onOpenService: () => {},
+  });
+  const cards = el('devList').children as FakeEl[];
+  assert.equal(cards.length, 2);
+  const grid = gridOf(cards[0]);
+  assert.ok(grid, 'd1（已连接）卡片内必须有服务网格');
+  assert.deepEqual((grid!.children as FakeEl[]).map((i) => i.dataset.port), ['3001', '3000']);
+  assert.equal(gridOf(cards[1]), undefined, 'd2（未连接）无服务清单，不渲染网格');
+});
+
+test('网格图标点击触发 onOpenService(对应端口) 且不透传到卡片 onConnect', () => {
+  const conns: string[] = [];
+  const opened: number[] = [];
+  renderDevices([{ id: 'd1' }], (d) => conns.push(d.id), {
+    connectedId: 'd1',
+    services: [{ name: 'Kimi Code', port: 57255 }],
+    onOpenService: (p) => opened.push(p),
+  });
+  const card = (el('devList').children as FakeEl[])[0];
+  const item = (gridOf(card)!.children as FakeEl[])[0];
+  item.onclick!({ stopPropagation: () => {} });
+  assert.deepEqual(opened, [57255]);
+  assert.deepEqual(conns, [], '点服务图标不得触发卡片连接（真实 DOM 靠 stopPropagation 保证）');
+  card.onclick!();
+  assert.deepEqual(conns, ['d1'], '点卡片本体仍是连接入口');
+});
+
+test('opts 缺省 → 全部卡片旧行为（纯连接入口），不报错（Review Focus 3）', () => {
+  const conns: string[] = [];
+  renderDevices([{ id: 'd9' }], (d) => conns.push(d.id));
+  const card = (el('devList').children as FakeEl[])[0];
+  assert.equal(gridOf(card), undefined, '无 opts 不得渲染网格');
+  card.onclick!();
+  assert.deepEqual(conns, ['d9']);
 });
