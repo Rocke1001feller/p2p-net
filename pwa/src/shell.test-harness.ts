@@ -84,7 +84,7 @@ function def(name: string, value: unknown): void {
   Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
 }
 
-export function installShellHarness(opts: { search: string; services?: unknown; observeTextIds?: string[] }): ShellHarness {
+export function installShellHarness(opts: { search: string; services?: unknown; observeTextIds?: string[]; dataPlaneAlive?: boolean }): ShellHarness {
   const els = new Map<string, FakeEl>();
   const textLog: Record<string, string[]> = {};
   const el = (id: string): FakeEl => {
@@ -136,7 +136,9 @@ export function installShellHarness(opts: { search: string; services?: unknown; 
     }
     if (url.includes('/functions/v1/turn-credentials')) return jsonResponse(200, { iceServers: [] });
     if (/\/s\/\d+\/services/.test(url)) return jsonResponse(200, servicesPayload);
-    if (/\/s\/\d+\/api\//.test(url)) return jsonResponse(503, { error: 'synthetic_down' }); // 探活判死 → 开窗 defer
+    // 数据面探活（/api/auth/status 等）：默认 503 判死 → 开窗 defer；
+    // opts.dataPlaneAlive=true 时回 200 → 开窗成功、体检链起走（评审 I4 测试用）。
+    if (/\/s\/\d+\/api\//.test(url)) return jsonResponse(opts.dataPlaneAlive ? 200 : 503, opts.dataPlaneAlive ? { ok: true } : { error: 'synthetic_down' });
     return jsonResponse(404, { error: 'not_found' });
   };
   def('fetch', fetchStub);

@@ -1041,7 +1041,7 @@ function exitImmersive(opts?: { sticky?: boolean }): void {
   if (!opts?.sticky) scheduleWakeReturn();
 }
 
-async function openService(port: number, opts?: { remember?: boolean }): Promise<void> {
+async function openService(port: number, opts?: { remember?: boolean; background?: boolean }): Promise<void> {
   let tab = tabs.get(port);
   if (!tab) {
     await ensureSW();
@@ -1055,15 +1055,19 @@ async function openService(port: number, opts?: { remember?: boolean }): Promise
     iframe.src = 'about:blank';
     await new Promise((r) => setTimeout(r, 50));
   }
-  document.getElementById('svcGuide')!.style.display = 'none';
-  for (const t of tabs.values()) t.iframe.style.display = 'none';
-  tab.iframe.style.display = 'block';
-  selectedPort = port;
-  if (opts?.remember !== false) writeLastService(localStorage, desk.id, port);
-  setConnTitleSafe();
-  refreshServiceTree();
-  enterImmersive();
-  void markActive(port);
+  // background=true（体检链后台自愈，评审 I4①）：只修数据面（tab/src），不碰用户视角——
+  // 选中/视图显隐/lastService/沉浸全部不动；后台逻辑抢选中撞「选中丢失不可接受」红线。
+  if (!opts?.background) {
+    document.getElementById('svcGuide')!.style.display = 'none';
+    for (const t of tabs.values()) t.iframe.style.display = 'none';
+    tab.iframe.style.display = 'block';
+    selectedPort = port;
+    if (opts?.remember !== false) writeLastService(localStorage, desk.id, port);
+    setConnTitleSafe();
+    refreshServiceTree();
+    enterImmersive();
+    void markActive(port);
+  }
   void bootWorkbench(port, tab);
 }
 
@@ -1094,6 +1098,12 @@ async function bootWorkbench(port: number, tab: TabEntry): Promise<void> {
     return; // 重连成功会再次走到这里（afterConnected → openService）
   }
   if (gate === 'giveup') {
+    // 后台（非选中）服务的数据面失败不弹条打扰用户（评审 I4②：弹条会盖住正在用的服务）；
+    // 它下次被打开时 openService → bootWorkbench 会重新探活自愈。
+    if (port !== selectedPort) {
+      log(`[workbench] 后台服务 ${port} 数据面多次探活失败；等用户切到时再试`);
+      return;
+    }
     log('[workbench] 多次探活失败，交给用户手动重试');
     showOfflineSheet(deskName, '数据面暂时不可用，无法打开工作台。请重试。', () => {
       bootDefer.delete(port);
@@ -1106,25 +1116,40 @@ async function bootWorkbench(port: number, tab: TabEntry): Promise<void> {
   scheduleHealthChecks(port, tab);
 }
 
+/** 体检节奏：?healthdelay=<ms> 覆盖（排障/回归测试钩子，与 ?wakeidle= 同款）；
+ *  生产默认 workbenchRecovery.HEALTH_CHECK_DELAYS_MS（5s/12s/25s）。 */
+const HEALTH_DELAYS_MS = (() => {
+  const n = Number(Q.get('healthdelay'));
+  return Number.isFinite(n) && n > 0 ? [n, n, n] : HEALTH_CHECK_DELAYS_MS;
+})();
+
 /** 开窗后按节奏体检：没 boot 起来就重载（上限 3 次），避免"永久白屏"。
- *  同一时刻只挂一个探针（重载前先清掉上一个），避免多拍并发重载。 */
+ *  同一时刻只挂一个探针（重载前先清掉上一个），避免多拍并发重载。
+ *  P1 评审 I4（2026-09-28）：旧门 `port !== consolePort` 是单服务时代写法——
+ *  ① console 重载走前台 openService，把已切走的用户拽回 console；② 非 console 服务
+ *  体检第一拍即死，首屏 504 黑洞不再自愈。现：门改为「tab 还在吗」；重载走 background
+ *  （不抢选中/视图/记忆）；giveup 只对用户正看着的服务弹离线条。 */
 function scheduleHealthChecks(port: number, tab: TabEntry, step = 0): void {
   if (tab.healthTimer) clearTimeout(tab.healthTimer);
-  const delay = HEALTH_CHECK_DELAYS_MS[Math.min(step, HEALTH_CHECK_DELAYS_MS.length - 1)];
+  const delay = HEALTH_DELAYS_MS[Math.min(step, HEALTH_DELAYS_MS.length - 1)];
   tab.healthTimer = setTimeout(() => {
-    if (port !== consolePort) return;
+    if (!tabs.has(port)) return; // 陈旧计时器防御
     if (looksBooted(tab.iframe.contentDocument)) {
       if (!tab.booted) log('[workbench] 首屏已就绪');
       tab.booted = true;
       writeLastGoodPort(localStorage, port);
       return;
     }
-    if (step < HEALTH_CHECK_DELAYS_MS.length - 1) { scheduleHealthChecks(port, tab, step + 1); return; }
+    if (step < HEALTH_DELAYS_MS.length - 1) { scheduleHealthChecks(port, tab, step + 1); return; }
     const verdict = healthDecision({ booted: false, reloadCount: tab.reloads ?? 0 });
     if (verdict === 'reload') {
       tab.reloads = (tab.reloads ?? 0) + 1;
       log(`[workbench] 首屏未起来（第 ${tab.reloads} 次）→ 重载`);
-      void openService(port).then(() => scheduleHealthChecks(port, tab));
+      void openService(port, { background: true }).then(() => scheduleHealthChecks(port, tab));
+      return;
+    }
+    if (port !== selectedPort) {
+      log(`[workbench] 后台服务 ${port} 重载多次仍未起来；等用户切到时随 openService 自愈`);
       return;
     }
     log('[workbench] 重载多次仍未起来 → 交给用户手动重试');
