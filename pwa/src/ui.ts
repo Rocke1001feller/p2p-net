@@ -364,7 +364,9 @@ export function renderServiceTree(model: ServiceTreeModel, handlers: ServiceTree
       x.className = 'svc-hide';
       x.textContent = '✕';
       x.title = '隐藏（可在下方恢复）';
-      x.onclick = () => handlers.onHide(r.port);
+      // 必须断冒泡：✕ 嵌在可点行内，真机上不阻断会冒泡到 row.onclick=onPick，
+      // 把用户刚隐藏的服务当场打开（2026-09-28 评审 C1；launch-grid 同款模式）。
+      x.onclick = (e) => { e?.stopPropagation(); handlers.onHide(r.port); };
       row.appendChild(x);
     }
     row.onclick = () => handlers.onPick(r.port);

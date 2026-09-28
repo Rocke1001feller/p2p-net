@@ -141,3 +141,29 @@ test('opts 缺省 → 全部卡片旧行为（纯连接入口），不报错（R
   card.onclick!();
   assert.deepEqual(conns, ['d9']);
 });
+
+// ---- 评审修复 C1（2026-09-28）：抽屉 ✕ 必须断冒泡 ----
+import { renderServiceTree } from './ui.js';
+
+test('服务树 ✕ 按钮断冒泡：点 ✕ 只触发 onHide，不得触发行 onPick', () => {
+  const picked: number[] = [];
+  const hidden: number[] = [];
+  renderServiceTree(
+    {
+      deviceName: 'MacBook Pro',
+      visible: [{ port: 3000, name: 'vite dev', isConsole: false, isSelected: false, isGone: false }],
+      hidden: [],
+      gone: [],
+    },
+    { onPick: (p) => picked.push(p), onHide: (p) => hidden.push(p), onUnhide: () => {} },
+  );
+  const row = (el('svcTree').children as FakeEl[]).find((r) => r.dataset.port === '3000')!;
+  const x = (row.children as FakeEl[]).find((c) => c.className.includes('svc-hide'))!;
+  assert.ok(x, '普通服务行必须有 ✕');
+  let stopped = false;
+  x.onclick!({ stopPropagation: () => { stopped = true; } });
+  assert.equal(stopped, true,
+    '✕ 必须 stopPropagation——真机上不阻断则冒泡到 row.onclick=onPick，把用户刚隐藏的服务当场打开（harness 无冒泡模型，此断言钉的是契约）');
+  assert.deepEqual(hidden, [3000]);
+  assert.deepEqual(picked, []);
+});
