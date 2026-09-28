@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>p2p-net 产品模型原型 v2（定稿候选：B 设备页 + C 沉浸式工作台）</title>
+<style>
+:root{--ac:#0f9d63;--bg:#f6f7f6;--ink:#1a1d1a;--sub:#6b726c;--line:#e4e7e4;--danger:#e5534b}
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,"PingFang SC",sans-serif}
+body{background:#2b2f2c;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 12px;color:var(--ink)}
+.demo-bar{background:#1c1f1d;color:#cdd5ce;border-radius:12px;padding:12px 16px;margin-bottom:18px;max-width:420px;width:100%;font-size:13px;line-height:1.6}
+.demo-bar b{color:#fff}
+.demo-note{font-size:12px;color:#8a938b;margin-top:6px}
+.demo-bar kbd{background:#3a403c;border-radius:4px;padding:0 5px;font-size:11px}
+.phone{width:100%;max-width:420px;height:760px;background:var(--bg);border-radius:28px;overflow:hidden;position:relative;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+.statusbar{height:28px;display:flex;justify-content:space-between;align-items:center;padding:0 18px;font-size:12px;color:var(--sub);background:#fff;flex:none}
+/* ---- chrome（header + tabbar + 侧栏）皆可收起 ---- */
+.chrome{transition:transform .28s ease,opacity .28s ease}
+.connbar{display:flex;align-items:center;gap:8px;padding:10px 14px;background:#fff;border-bottom:1px solid var(--line);flex:none}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ac)}
+.dot.off{background:#c8cdc8}
+.connbar .dev{font-weight:600;font-size:14px}
+.badge{font-size:11px;padding:2px 8px;border-radius:99px;background:#e6f6ee;color:var(--ac);border:1px solid #bbe6d1}
+.badge.p2p{background:#e8f0fe;color:#1a56db;border-color:#c2d7f5}
+.connbar .cut{margin-left:auto;color:var(--danger);font-size:13px;border:none;background:none;cursor:pointer}
+.tabbar{display:flex;background:#fff;border-top:1px solid var(--line);flex:none}
+.tabbar button{flex:1;padding:10px 0 14px;border:none;background:none;font-size:12px;color:var(--sub);cursor:pointer}
+.tabbar button.on{color:var(--ac);font-weight:600}
+.tabbar .ic{font-size:18px;display:block;margin-bottom:2px}
+.body{flex:1;position:relative;overflow:hidden;display:flex;flex-direction:column}
+/* 沉浸模式：chrome 隐藏 */
+.immersive .connbar,.immersive .tabbar{display:none}
+/* 侧栏抽屉 */
+.drawer{position:absolute;top:0;left:0;bottom:0;width:210px;background:#fff;border-right:1px solid var(--line);transform:translateX(0);transition:transform .28s ease;z-index:30;display:flex;flex-direction:column}
+.drawer.hide{transform:translateX(-100%)}
+.drawer .acct{font-size:12px;color:var(--sub);padding:12px 10px 8px;border-bottom:1px solid var(--line)}
+.drawer .tree{flex:1;overflow-y:auto;padding:8px}
+.cnode{font-size:13px;padding:8px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:6px}
+.cnode.devn{font-weight:600;margin-top:8px}
+.cnode.svcn{padding-left:22px;color:var(--sub)}
+.cnode.svcn.on{background:#e6f6ee;color:var(--ac);font-weight:600}
+.cnode .eye{margin-left:auto;font-size:10px;color:#b6bcb6;padding:2px 4px}
+.cnode .eye:hover{color:var(--danger)}
+.drawer .ft{padding:10px;border-top:1px dashed var(--line);font-size:12px;color:var(--sub)}
+.drawer .ft b{color:var(--ac);cursor:pointer}
+/* 内容区 */
+.wsmain{flex:1;overflow-y:auto;position:relative}
+.svc-view{padding:14px}
+.svc-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px}
+.svc-card h4{font-size:15px;margin-bottom:4px}
+.svc-card .u{font-size:12px;color:var(--sub);margin-bottom:12px}
+.fake-web{border:1px dashed var(--line);border-radius:10px;padding:80px 24px;text-align:center;color:var(--sub);font-size:13px;background:#fafbfa}
+.home-hint{text-align:center;color:var(--sub);font-size:13px;padding:80px 24px;line-height:2}
+/* 唤起把手（沉浸模式下唯一可见物） */
+.summon{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);z-index:40;background:rgba(26,29,26,.78);color:#fff;font-size:12px;padding:7px 18px;border-radius:99px;cursor:pointer;display:none;backdrop-filter:blur(4px);border:none}
+.immersive .summon{display:block}
+.summon:active{transform:translateX(-50%) scale(.95)}
+/* 设备页（B 启动台） */
+.launch{padding:14px;overflow-y:auto;height:100%}
+.dev-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+.dev-card .hd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.dev-card .hd b{font-size:14px}
+.dev-card .hd .cnt{margin-left:auto;font-size:12px;color:var(--sub)}
+.svc-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.svc-icon{text-align:center;cursor:pointer;position:relative}
+.svc-icon .box{width:52px;height:52px;margin:0 auto 4px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff}
+.svc-icon .nm{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.offline-mask{opacity:.45}
+/* sheet/toast/me 同 v1 */
+.mask{position:absolute;inset:0;background:rgba(0,0,0,.35);display:none;align-items:flex-end;z-index:50}
+.mask.on{display:flex}
+.sheet{background:#fff;width:100%;border-radius:18px 18px 0 0;padding:18px;max-height:60%;overflow-y:auto}
+.sheet h3{font-size:16px;margin-bottom:4px}
+.sheet .lead{font-size:13px;color:var(--sub);margin-bottom:14px}
+.btn{display:block;width:100%;padding:12px;border-radius:12px;border:none;background:var(--ac);color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:12px}
+.btn.sub{background:#f0f1f0;color:var(--ink)}
+.toast{position:absolute;left:50%;bottom:90px;transform:translateX(-50%);background:rgba(0,0,0,.75);color:#fff;font-size:13px;padding:8px 16px;border-radius:99px;display:none;z-index:60}
+.me{padding:14px;overflow-y:auto;height:100%}
+.acct-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+.plan{background:#fff;border:1.5px solid var(--line);border-radius:14px;padding:14px;margin-bottom:10px}
+.plan.on{border-color:var(--ac)}
+.plan .ph{display:flex;align-items:baseline;gap:6px}
+.plan .ph b{font-size:15px}
+.plan .pr{margin-left:auto;color:var(--ac);font-weight:700}
+.plan ul{margin:8px 0 0 18px;font-size:12px;color:var(--sub);line-height:1.8}
+.pay-row{display:flex;gap:10px;margin-top:6px}
+.pay-row button{flex:1;padding:10px;border-radius:10px;border:1px solid var(--line);background:#fff;font-size:13px;cursor:pointer}
+</style>
+</head>
+<body>
+
+<div class="demo-bar">
+  <b>原型 v2（P0 已定稿）：设备页 = 启动台 ｜ 工作台 = 侧栏树 + 沉浸式</b>
+  <div class="demo-note">玩法：① 「设备」页点任意服务图标 → 进入工作台该服务并自动进入沉浸模式（header / 底部导航 / 侧栏全部收起）；② 沉浸时屏幕底部有半透明 <kbd>∧ 唤起</kbd> 把手，点它临时召回 chrome，4 秒不操作自动再收起；③ 侧栏左上 ☰ 可手动开合；④ 服务行的 ✕ = 做减法（隐藏），抽屉底部「已隐藏服务」可恢复。</div>
+</div>
+
+<div class="phone" id="phone">
+  <div class="statusbar"><span>15:02</span><span>📶 5G&nbsp;&nbsp;100%</span></div>
+  <div class="connbar chrome" id="connbar">
+    <span class="dot" id="connDot"></span>
+    <span class="dev" id="connDev">—</span>
+    <span class="badge" id="connBadge">隧道</span>
+    <button class="cut" onclick="toast('断开（mock）')">断开</button>
+  </div>
+  <div class="body" id="body"></div>
+  <div class="tabbar chrome">
+    <button id="tbDev" class="on" onclick="goTab('devices')"><span class="ic">🖥</span>设备</button>
+    <button id="tbWs" onclick="goTab('ws')"><span class="ic">▦</span>工作台</button>
+    <button id="tbMe" onclick="goTab('me')"><span class="ic">👤</span>我的</button>
+  </div>
+  <button class="summon" id="summon" onclick="wake()">∧ 唤起</button>
+  <div class="mask" id="mask" onclick="if(event.target===this)closeSheet()"><div class="sheet" id="sheet"></div></div>
+  <div class="toast" id="toastEl"></div>
+</div>
+
+<script>
+const GROUP_COLORS=['#5b8def','#e5a33b','#3ba55d'];
+let state={ tab:'devices', drawer:false, immersive:false, curDev:'mac',
+  devices:[
+    {id:'mac',name:'MacBook Pro',online:true,channel:'隧道',cur:null,hidden:[],
+     services:[{port:'3001',name:'Claude 工作台',icon:'🤖',bg:'#d97757'},{port:'57255',name:'Kimi Code',icon:'🌙',bg:'#1a1d1a'},{port:'5173',name:'vite dev',icon:'⚡',bg:'#8b5cf6'}]},
+    {id:'win',name:'Windows 台式机',online:true,channel:'P2P',cur:null,hidden:[],
+     services:[{port:'3001',name:'Claude 工作台',icon:'🤖',bg:'#d97757'},{port:'8888',name:'Jupyter',icon:'📊',bg:'#e5a33b'}]},
+    {id:'mini',name:'Mac mini（家里）',online:false,channel:null,cur:null,hidden:[],
+     services:[{port:'3001',name:'Claude 工作台',icon:'🤖',bg:'#d97757'}]},
+  ]};
+const cur=()=>state.devices.find(d=>d.id===state.curDev);
+const visible=d=>d.services.filter(s=>!d.hidden.includes(s.port));
+function toast(m){const t=document.getElementById('toastEl');t.textContent=m;t.style.display='block';clearTimeout(t._x);t._x=setTimeout(()=>t.style.display='none',1600);}
+function goTab(t){state.tab=t;exitImmersive();['Dev','Ws','Me'].forEach(k=>document.getElementById('tb'+k).classList.remove('on'));({devices:()=>tbDev,ws:()=>tbWs,me:()=>tbMe})[t]().classList.add('on');render();}
+function pickDevice(id){const d=state.devices.find(x=>x.id===id);if(!d.online){openSheet(`<h3>设备不在线</h3><p class="lead">${d.name} 可能已休眠。会话都安全地存在那台电脑上，上线后即可继续。</p><button class="btn" onclick="closeSheet();toast('重新连接（mock）')">重新连接</button><button class="btn sub" onclick="closeSheet()">稍后再说</button>`);return;}state.curDev=id;render();}
+function openService(did,port){state.curDev=did;const d=cur();d.cur=port;state.tab='ws';['Dev','Ws','Me'].forEach(k=>document.getElementById('tb'+k).classList.remove('on'));tbWs.classList.add('on');state.drawer=false;enterImmersive();render();}
+function hideService(did,port){const d=state.devices.find(x=>x.id===did);d.hidden.push(port);if(d.cur===port)d.cur=null;toast('已隐藏（抽屉底部可恢复）');render();}
+function unhide(did,port){const d=state.devices.find(x=>x.id===did);d.hidden=d.hidden.filter(p=>p!==port);toast('已恢复挂载');render();}
+function toggleDrawer(v){state.drawer=v===undefined?!state.drawer:v;render();}
+/* ---- 沉浸模式 ---- */
+let wakeTimer=null;
+function enterImmersive(){state.immersive=true;document.getElementById('phone').classList.add('immersive');}
+function exitImmersive(){state.immersive=false;document.getElementById('phone').classList.remove('immersive');clearTimeout(wakeTimer);}
+function wake(){ /* 召回 chrome：退出沉浸，但记住仍停在服务页；4s 无操作自动再沉浸 */
+  exitImmersive();render();
+  clearTimeout(wakeTimer);
+  wakeTimer=setTimeout(()=>{ if(cur().cur){ enterImmersive(); render(); } },4000);
+}
+function openSheet(h){document.getElementById('sheet').innerHTML=h;document.getElementById('mask').classList.add('on');}
+function closeSheet(){document.getElementById('mask').classList.remove('on');}
+
+/* ---- 渲染 ---- */
+function svcViewHTML(d){
+  const s=d.services.find(x=>x.port===d.cur);
+  if(!s) return `<div class="home-hint">☰ 从侧栏挑一个服务<br>（服务自动发现、自动挂载、全部可见）<br><br>或到「设备」页点图标直达</div>`;
+  return `<div class="svc-view"><div class="svc-card">
+    <h4>${s.icon} ${s.name}</h4><div class="u">/s/${s.port}/ · ${d.name} · ${d.channel} 通道 · iframe 直载，全屏可用</div>
+    <div class="fake-web">〔 ${s.name} 的真实页面在这里全屏渲染 〕</div></div></div>`;
+}
+function drawerHTML(){
+  const rows=[];
+  state.devices.forEach(d=>{
+    rows.push(`<div class="cnode devn" onclick="pickDevice('${d.id}')"><span class="dot ${d.online?'':'off'}"></span>${d.name}<span style="margin-left:auto;font-size:10px;color:var(--sub)">${d.online?d.channel:'离线'}</span></div>`);
+    visible(d).forEach(s=>rows.push(`<div class="cnode svcn ${d.id===state.curDev&&s.port===d.cur?'on':''}" onclick="openService('${d.id}','${s.port}')">${s.icon} ${s.name}<span class="eye" title="不显示" onclick="event.stopPropagation();hideService('${d.id}','${s.port}')">✕</span></div>`));
+  });
+  const hd=[];state.devices.forEach(d=>d.hidden.forEach(p=>{const s=d.services.find(x=>x.port===p);hd.push(`${s.icon}${s.name}(${d.name}) <b onclick="unhide('${d.id}','${p}')">恢复</b>`);}));
+  return `<div class="drawer ${state.drawer?'':'hide'}">
+    <div class="acct">👤 founder@startup.io <span style="float:right;cursor:pointer" onclick="toggleDrawer(false)">收起 ⟨</span></div>
+    <div class="tree">${rows.join('')}</div>
+    ${hd.length?`<div class="ft">已隐藏（仍自动挂载）：${hd.join('；')}</div>`:''}
+  </div>`;
+}
+function renderWs(){
+  const d=cur();
+  return `${drawerHTML()}
+    <div class="wsmain" onclick="if(state.drawer&&!event.target.closest('.drawer'))toggleDrawer(false)">
+      ${!state.immersive?`<div style="padding:8px 12px"><button class="btn sub" style="width:auto;padding:6px 14px;margin:0;font-size:13px" onclick="event.stopPropagation();toggleDrawer(true)">☰ 服务树</button></div>`:''}
+      ${svcViewHTML(d)}
+    </div>`;
+}
+function renderDevices(){
+  return `<div class="launch">${state.devices.map(x=>`
+    <div class="dev-card ${x.online?'':'offline-mask'}">
+      <div class="hd"><span class="dot ${x.online?'':'off'}"></span><b>${x.name}</b><span class="badge ${x.channel==='P2P'?'p2p':''}">${x.online?x.channel:'离线'}</span><span class="cnt">${visible(x).length} 个服务</span></div>
+      <div class="svc-grid">${visible(x).map(s=>`
+        <div class="svc-icon" onclick="openService('${x.id}','${s.port}')">
+          <div class="box" style="background:${s.bg}">${s.icon}</div><div class="nm">${s.name}</div>
+        </div>`).join('')}</div>
+    </div>`).join('')}
+    <div style="font-size:12px;color:var(--sub);text-align:center;line-height:1.8">服务全部自动发现、自动挂载<br>减法（隐藏）在工作台侧栏里做</div></div>`;
+}
+function renderMe(){
+  return `<div class="me">
+    <div class="acct-card"><b>👤 founder@startup.io</b><div style="font-size:12px;color:var(--sub);margin-top:4px">当前套餐：Pro · 账号是唯一计费单元</div></div>
+    ${[['Free','¥0','1 台设备 · 3 个服务 · 社区中继 1GB/月'],['Pro','¥29/月','5 台设备 · 不限服务 · 中继 50GB/月 · P2P/隧道不计流量']].map((p,i)=>`
+    <div class="plan ${i===1?'on':''}"><div class="ph"><b>${p[0]}</b><span class="pr">${p[1]}</span></div><ul><li>${p[2].split(' · ').join('</li><li>')}</li></ul>
+      ${i===1?`<div class="pay-row"><button onclick="toast('Stripe Checkout（mock）')">💳 Stripe</button><button onclick="toast('DodoPayments（mock）')">🦤 Dodo</button></div>`:''}
+    </div>`).join('')}
+  </div>`;
+}
+function render(){
+  const d=cur();
+  document.getElementById('connDev').textContent=d.name;
+  document.getElementById('connDot').className='dot'+(d.online?'':' off');
+  const b=document.getElementById('connBadge');b.textContent=d.online?d.channel:'离线';b.className='badge'+(d.channel==='P2P'?' p2p':'');
+  document.getElementById('body').innerHTML=state.tab==='devices'?renderDevices():state.tab==='ws'?renderWs():renderMe();
+}
+render();
+</script>
+</body>
+</html>

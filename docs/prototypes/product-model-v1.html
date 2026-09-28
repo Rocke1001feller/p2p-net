@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>p2p-net 产品模型原型 v1（三方案）</title>
+<style>
+:root{--ac:#0f9d63;--bg:#f6f7f6;--ink:#1a1d1a;--sub:#6b726c;--line:#e4e7e4;--danger:#e5534b}
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,"PingFang SC",sans-serif}
+body{background:#2b2f2c;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 12px;color:var(--ink)}
+/* ---- 演示控制台（非产品部分） ---- */
+.demo-bar{background:#1c1f1d;color:#cdd5ce;border-radius:12px;padding:12px 16px;margin-bottom:18px;max-width:420px;width:100%;font-size:13px}
+.demo-bar b{color:#fff}
+.demo-bar .sw{display:flex;gap:8px;margin-top:10px}
+.demo-bar .sw button{flex:1;padding:8px 0;border-radius:8px;border:1px solid #3a403c;background:#262a27;color:#cdd5ce;font-size:13px;cursor:pointer}
+.demo-bar .sw button.on{background:var(--ac);border-color:var(--ac);color:#fff;font-weight:600}
+.demo-note{margin-top:8px;font-size:12px;color:#8a938b;line-height:1.5}
+/* ---- 手机框 ---- */
+.phone{width:100%;max-width:420px;height:760px;background:var(--bg);border-radius:28px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+.statusbar{height:28px;display:flex;justify-content:space-between;align-items:center;padding:0 18px;font-size:12px;color:var(--sub);background:#fff}
+/* 连接条（沿用现行心智：设备 + 通道徽章 + 断开） */
+.connbar{display:flex;align-items:center;gap:8px;padding:10px 14px;background:#fff;border-bottom:1px solid var(--line)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ac)}
+.dot.off{background:#c8cdc8}
+.connbar .dev{font-weight:600;font-size:14px}
+.badge{font-size:11px;padding:2px 8px;border-radius:99px;background:#e6f6ee;color:var(--ac);border:1px solid #bbe6d1}
+.badge.p2p{background:#e8f0fe;color:#1a56db;border-color:#c2d7f5}
+.connbar .cut{margin-left:auto;color:var(--danger);font-size:13px;border:none;background:none;cursor:pointer}
+/* ---- 通用内容区 ---- */
+.body{flex:1;overflow-y:auto;position:relative}
+.tabbar{display:flex;background:#fff;border-top:1px solid var(--line)}
+.tabbar button{flex:1;padding:10px 0 14px;border:none;background:none;font-size:12px;color:var(--sub);cursor:pointer}
+.tabbar button.on{color:var(--ac);font-weight:600}
+.tabbar .ic{font-size:18px;display:block;margin-bottom:2px}
+/* ---- 方案 A：设备组 + 服务 tab ---- */
+.group-strip{display:flex;gap:8px;padding:10px 12px;background:#fff;border-bottom:1px solid var(--line);overflow-x:auto}
+.gchip{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:99px;border:1.5px solid var(--line);font-size:13px;white-space:nowrap;cursor:pointer;background:#fff}
+.gchip.on{border-color:currentColor;font-weight:600;background:#f2f9f5}
+.gdot{width:10px;height:10px;border-radius:50%}
+.gchip .cnt{font-size:11px;color:var(--sub)}
+.svc-tabs{display:flex;gap:2px;padding:8px 10px 0;background:#fff;overflow-x:auto}
+.stab{padding:8px 14px;font-size:13px;border-radius:10px 10px 0 0;background:#f0f1f0;color:var(--sub);white-space:nowrap;cursor:pointer;display:flex;align-items:center;gap:6px;border:1px solid transparent;border-bottom:none}
+.stab.on{background:var(--bg);color:var(--ink);font-weight:600;border-color:var(--line)}
+.stab .x{font-size:11px;color:#b6bcb6;border-radius:4px;padding:0 3px}
+.stab .x:hover{color:var(--danger);background:#fdeceb}
+.svc-view{padding:14px}
+.svc-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px}
+.svc-card h4{font-size:15px;margin-bottom:4px}
+.svc-card .u{font-size:12px;color:var(--sub);margin-bottom:12px}
+.fake-web{border:1px dashed var(--line);border-radius:10px;padding:24px;text-align:center;color:var(--sub);font-size:13px;background:#fafbfa}
+/* ---- 方案 B：启动台 ---- */
+.launch{padding:14px}
+.dev-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px;cursor:pointer}
+.dev-card .hd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.dev-card .hd b{font-size:14px}
+.dev-card .hd .cnt{margin-left:auto;font-size:12px;color:var(--sub)}
+.svc-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.svc-icon{text-align:center;cursor:pointer;position:relative}
+.svc-icon .box{width:52px;height:52px;margin:0 auto 4px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff}
+.svc-icon .nm{font-size:11px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.svc-icon .eye{position:absolute;top:-4px;right:2px;background:#fff;border:1px solid var(--line);border-radius:99px;font-size:10px;padding:1px 5px;color:var(--sub)}
+.offline-mask{opacity:.45;pointer-events:none}
+/* ---- 方案 C：侧栏树 ---- */
+.cwrap{display:flex;height:100%}
+.cside{width:150px;background:#fff;border-right:1px solid var(--line);overflow-y:auto;padding:10px 8px}
+.cside .acct{font-size:12px;color:var(--sub);padding:4px 6px 10px}
+.cnode{font-size:13px;padding:7px 8px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:6px}
+.cnode.devn{font-weight:600;margin-top:6px}
+.cnode.svcn{padding-left:24px;color:var(--sub)}
+.cnode.svcn.on{background:#e6f6ee;color:var(--ac);font-weight:600}
+.cnode .eye{margin-left:auto;font-size:10px;color:#b6bcb6}
+.cmain{flex:1;padding:14px;overflow-y:auto}
+/* ---- sheet & 管理 ---- */
+.mask{position:absolute;inset:0;background:rgba(0,0,0,.35);display:none;align-items:flex-end}
+.mask.on{display:flex}
+.sheet{background:#fff;width:100%;border-radius:18px 18px 0 0;padding:18px;max-height:60%;overflow-y:auto}
+.sheet h3{font-size:16px;margin-bottom:4px}
+.sheet .lead{font-size:13px;color:var(--sub);margin-bottom:14px}
+.hrow{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--line);font-size:14px}
+.hrow .re{margin-left:auto;font-size:12px;color:var(--ac);cursor:pointer}
+.btn{display:block;width:100%;padding:12px;border-radius:12px;border:none;background:var(--ac);color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:12px}
+.btn.sub{background:#f0f1f0;color:var(--ink)}
+/* ---- 我的/订阅 ---- */
+.me{padding:14px}
+.acct-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+.plan{background:#fff;border:1.5px solid var(--line);border-radius:14px;padding:14px;margin-bottom:10px}
+.plan.on{border-color:var(--ac)}
+.plan .ph{display:flex;align-items:baseline;gap:6px}
+.plan .ph b{font-size:15px}
+.plan .pr{margin-left:auto;color:var(--ac);font-weight:700}
+.plan ul{margin:8px 0 0 18px;font-size:12px;color:var(--sub);line-height:1.8}
+.pay-row{display:flex;gap:10px;margin-top:6px}
+.pay-row button{flex:1;padding:10px;border-radius:10px;border:1px solid var(--line);background:#fff;font-size:13px;cursor:pointer}
+.toast{position:absolute;left:50%;bottom:90px;transform:translateX(-50%);background:rgba(0,0,0,.75);color:#fff;font-size:13px;padding:8px 16px;border-radius:99px;display:none}
+.hidden-list{font-size:12px;color:var(--sub);padding:8px 12px;background:#fff;border-top:1px dashed var(--line)}
+.hidden-list b{color:var(--ac);cursor:pointer}
+</style>
+</head>
+<body>
+
+<div class="demo-bar">
+  <b>p2p-net 产品模型原型 v1</b>（演示控制台，非产品 UI）
+  <div class="sw">
+    <button id="swA" class="on" onclick="setScheme('A')">方案 A 设备组+Tab</button>
+    <button id="swB" onclick="setScheme('B')">方案 B 启动台</button>
+    <button id="swC" onclick="setScheme('C')">方案 C 侧栏树</button>
+  </div>
+  <div class="demo-note">模型：账号 → 设备(group) → 服务(tab)。服务自动发现自动挂载、默认全部可见；用户只能做减法（点 tab 上的 ✕ / 眼睛图标隐藏，可在「已隐藏」恢复）。右下角「我的」里有账号级订阅 + Stripe/Dodo 支付挂载点 mock。</div>
+</div>
+
+<div class="phone">
+  <div class="statusbar"><span>15:02</span><span>📶 5G&nbsp;&nbsp;100%</span></div>
+  <div class="connbar">
+    <span class="dot" id="connDot"></span>
+    <span class="dev" id="connDev">—</span>
+    <span class="badge" id="connBadge">隧道</span>
+    <button class="cut" onclick="toast('断开（mock）')">断开</button>
+  </div>
+  <div class="body" id="body"></div>
+  <div class="tabbar">
+    <button id="tbDev" onclick="goTab('devices')"><span class="ic">🖥</span>设备</button>
+    <button id="tbWs" class="on" onclick="goTab('ws')"><span class="ic">▦</span>工作台</button>
+    <button id="tbMe" onclick="goTab('me')"><span class="ic">👤</span>我的</button>
+  </div>
+  <div class="mask" id="mask" onclick="if(event.target===this)closeSheet()"><div class="sheet" id="sheet"></div></div>
+  <div class="toast" id="toastEl"></div>
+</div>
+
+<script>
+/* ================= 模拟数据：一个账号，三台设备，每台若干自动发现的服务 ================= */
+const ACCOUNT = { email: 'founder@startup.io', plan: 'Pro' };
+const GROUP_COLORS = ['#5b8def','#e5a33b','#3ba55d','#c35bd8','#e05b5b'];
+let state = {
+  scheme: 'A', tab: 'ws',
+  devices: [
+    { id:'mac',  name:'MacBook Pro', online:true,  channel:'隧道', color:0, cur:'3001',
+      services:[
+        {port:'3001', name:'Claude 工作台', icon:'🤖', bg:'#d97757'},
+        {port:'57255',name:'Kimi Code',    icon:'🌙', bg:'#1a1d1a'},
+        {port:'5173', name:'vite dev',     icon:'⚡', bg:'#8b5cf6'},
+      ], hidden:[] },
+    { id:'win',  name:'Windows 台式机', online:true, channel:'P2P', color:1, cur:'3001',
+      services:[
+        {port:'3001', name:'Claude 工作台', icon:'🤖', bg:'#d97757'},
+        {port:'8888', name:'Jupyter',      icon:'📊', bg:'#e5a33b'},
+      ], hidden:[] },
+    { id:'mini', name:'Mac mini（家里）', online:false, channel:null, color:2, cur:null,
+      services:[
+        {port:'3001', name:'Claude 工作台', icon:'🤖', bg:'#d97757'},
+      ], hidden:[] },
+  ],
+};
+const cur = () => state.devices.find(d=>d.id===state.curDev) || state.devices[0];
+state.curDev = 'mac';
+const visible = d => d.services.filter(s=>!d.hidden.includes(s.port));
+
+function toast(msg){ const t=document.getElementById('toastEl'); t.textContent=msg; t.style.display='block'; clearTimeout(t._x); t._x=setTimeout(()=>t.style.display='none',1600); }
+function setScheme(s){ state.scheme=s; ['A','B','C'].forEach(k=>document.getElementById('sw'+k).classList.toggle('on',k===s)); render(); }
+function goTab(t){ state.tab=t; ['Dev','Ws','Me'].forEach(k=>document.getElementById('tb'+k).classList.remove('on')); ({devices:()=>tbDev,ws:()=>tbWs,me:()=>tbMe})[t]().classList.add('on'); render(); }
+function pickDevice(id){ const d=state.devices.find(x=>x.id===id); if(!d.online){ openSheet(`<h3>设备不在线</h3><p class="lead">${d.name} 可能已休眠。会话都安全地存在那台电脑上，上线后即可继续。</p><button class="btn" onclick="closeSheet();toast('重新连接（mock）')">重新连接</button><button class="btn sub" onclick="closeSheet()">稍后再说</button>`); return; } state.curDev=id; render(); }
+function pickService(port){ cur().cur=port; state.tab='ws'; goTab('ws'); }
+function hideService(port){ const d=cur(); d.hidden.push(port); if(d.cur===port){ const v=visible(d); d.cur=v.length?v[0].port:null; } toast('已隐藏（可在「已隐藏服务」恢复）'); render(); }
+function unhide(did,port){ const d=state.devices.find(x=>x.id===did); d.hidden=d.hidden.filter(p=>p!==port); toast('已恢复挂载'); render(); }
+function openSheet(html){ document.getElementById('sheet').innerHTML=html; document.getElementById('mask').classList.add('on'); }
+function closeSheet(){ document.getElementById('mask').classList.remove('on'); }
+function svcViewHTML(d){
+  const s = d.services.find(x=>x.port===d.cur);
+  if(!s) return `<div class="svc-view"><div class="svc-card"><h4>本设备服务已全部隐藏</h4><p class="u">服务仍在自动挂载，只是你选择了不显示。</p></div></div>`;
+  return `<div class="svc-view"><div class="svc-card">
+    <h4>${s.icon} ${s.name}</h4><div class="u">/s/${s.port}/ · ${d.name} · 经 ${d.channel||'—'} 通道 · iframe 直载，现场不丢</div>
+    <div class="fake-web">〔 ${s.name} 的真实页面在这里渲染 〕</div>
+  </div></div>`;
+}
+function hiddenHTML(){
+  const rows=[]; state.devices.forEach(d=>d.hidden.forEach(p=>{ const s=d.services.find(x=>x.port===p); rows.push(`<div class="hrow">${s.icon} ${s.name} <span style="color:var(--sub);font-size:12px">· ${d.name}</span><span class="re" onclick="unhide('${d.id}','${p}')">恢复</span></div>`); }));
+  if(!rows.length) return '';
+  return `<div class="hidden-list">已隐藏服务（自动挂载仍在继续，只是不显示）：${rows.join('')}</div>`;
+}
+
+/* ================= 三个方案 ================= */
+function renderA(){
+  const d=cur();
+  if(state.tab==='devices') return renderDevicesA();
+  if(state.tab==='me') return renderMe();
+  const chips = state.devices.map(x=>`<div class="gchip ${x.id===d.id?'on':''}" style="color:${GROUP_COLORS[x.color]}" onclick="pickDevice('${x.id}')"><span class="gdot" style="background:${GROUP_COLORS[x.color]}"></span><span style="color:var(--ink)">${x.name}</span><span class="cnt">${visible(x).length}${x.online?'':' · 离线'}</span></div>`).join('');
+  const tabs = visible(d).map(s=>`<div class="stab ${s.port===d.cur?'on':''}" onclick="pickService('${s.port}')">${s.icon} ${s.name}<span class="x" title="不显示此服务" onclick="event.stopPropagation();hideService('${s.port}')">✕</span></div>`).join('') || '<div style="padding:8px 12px;font-size:13px;color:var(--sub)">无可见服务</div>';
+  return `<div class="group-strip">${chips}</div><div class="svc-tabs">${tabs}</div>${svcViewHTML(d)}${hiddenHTML()}`;
+}
+function renderDevicesA(){
+  return `<div class="launch">${state.devices.map(x=>`
+    <div class="dev-card" onclick="pickDevice('${x.id}')">
+      <div class="hd"><span class="dot ${x.online?'':'off'}"></span><b>${x.name}</b><span class="badge ${x.channel==='P2P'?'p2p':''}">${x.online?x.channel:'离线'}</span><span class="cnt">${visible(x).length} 个服务</span></div>
+    </div>`).join('')}</div>`;
+}
+function renderB(){
+  if(state.tab==='me') return renderMe();
+  if(state.tab==='devices') return renderDevicesA();
+  return `<div class="launch">${state.devices.map(x=>`
+    <div class="dev-card ${x.online?'':'offline-mask'}">
+      <div class="hd"><span class="dot ${x.online?'':'off'}"></span><b>${x.name}</b><span class="badge ${x.channel==='P2P'?'p2p':''}">${x.online?x.channel:'离线'}</span><span class="cnt">${visible(x).length} 个服务</span></div>
+      <div class="svc-grid">${visible(x).map(s=>`
+        <div class="svc-icon" onclick="pickDevice('${x.id}');pickService('${s.port}')">
+          <span class="eye" title="不显示" onclick="event.stopPropagation();state.curDev='${x.id}';hideService('${s.port}')">🚫</span>
+          <div class="box" style="background:${s.bg}">${s.icon}</div><div class="nm">${s.name}</div>
+        </div>`).join('')}</div>
+    </div>`).join('')}${hiddenHTML()}</div>`;
+}
+function renderC(){
+  if(state.tab==='me') return renderMe();
+  if(state.tab==='devices') return renderDevicesA();
+  const d=cur();
+  const tree = state.devices.map(x=>`
+    <div class="cnode devn" onclick="pickDevice('${x.id}')"><span class="dot ${x.online?'':'off'}"></span>${x.name}</div>
+    ${visible(x).map(s=>`<div class="cnode svcn ${x.id===d.id&&s.port===d.cur?'on':''}" onclick="state.curDev='${x.id}';pickService('${s.port}')">${s.icon} ${s.name}<span class="eye" onclick="event.stopPropagation();state.curDev='${x.id}';hideService('${s.port}')">✕</span></div>`).join('')}`).join('');
+  return `<div class="cwrap"><div class="cside"><div class="acct">👤 ${ACCOUNT.email}</div>${tree}</div><div class="cmain">${svcViewHTML(d)}</div></div>`;
+}
+function renderMe(){
+  return `<div class="me">
+    <div class="acct-card"><b>👤 ${ACCOUNT.email}</b><div style="font-size:12px;color:var(--sub);margin-top:4px">当前套餐：${ACCOUNT.plan} · 账号是唯一计费单元</div></div>
+    ${[['Free','¥0','1 台设备 · 3 个服务 · 社区中继 1GB/月'],['Pro','¥29/月','5 台设备 · 不限服务 · 中继 50GB/月 · P2P/隧道不计流量'],['Team','¥99/月','不限设备 · 成员共享 · 中继 500GB/月 · 优先支持']].map((p,i)=>`
+    <div class="plan ${i===1?'on':''}"><div class="ph"><b>${p[0]}</b><span class="pr">${p[1]}</span></div><ul><li>${p[2].split(' · ').join('</li><li>')}</li></ul>
+      ${i===1?`<div class="pay-row"><button onclick="toast('Stripe Checkout（mock）')">💳 Stripe</button><button onclick="toast('DodoPayments（mock）')">🦤 Dodo</button></div>`:''}
+    </div>`).join('')}
+    <div style="font-size:12px;color:var(--sub);line-height:1.7;margin-top:6px">订阅状态经支付 webhook 落 Supabase 订阅表，uid ↔ customer 映射；中继流量按成本模型 §6.1 的真机字节计量计费，P2P/隧道零边际成本。</div>
+  </div>`;
+}
+function render(){
+  const d=cur();
+  document.getElementById('connDev').textContent = d.name;
+  document.getElementById('connDot').className = 'dot'+(d.online?'':' off');
+  const b=document.getElementById('connBadge'); b.textContent=d.online?d.channel:'离线'; b.className='badge'+(d.channel==='P2P'?' p2p':'');
+  document.getElementById('body').innerHTML = state.scheme==='A'?renderA():state.scheme==='B'?renderB():renderC();
+}
+render();
+</script>
+</body>
+</html>
