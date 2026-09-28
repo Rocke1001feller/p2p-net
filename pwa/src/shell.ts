@@ -44,15 +44,16 @@ import {
   hideConnecting, hideSheets, log, renderDevices, setMe, setStatus, showConnecting,
   showOfflineSheet, showPasteSheet, showScreen, showTab, setWorkspaceEnabled, toast,
   connectingStage, wechatGuard, showBrowserHint, setStall, setProbeDown, isProbeDown,
-  setExperimentMode,
+  setExperimentMode, renderServiceTree, openSvcDrawer, closeSvcDrawer,
   type SavedDevice,
 } from './ui.js';
+import { buildServiceTree } from './serviceTree.js';
 import { stallSuspect } from './stall.js';
 import { ForegroundProbe, FOREGROUND_PROBE_HIDDEN_MS, FOREGROUND_PROBE_TIMEOUT_MS } from './foregroundProbe.js';
 import { onConnectFailure, onConnectStopped } from './reconnectPolicy.js';
 import { bootConnectTarget } from './bootPolicy.js';
 import { writeLastGoodPort, readLastService, writeLastService } from './consolePick.js';
-import { readHidden } from './hiddenServices.js';
+import { readHidden, hideService, unhideService } from './hiddenServices.js';
 
 const Q = new URLSearchParams(location.search);
 const DEV_MODE = Q.get('dev') === '1';
@@ -869,6 +870,7 @@ async function fetchServices(): Promise<void> {
       servicesFetched = true;
       log(`[services] ${currentServices.length} 个；console=${list.console ?? '（载荷未带）'}`);
       await openWorkbench(list);
+      refreshServiceTree(); // W-B① 不重建路径不经过 openService，在这里兜底重渲染树
       return;
     } catch (e) {
       lastErr = e;
@@ -932,6 +934,36 @@ async function openWorkbench(list?: { console?: string | { url?: string }[] }): 
 
 type GuideKind = 'empty' | 'no-selection' | 'all-hidden';
 
+/** 侧栏服务树渲染（P1）：清单/隐藏/选中/已打开 → 三段行。fetchServices 成功、openService、
+ *  showGuide 后都要重渲染（W-B① 不重建路径不经过 openService，靠 fetchServices 那一下兜底）。 */
+function refreshServiceTree(): void {
+  renderServiceTree(
+    {
+      deviceName: deskName,
+      ...buildServiceTree({
+        services: currentServices,
+        hidden: readHidden(localStorage, desk.id),
+        consolePort,
+        selectedPort,
+        openPorts: [...tabs.keys()],
+      }),
+    },
+    {
+      onPick: (port) => { closeSvcDrawer(); void openService(port); },
+      onHide: (port) => {
+        hideService(localStorage, desk.id, port);
+        if (selectedPort === port) {
+          // 隐藏正在看的服务：允许，立即回引导页；iframe 保留不销毁（恢复后现场还在，spec §4.5）
+          selectedPort = null;
+          showGuide('no-selection');
+        }
+        refreshServiceTree();
+      },
+      onUnhide: (port) => { unhideService(localStorage, desk.id, port); refreshServiceTree(); },
+    },
+  );
+}
+
 /** 引导页：默认选中落空时的工作台首屏（不弹 sheet）。显示时隐藏所有 iframe（保留不销毁）。 */
 function showGuide(kind: GuideKind): void {
   for (const t of tabs.values()) t.iframe.style.display = 'none';
@@ -942,6 +974,7 @@ function showGuide(kind: GuideKind): void {
   const t = document.getElementById('svcGuideTxt');
   if (t) t.textContent = txt;
   if (g) g.style.display = 'block';
+  refreshServiceTree();
 }
 
 async function openService(port: number, opts?: { remember?: boolean }): Promise<void> {
@@ -964,6 +997,7 @@ async function openService(port: number, opts?: { remember?: boolean }): Promise
   selectedPort = port;
   if (opts?.remember !== false) writeLastService(localStorage, desk.id, port);
   setConnTitleSafe();
+  refreshServiceTree();
   void markActive(port);
   void bootWorkbench(port, tab);
 }
@@ -1313,6 +1347,10 @@ $id('btnEye').onclick = () => {
 $id('btnPasswordLogin').onclick = () => void passwordLogin();
 $id('lnkClaim').onclick = () => toast('账号由初始化（p2p-net init）时创建，请在电脑端查看');
 $id('btnDisconnect').onclick = () => stopSession();
+$id('btnSvcTree').onclick = () => {
+  const d = document.getElementById('svcDrawer')!;
+  if (d.classList.contains('show')) closeSvcDrawer(); else openSvcDrawer();
+};
 // 前台探活黄灯「连接待恢复，点我重试」：点击标题即重试探活（仅黄灯亮时响应）
 $id('connTitle').onclick = () => {
   if (!isProbeDown()) return;

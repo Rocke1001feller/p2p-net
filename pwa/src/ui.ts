@@ -296,3 +296,75 @@ export function wechatGuard(): boolean {
 export function setConnTitle(name: string): void {
   ($('connTitle') as HTMLElement).dataset.name = name;
 }
+
+// ---- 侧栏服务树（2026-09-28 P1 多服务工作台：设备→服务树 + 隐藏/恢复）----
+import type { ServiceRow } from './serviceTree.js';
+
+export interface ServiceTreeModel {
+  deviceName: string;
+  visible: ServiceRow[];
+  hidden: ServiceRow[];
+  gone: ServiceRow[];
+}
+export interface ServiceTreeHandlers {
+  onPick(port: number): void;
+  onHide(port: number): void;
+  onUnhide(port: number): void;
+}
+
+export function renderServiceTree(model: ServiceTreeModel, handlers: ServiceTreeHandlers): void {
+  $('svcDrawerName').textContent = model.deviceName || '设备';
+  const tree = $('svcTree');
+  tree.innerHTML = '';
+  for (const r of model.visible) {
+    const row = document.createElement('div');
+    row.className = 'svc-row' + (r.isSelected ? ' sel' : '');
+    row.dataset.port = String(r.port);
+    const nm = document.createElement('span');
+    nm.className = 'svc-nm';
+    nm.textContent = r.name;
+    row.appendChild(nm);
+    if (!r.isConsole) {
+      const x = document.createElement('button');
+      x.className = 'svc-hide';
+      x.textContent = '✕';
+      x.title = '隐藏（可在下方恢复）';
+      x.onclick = () => handlers.onHide(r.port);
+      row.appendChild(x);
+    }
+    row.onclick = () => handlers.onPick(r.port);
+    tree.appendChild(row);
+  }
+  const goneBox = $('svcGone');
+  goneBox.innerHTML = '';
+  for (const r of model.gone) {
+    const row = document.createElement('div');
+    row.className = 'svc-row gone';
+    row.dataset.port = String(r.port);
+    const nm = document.createElement('span');
+    nm.className = 'svc-nm';
+    nm.textContent = `${r.name}（已离线）`;
+    row.appendChild(nm);
+    goneBox.appendChild(row);
+  }
+  $('svcHiddenHead').style.display = model.hidden.length ? 'block' : 'none';
+  const hid = $('svcHidden');
+  hid.innerHTML = '';
+  for (const r of model.hidden) {
+    const row = document.createElement('div');
+    row.className = 'svc-row';
+    row.dataset.port = String(r.port);
+    const nm = document.createElement('span');
+    nm.className = 'svc-nm';
+    nm.textContent = r.name;
+    const un = document.createElement('button');
+    un.className = 'svc-unhide';
+    un.textContent = '恢复';
+    un.onclick = () => handlers.onUnhide(r.port);
+    row.append(nm, un);
+    hid.appendChild(row);
+  }
+}
+
+export function openSvcDrawer(): void { $('svcDrawer').classList.add('show'); }
+export function closeSvcDrawer(): void { $('svcDrawer').classList.remove('show'); }
