@@ -10,6 +10,12 @@ import { FakeEl, installShellHarness } from './shell.test-harness.js';
 const h = installShellHarness({
   search: '?dev=1&jwt=j&uid=uid-test&device=phone-test&desk=desk-1&t=dummy'
     + '&u=https://gw.example.com/tunnel/s/abc&tunnel=1',
+  // 2026-09-28 P1：console 自述必须在服务清单内才算数（不在=「console 死了」→ 引导页）。
+  // 旧默认载荷 services:[] + console:'/s/3000/' 在新链下会落空，故显式给出真实形态载荷。
+  services: {
+    console: '/s/3000/',
+    services: [{ name: 'Claude 工作台', url: '/s/3000/', port: 3000 }],
+  },
   observeTextIds: ['log'],
 });
 

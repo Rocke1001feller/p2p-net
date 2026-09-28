@@ -51,7 +51,8 @@ import { stallSuspect } from './stall.js';
 import { ForegroundProbe, FOREGROUND_PROBE_HIDDEN_MS, FOREGROUND_PROBE_TIMEOUT_MS } from './foregroundProbe.js';
 import { onConnectFailure, onConnectStopped } from './reconnectPolicy.js';
 import { bootConnectTarget } from './bootPolicy.js';
-import { pickFallbackPort, readLastGoodPort, writeLastGoodPort } from './consolePick.js';
+import { writeLastGoodPort, readLastService, writeLastService } from './consolePick.js';
+import { readHidden } from './hiddenServices.js';
 
 const Q = new URLSearchParams(location.search);
 const DEV_MODE = Q.get('dev') === '1';
@@ -796,6 +797,8 @@ function stopSession(): void {
 let servicesFetched = false;
 let fetchRetries = 0;
 let consolePort: number | null = null;
+/** 当前选中服务端口（P1 多服务工作台）；null = 无选中（引导页）。 */
+let selectedPort: number | null = null;
 
 async function afterConnected(): Promise<void> {
   showTab('workspace');
@@ -808,8 +811,10 @@ async function afterConnected(): Promise<void> {
   const isReconnect = everConnected;
   if (isReconnect) { servicesFetched = false; fetchRetries = 0; }
   await fetchServices();
-  if (isReconnect && consolePort) {
-    const tab = tabs.get(consolePort);
+  // 探活对象是「当前选中」而非历史 consolePort（2026-09-28 P1：多服务化后 openWorkbench
+  // 可能已落引导页——selectedPort=null，此时不得把旧 consolePort 的 iframe 又拉回屏上）。
+  if (isReconnect && selectedPort) {
+    const tab = tabs.get(selectedPort);
     if (tab) {
       if (looksBooted(tab.iframe.contentDocument)) {
         tab.booted = true; // 探活坐实：同步闩锁，止住后续健康检查链的空转
@@ -818,7 +823,7 @@ async function afterConnected(): Promise<void> {
         tab.booted = false;
         tab.reloads = 0;
         log('[workbench] 数据面已重连 → 重建工作台（清首屏残骸）');
-        await openService(consolePort);
+        await openService(selectedPort);
       }
     }
   }
@@ -886,37 +891,60 @@ async function fetchServices(): Promise<void> {
   });
 }
 
-/** 工作台直载：端口解析优先级——①桌面自述（载荷 console：字符串 '/s/<port>/' 或数组 [{url}]，
- *  host 配置 consolePort 后恒自述）；②清单中 p2p-net 服务；③last-good 兜底（pickFallbackPort：
- *  上次成功端口仍在清单内则粘性复用，否则清单首个 /s/ 服务）——③防任意低位端口新监听者
- *  （如本机 vite dev server）抢占「首个服务」把工作台 iframe 劫持到错误应用。 */
+/** 工作台直载（2026-09-28 P1 多服务改造）：端口裁决链拆半——console 自述只产出「默认选中」，
+ *  全量服务留给侧栏树（Task 4）。默认选中链：①console 自述（必须在清单内——不在即「console 死了」，
+ *  落空进引导页，不 hijack 到其它服务）；②清单中 p2p-net 命名服务；③lastService（须在清单且未被隐藏）。
+ *  全落空 → 引导页（empty / all-hidden / no-selection），不再「清单首个」盲选、不弹 offlineSheet。 */
 async function openWorkbench(list?: { console?: string | { url?: string }[] }): Promise<void> {
-  const consoleField = list?.console;
-  const consolePath = typeof consoleField === 'string' ? consoleField
-    : Array.isArray(consoleField) ? (consoleField[0]?.url ?? '') : '';
-  const cport = Number(consolePath.match(/^\/s\/(\d+)\//)?.[1])
-    || currentServices.find((s) => s.name === 'p2p-net')?.port
-    || (pickFallbackPort(currentServices, readLastGoodPort(localStorage)) ?? NaN);
-  if (!Number.isInteger(cport) || cport <= 0) {
-    showOfflineSheet(deskName, '桌面未自述工作台端口，无法打开。请更新桌面端后重试。', () => {
-      servicesFetched = false;
-      fetchRetries = 0;
-      void fetchServices();
-    });
-    return;
-  }
-  // 验收/排障钩子：?svc=<port> 直开指定服务（绕过 console 自述选择），供 bench/回归定向打击。
+  // 验收/排障钩子：?svc=<port> 直开指定服务（跳过默认选中；不写 lastService，防污染记忆）。
   const svcQ = Number(Q.get('svc'));
   if (Number.isInteger(svcQ) && svcQ > 0) {
     consolePort = svcQ;
-    await openService(svcQ);
+    await openService(svcQ, { remember: false });
     return;
   }
-  consolePort = cport;
-  await openService(cport);
+  const consoleField = list?.console;
+  const consolePath = typeof consoleField === 'string' ? consoleField
+    : Array.isArray(consoleField) ? (consoleField[0]?.url ?? '') : '';
+  const selfPort = Number(consolePath.match(/^\/s\/(\d+)\//)?.[1]) || null;
+  const inList = (p: number | null): p is number =>
+    p !== null && currentServices.some((s) => s.port === p);
+  const hidden = readHidden(localStorage, desk.id);
+  const consoleCandidate = selfPort ?? currentServices.find((s) => s.name === 'p2p-net')?.port ?? null;
+  let chosen: number | null = null;
+  if (consoleCandidate !== null) {
+    // console 服务不可隐藏（spec §4.1 裁决）：hidden 记录对它无效；死了（不在清单）则落空，不下滑。
+    chosen = inList(consoleCandidate) ? consoleCandidate : null;
+  } else {
+    const last = readLastService(localStorage, desk.id);
+    if (inList(last) && !hidden.includes(last)) chosen = last;
+  }
+  if (chosen === null) {
+    selectedPort = null;
+    showGuide(currentServices.length === 0 ? 'empty'
+      : currentServices.every((s) => hidden.includes(s.port) && s.port !== consoleCandidate) ? 'all-hidden'
+      : 'no-selection');
+    return;
+  }
+  consolePort = chosen;
+  await openService(chosen);
 }
 
-async function openService(port: number): Promise<void> {
+type GuideKind = 'empty' | 'no-selection' | 'all-hidden';
+
+/** 引导页：默认选中落空时的工作台首屏（不弹 sheet）。显示时隐藏所有 iframe（保留不销毁）。 */
+function showGuide(kind: GuideKind): void {
+  for (const t of tabs.values()) t.iframe.style.display = 'none';
+  const txt = kind === 'empty' ? '未发现服务。请在桌面端启动服务后，断开重连试试。'
+    : kind === 'all-hidden' ? '已全部隐藏。点 ☰ 打开侧栏可恢复。'
+    : '☰ 从侧栏挑一个服务';
+  const g = document.getElementById('svcGuide');
+  const t = document.getElementById('svcGuideTxt');
+  if (t) t.textContent = txt;
+  if (g) g.style.display = 'block';
+}
+
+async function openService(port: number, opts?: { remember?: boolean }): Promise<void> {
   let tab = tabs.get(port);
   if (!tab) {
     await ensureSW();
@@ -930,8 +958,11 @@ async function openService(port: number): Promise<void> {
     iframe.src = 'about:blank';
     await new Promise((r) => setTimeout(r, 50));
   }
+  document.getElementById('svcGuide')!.style.display = 'none';
   for (const t of tabs.values()) t.iframe.style.display = 'none';
   tab.iframe.style.display = 'block';
+  selectedPort = port;
+  if (opts?.remember !== false) writeLastService(localStorage, desk.id, port);
   setConnTitleSafe();
   void markActive(port);
   void bootWorkbench(port, tab);
@@ -1335,6 +1366,7 @@ $id('btnPastePair2').onclick = openPaste;
   mode: cascade?.mode ?? null,
   services: currentServices,
   consolePort,
+  selectedPort,
   desk: { ...desk },
   // 排障用（2026-09-12）：gen 用于识别僵尸会话，inflight 用于识别数据面黑洞
   gen: cascadeGen,
