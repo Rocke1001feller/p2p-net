@@ -35,9 +35,14 @@ export function showTab(name: string): void {
   for (const b of document.querySelectorAll<HTMLButtonElement>('#tabbar [data-tab]')) {
     b.classList.toggle('on', b.dataset.tab === curTab);
   }
+  for (const cb of tabCbs) cb(curTab);
 }
 
 export function currentTab(): string { return curTab; }
+
+/** tab 切换订阅（P1 沉浸模式用）：shell 注册回调，showTab 每次切换后触发。 */
+const tabCbs: ((name: string) => void)[] = [];
+export function onTabChange(cb: (name: string) => void): void { tabCbs.push(cb); }
 
 export function setWorkspaceEnabled(ok: boolean): void {
   ($('tabWorkspace') as HTMLButtonElement).disabled = !ok;

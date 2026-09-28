@@ -44,7 +44,7 @@ import {
   hideConnecting, hideSheets, log, renderDevices, setMe, setStatus, showConnecting,
   showOfflineSheet, showPasteSheet, showScreen, showTab, setWorkspaceEnabled, toast,
   connectingStage, wechatGuard, showBrowserHint, setStall, setProbeDown, isProbeDown,
-  setExperimentMode, renderServiceTree, openSvcDrawer, closeSvcDrawer,
+  setExperimentMode, renderServiceTree, openSvcDrawer, closeSvcDrawer, onTabChange,
   type SavedDevice,
 } from './ui.js';
 import { buildServiceTree } from './serviceTree.js';
@@ -974,7 +974,51 @@ function showGuide(kind: GuideKind): void {
   const t = document.getElementById('svcGuideTxt');
   if (t) t.textContent = txt;
   if (g) g.style.display = 'block';
+  exitImmersive({ sticky: true }); // 引导页需要 chrome（☰ 入口），且此刻必无选中服务
   refreshServiceTree();
+}
+
+// ---- 沉浸模式（2026-09-28 P1）：进服务收起 header/tabbar/抽屉，屏幕全给服务；
+//  底部「∧ 唤起」pill 退出沉浸，4s 无交互（?wakeidle=<ms> 可覆盖，排障钩子）自动回沉浸。
+//  通道升降级不触碰本状态机（徽章在 connBar，本来就看不见；W-B① 保证重连不重建）。 ----
+let immersive = false;
+let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+const WAKE_IDLE_MS = (() => {
+  const n = Number(Q.get('wakeidle'));
+  return Number.isFinite(n) && n > 0 ? n : 4_000;
+})();
+
+function clearWakeTimer(): void {
+  if (wakeTimer !== null) { clearTimeout(wakeTimer); wakeTimer = null; }
+}
+
+function scheduleWakeReturn(): void {
+  clearWakeTimer();
+  if (selectedPort === null) return; // 无选中服务（引导页）不排回程
+  wakeTimer = setTimeout(() => { if (!immersive && selectedPort !== null) enterImmersive(); }, WAKE_IDLE_MS);
+}
+
+/** 交互重置缝：生产由 document capture 的 click/touchstart/keydown 触发；测试用 __p2pNetPoke。 */
+function pokeWake(): void {
+  if (!immersive && wakeTimer !== null) scheduleWakeReturn();
+}
+
+function enterImmersive(): void {
+  immersive = true;
+  clearWakeTimer();
+  closeSvcDrawer();
+  document.getElementById('connBar')!.style.display = 'none';
+  document.getElementById('tabbar')!.style.display = 'none';
+  document.getElementById('wakePill')!.style.display = 'block';
+}
+
+function exitImmersive(opts?: { sticky?: boolean }): void {
+  immersive = false;
+  document.getElementById('connBar')!.style.display = 'flex';
+  document.getElementById('tabbar')!.style.display = 'flex';
+  document.getElementById('wakePill')!.style.display = 'none';
+  clearWakeTimer();
+  if (!opts?.sticky) scheduleWakeReturn();
 }
 
 async function openService(port: number, opts?: { remember?: boolean }): Promise<void> {
@@ -998,6 +1042,7 @@ async function openService(port: number, opts?: { remember?: boolean }): Promise
   if (opts?.remember !== false) writeLastService(localStorage, desk.id, port);
   setConnTitleSafe();
   refreshServiceTree();
+  enterImmersive();
   void markActive(port);
   void bootWorkbench(port, tab);
 }
@@ -1351,6 +1396,17 @@ $id('btnSvcTree').onclick = () => {
   const d = document.getElementById('svcDrawer')!;
   if (d.classList.contains('show')) closeSvcDrawer(); else openSvcDrawer();
 };
+$id('wakePill').onclick = () => exitImmersive();
+onTabChange((name) => {
+  if (name === 'workspace') {
+    if (selectedPort !== null) enterImmersive();
+  } else {
+    exitImmersive({ sticky: true }); // 离开工作台：退沉浸且不排回程
+  }
+});
+document.addEventListener('click', pokeWake, true);
+document.addEventListener('touchstart', pokeWake, true);
+document.addEventListener('keydown', pokeWake, true);
 // 前台探活黄灯「连接待恢复，点我重试」：点击标题即重试探活（仅黄灯亮时响应）
 $id('connTitle').onclick = () => {
   if (!isProbeDown()) return;
@@ -1405,6 +1461,7 @@ $id('btnPastePair2').onclick = openPaste;
   services: currentServices,
   consolePort,
   selectedPort,
+  immersive,
   desk: { ...desk },
   // 排障用（2026-09-12）：gen 用于识别僵尸会话，inflight 用于识别数据面黑洞
   gen: cascadeGen,
@@ -1425,4 +1482,5 @@ $id('btnPastePair2').onclick = openPaste;
   },
 });
 
+(window as any).__p2pNetPoke = pokeWake;
 void boot();

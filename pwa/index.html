@@ -100,6 +100,9 @@ button{font-family:inherit}
 #svcDrawer .svc-unhide{border:1px solid var(--line,#e2e4e8);background:#fff;color:var(--ink2,#555);
   font-size:12px;padding:3px 10px;border-radius:999px}
 .svc-hidden-head{padding:14px 10px 6px;font-size:12px;color:var(--ink3,#999)}
+#wakePill{position:absolute;bottom:calc(18px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);
+  z-index:9;border:none;border-radius:999px;padding:9px 22px;font-size:13.5px;
+  background:rgba(20,22,25,.55);color:#fff;backdrop-filter:blur(8px)}
 iframe.app{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;background:#fff}
 
 /* ---- 我的 tab ---- */
@@ -197,6 +200,7 @@ iframe.app{position:absolute;inset:0;width:100%;height:100%;border:0;display:non
       <div class="svc-hidden-head" id="svcHiddenHead" style="display:none">已隐藏（点「恢复」重新显示）</div>
       <div id="svcHidden"></div>
     </div>
+    <button id="wakePill" style="display:none">∧ 唤起</button>
   </section>
 
   <!-- 我的 tab -->
