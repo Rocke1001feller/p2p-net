@@ -1402,6 +1402,9 @@ $id('btnSvcTree').onclick = () => {
   const d = document.getElementById('svcDrawer')!;
   if (d.classList.contains('show')) closeSvcDrawer(); else openSvcDrawer();
 };
+// 抽屉关闭路径（评审 I5）：点遮罩（点抽屉外）或头部「收起」按钮——☰ 在抽屉打开时被盖住
+$id('svcDrawerMask').onclick = () => closeSvcDrawer();
+$id('svcDrawerClose').onclick = () => closeSvcDrawer();
 $id('wakePill').onclick = () => exitImmersive();
 onTabChange((name) => {
   if (name === 'workspace') {

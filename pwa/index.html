@@ -86,11 +86,14 @@ button{font-family:inherit}
 #appHost{flex:1;position:relative;background:#fff}
 #svcGuide{position:absolute;inset:56px 0 0 0;background:var(--bg,#f6f7f9);text-align:center;padding-top:38%;z-index:5}
 #svcGuideTxt{display:inline-block;padding:12px 20px;border-radius:999px;background:#fff;color:var(--ink2,#666);font-size:14px;box-shadow:0 1px 6px rgba(0,0,0,.08)}
+#svcDrawerMask{position:absolute;inset:0;z-index:7;background:rgba(20,22,25,.18);display:none}
+#svcDrawerMask.show{display:block}
 #svcDrawer{position:absolute;top:0;bottom:0;left:0;width:78%;max-width:320px;background:#fff;z-index:8;
   transform:translateX(-100%);transition:transform .22s ease;box-shadow:2px 0 14px rgba(0,0,0,.12);
   overflow-y:auto;padding:14px 10px}
 #svcDrawer.show{transform:translateX(0)}
-.svc-drawer-head{padding:4px 10px 12px;font-size:15px;color:var(--ink,#111)}
+.svc-drawer-head{display:flex;align-items:center;justify-content:space-between;padding:4px 10px 12px;font-size:15px;color:var(--ink,#111)}
+#svcDrawerClose{border:none;background:none;color:var(--brand);font-size:13px;font-weight:600;padding:4px 6px;cursor:pointer}
 #svcDrawer .svc-row{display:flex;align-items:center;gap:8px;padding:11px 10px;border-radius:10px;font-size:14.5px;cursor:pointer}
 #svcDrawer .svc-row:active{background:#f0f1f3}
 #svcDrawer .svc-row.sel{background:#e8f6ef;color:var(--ink,#111);font-weight:600}
@@ -199,8 +202,9 @@ iframe.app{position:absolute;inset:0;width:100%;height:100%;border:0;display:non
     </div>
     <div id="appHost"></div>
     <div id="svcGuide" style="display:none"><span id="svcGuideTxt">☰ 从侧栏挑一个服务</span></div>
+    <div id="svcDrawerMask"></div>
     <div id="svcDrawer">
-      <div class="svc-drawer-head"><b id="svcDrawerName">设备</b></div>
+      <div class="svc-drawer-head"><b id="svcDrawerName">设备</b><button id="svcDrawerClose">收起 ⟨</button></div>
       <div id="svcTree"></div>
       <div id="svcGone"></div>
       <div class="svc-hidden-head" id="svcHiddenHead" style="display:none">已隐藏（点「恢复」重新显示）</div>

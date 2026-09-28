@@ -403,5 +403,5 @@ export function renderServiceTree(model: ServiceTreeModel, handlers: ServiceTree
   }
 }
 
-export function openSvcDrawer(): void { $('svcDrawer').classList.add('show'); }
-export function closeSvcDrawer(): void { $('svcDrawer').classList.remove('show'); }
+export function openSvcDrawer(): void { $('svcDrawerMask').classList.add('show'); $('svcDrawer').classList.add('show'); }
+export function closeSvcDrawer(): void { $('svcDrawer').classList.remove('show'); $('svcDrawerMask').classList.remove('show'); }

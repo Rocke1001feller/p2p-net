@@ -84,5 +84,26 @@ test('隐藏当前选中服务 3000 → 立即回引导页，iframe 保留不销
   assert.match(h.localStorage.getItem('p2p-net.pwa.hiddenServices') ?? '', /3000/);
 });
 
+// 评审 I5（2026-09-28）：抽屉必须有关闭路径——遮罩（点外收起）+ 头部「收起」按钮
+// （☰ 在抽屉打开时被抽屉盖住，没有这两个出路就只剩「点一个服务」）。
+const ensureDrawer = (open: boolean): void => {
+  if (h.el('svcDrawer').classList.contains('show') !== open) h.el('btnSvcTree').onclick!();
+};
+
+test('抽屉打开带遮罩；点遮罩 → 抽屉与遮罩一并收起（I5）', () => {
+  ensureDrawer(true);
+  assert.equal(h.el('svcDrawerMask').classList.contains('show'), true, '开抽屉必须同时亮遮罩（点抽屉外收起）');
+  h.el('svcDrawerMask').onclick!();
+  assert.equal(h.el('svcDrawer').classList.contains('show'), false, '点遮罩必须收起抽屉');
+  assert.equal(h.el('svcDrawerMask').classList.contains('show'), false);
+});
+
+test('抽屉头部「收起」按钮 → 抽屉与遮罩收起（I5）', () => {
+  ensureDrawer(true);
+  h.el('svcDrawerClose').onclick!();
+  assert.equal(h.el('svcDrawer').classList.contains('show'), false);
+  assert.equal(h.el('svcDrawerMask').classList.contains('show'), false);
+});
+
 // 文件级清场：无论断言成败都断开连接，防 p2pupg 退避计时器钉住进程（2026-09-28 实锤）
 after(() => { h.el('btnDisconnect').onclick?.(); });
