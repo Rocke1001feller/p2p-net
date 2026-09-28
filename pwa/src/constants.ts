@@ -22,6 +22,9 @@ export const LS_DESK_ID = 'p2p-net.pwa.deskId';
 /** 记住的桌面设备列表键（本机记忆；服务器侧设备心跳表为后续增强）。 */
 export const LS_DEVICES = 'p2p-net.pwa.devices';
 
+/** 隐藏服务清单键（P1 减法模型）：Record<deviceId, number[]>，按设备隔离。 */
+export const LS_HIDDEN_SERVICES = 'p2p-net.pwa.hiddenServices';
+
 /** 接入类型手动标注键（Wave 2 W2-1）：「我的」tab select 写入；offer meta.access 优先取它。 */
 export const LS_ACCESS = 'p2p-net.pwa.access';
 
