@@ -960,6 +960,7 @@ function refreshServiceTree(): void {
   renderServiceTree(
     {
       deviceName: deskName,
+      deviceId: desk.id,
       ...buildServiceTree({
         services: currentServices,
         hidden: readHidden(localStorage, desk.id),

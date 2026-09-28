@@ -9,7 +9,10 @@ import { setExperimentMode, setProbeDown, setStatus } from './ui.js';
 class FakeEl {
   className = '';
   textContent = '';
-  style: Record<string, string> = {};
+  style: Record<string, string> & { setProperty(k: string, v: string): void } = Object.assign(
+    {} as Record<string, string>,
+    { setProperty: (k: string, v: string) => { this.style[k] = v; } },
+  );
   dataset: Record<string, string> = {};
   children: unknown[] = [];
   onclick: ((e?: { stopPropagation(): void }) => void) | null = null;

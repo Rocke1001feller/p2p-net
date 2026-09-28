@@ -61,12 +61,15 @@ button{font-family:inherit}
 #log.debug{position:fixed;left:0;right:0;bottom:0;max-height:45%;overflow:auto;background:rgba(0,0,0,.85);color:#7fffb0;font:10px/1.45 monospace;padding:8px;margin:0;z-index:9999;white-space:pre-wrap;word-break:break-all}
 
 /* ---- 设备 tab ---- */
-.dev-card{position:relative;background:var(--card);border-radius:var(--r-lg);padding:16px;margin-bottom:12px;
-  box-shadow:0 1px 2px rgba(23,32,27,.05);cursor:pointer;transition:transform .12s}
+/* 分组色（Chrome 标签组式）：--grp 主色 / --grpSoft 柔色底，由 deviceColor(deviceId) 注入；
+   左条 + 图标芯片 + 服务网格图标同色 = 同设备，组间一眼可辨。 */
+.dev-card{position:relative;background:var(--card);border-radius:var(--r-lg);padding:16px 16px 16px 19px;margin-bottom:12px;
+  box-shadow:0 1px 2px rgba(23,32,27,.05), inset 3.5px 0 0 var(--grp,transparent);
+  cursor:pointer;transition:transform .12s}
 .dev-card:active{transform:scale(.98)}
 .dev-card .top{display:flex;align-items:center;gap:12px}
-.dev-ic{width:44px;height:44px;border-radius:12px;background:linear-gradient(145deg,#EAF4EF,#DFEEE6);
-  display:flex;align-items:center;justify-content:center;color:var(--brand);flex:none}
+.dev-ic{width:44px;height:44px;border-radius:12px;background:var(--grpSoft,#EAF4EF);
+  display:flex;align-items:center;justify-content:center;color:var(--grp,var(--brand));flex:none}
 .dev-card .nm{flex:1;min-width:0}
 .dev-card .nm b{font-size:16.5px;font-weight:700;display:flex;align-items:center;gap:8px}
 .dev-card .nm span{font-size:12.5px;color:var(--ink2);display:block;margin-top:2px;word-break:break-all}
@@ -93,10 +96,13 @@ button{font-family:inherit}
   overflow-y:auto;padding:14px 10px}
 #svcDrawer.show{transform:translateX(0)}
 .svc-drawer-head{display:flex;align-items:center;justify-content:space-between;padding:4px 10px 12px;font-size:15px;color:var(--ink,#111)}
+/* 抽屉头分组圆点：与设备卡同色系，侧栏里一眼认出「这是哪台设备的服务」 */
+.svc-drawer-head b{display:inline-flex;align-items:center;gap:7px}
+.svc-drawer-head b::before{content:'';width:10px;height:10px;border-radius:4px;background:var(--grp,var(--brand));flex:none}
 #svcDrawerClose{border:none;background:none;color:var(--brand);font-size:13px;font-weight:600;padding:4px 6px;cursor:pointer}
 #svcDrawer .svc-row{display:flex;align-items:center;gap:8px;padding:11px 10px;border-radius:10px;font-size:14.5px;cursor:pointer}
 #svcDrawer .svc-row:active{background:#f0f1f3}
-#svcDrawer .svc-row.sel{background:#e8f6ef;color:var(--ink,#111);font-weight:600}
+#svcDrawer .svc-row.sel{background:var(--grpSoft,#e8f6ef);color:var(--ink,#111);font-weight:600}
 #svcDrawer .svc-row.gone{color:var(--ink3,#aaa);cursor:default}
 #svcDrawer .svc-nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #svcDrawer .svc-hide{border:none;background:none;color:var(--ink3,#aaa);font-size:13px;padding:4px 6px}
@@ -110,7 +116,7 @@ button{font-family:inherit}
 .launch-item{display:flex;flex-direction:column;align-items:center;gap:5px;border:none;background:none;
   width:64px;cursor:pointer;color:var(--ink,#111)}
 .launch-ic{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;
-  background:linear-gradient(145deg,#0FA873,#086B49);color:#fff;font-size:18px;font-weight:700}
+  background:var(--grp,#0FA873);color:#fff;font-size:18px;font-weight:700}
 .launch-nm{font-size:11px;color:var(--ink2,#666);max-width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 iframe.app{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;background:#fff}
 

@@ -4,6 +4,7 @@
  * 色值沿用全端口径：P2P 深绿 #0A8A5F / 中继浅绿 #7BC96F / 连接中琥珀 #B26A00 / 离线灰 / 故障红。
  */
 import type { CascadeStatus } from './session.js';
+import { deviceColor } from './deviceColor.js';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -234,6 +235,10 @@ export function renderDevices(
     const card = document.createElement('div');
     card.className = 'dev-card';
     card.dataset.devId = d.id;
+    // 分组色（Chrome 标签组式）：同色 = 同设备，卡左条/图标芯片/服务网格图标共用
+    const gc = deviceColor(d.id);
+    card.style.setProperty('--grp', gc.fg);
+    card.style.setProperty('--grpSoft', gc.soft);
     const top = document.createElement('div'); top.className = 'top';
     const ic = document.createElement('div'); ic.className = 'dev-ic';
     ic.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="5" width="16" height="10" rx="1.6"/><path d="M2 18h20"/></svg>';
@@ -337,6 +342,8 @@ import type { ServiceRow } from './serviceTree.js';
 
 export interface ServiceTreeModel {
   deviceName: string;
+  /** 分组色锚点（抽屉头圆点/选中行衬底取它的色）；缺省回落品牌绿。 */
+  deviceId?: string;
   visible: ServiceRow[];
   hidden: ServiceRow[];
   gone: ServiceRow[];
@@ -349,6 +356,10 @@ export interface ServiceTreeHandlers {
 
 export function renderServiceTree(model: ServiceTreeModel, handlers: ServiceTreeHandlers): void {
   $('svcDrawerName').textContent = model.deviceName || '设备';
+  const drawer = $('svcDrawer');
+  const gc = deviceColor(model.deviceId ?? '');
+  drawer.style.setProperty('--grp', gc.fg);
+  drawer.style.setProperty('--grpSoft', gc.soft);
   const tree = $('svcTree');
   tree.innerHTML = '';
   for (const r of model.visible) {
