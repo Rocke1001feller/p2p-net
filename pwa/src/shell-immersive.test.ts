@@ -85,5 +85,21 @@ test('切回 workspace tab（仍有选中服务）→ 重新进入沉浸', async
   assert.equal(win.__p2pNetDebug!().immersive, true);
 });
 
+// 评审 C3（2026-09-28）：手动断开必须复位沉浸状态机——断开按钮在 connBar（沉浸中不可见），
+// 用户必先点 ∧ 唤起 → 排上 50ms（生产 4s）回程计时 → 窗口内点断开；若 stopSession 不清计时器，
+// 到点后在已断开的会话上进沉浸（chrome 躲猫猫死循环，唯一出路是 4s 窗口内抢 tabbar）。
+test('手动断开 → chrome 恢复、回程计时作废、selectedPort 清空，不再自动回沉浸（C3）', async () => {
+  assert.equal(win.__p2pNetDebug!().immersive, true, '前置：上一用例切回工作台后处于沉浸');
+  h.el('wakePill').onclick!(); // 唤起：退沉浸并排上 50ms 回程
+  assert.equal(win.__p2pNetDebug!().immersive, false);
+  h.el('btnDisconnect').onclick!(); // 回程窗口内手动断开
+  assert.equal(disp('connBar'), 'flex', '断连后 chrome 必须可见');
+  assert.equal(disp('tabbar'), 'flex');
+  assert.equal(disp('wakePill'), 'none');
+  assert.equal(win.__p2pNetDebug!().selectedPort, null, '断连后选中清空（防下次重连闪出死 iframe）');
+  await sleep(150); // 远超 50ms 回程点
+  assert.equal(win.__p2pNetDebug!().immersive, false, '断连后不得自动回沉浸');
+});
+
 // 文件级清场：无论断言成败都断开连接，防 p2pupg 退避计时器钉住进程（2026-09-28 实锤）
 after(() => { h.el('btnDisconnect').onclick?.(); });

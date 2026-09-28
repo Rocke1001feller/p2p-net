@@ -781,6 +781,13 @@ window.addEventListener('pageshow', (ev) => {
 function stopSession(): void {
   manualStop = true;
   wasConnected = false;
+  // 评审 C3（2026-09-28）：手动断开必须复位沉浸状态机。断开按钮在 connBar（沉浸中不可见），
+  // 用户必先 ∧ 唤起 → 排上 4s 回程计时；若此处不清，计时到点会在已断开的会话上进沉浸，
+  // chrome 进入「每 4s 自动隐藏」死循环。selectedPort 一并清空：防下次重连经 onTabChange
+  // 闪进沉浸、亮出死 iframe；下次连接走完整默认选中链（新会话语义）。
+  clearWakeTimer();
+  selectedPort = null;
+  exitImmersive({ sticky: true });
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   tunnelBackcheck?.stop(); // 任务C：手动断开终结回迁看门狗
   p2pUpgrade?.stop(); // 任务D：手动断开终结旁路升级看门狗
