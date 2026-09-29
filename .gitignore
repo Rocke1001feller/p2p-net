@@ -5,3 +5,4 @@ pwa-dist/
 *.tgz
 bench-samples-*.jsonl
 supabase/.temp/
+.superpowers/

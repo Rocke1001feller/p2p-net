@@ -115,6 +115,21 @@ rm -rf ~/.p2p-net               # 删除本地配置/凭据/日志
 
 Supabase 侧项目不再需要时，直接在 supabase.com 控制台删除 project 即可。
 
+## 仓库布局
+
+| 目录 | 职责 |
+|---|---|
+| `src/` | 库 + CLI 源码（TypeScript，tsc 直出 `dist/`；dist 不入库） |
+| `pwa/` | PWA 源码（vite 构建） |
+| `pwa-dist/` | PWA 构建产物（gitignore，随 npm 包钉版发布） |
+| `contracts/` | 契约单一事实源（ports.json 等，CI parity 断言双端一致） |
+| `assets/` | 常驻服务模板（launchd plist / systemd unit） |
+| `node-init/` | VPS 初始化脚本与隧道 relay 入口资产 |
+| `supabase/` | DDL 包 + Edge Functions |
+| `scripts/` | 工具脚本（bench/ 压测、twin-guard、docs-guard 等） |
+| `e2e/` | 真机战役档案（历史快照，含取证工件子目录） |
+| `docs/` | 长期文档（cost-model、concepts）+ `docs/superpowers/`（spec/plan/report 档案） |
+
 ## License
 
 [MIT](./LICENSE)
