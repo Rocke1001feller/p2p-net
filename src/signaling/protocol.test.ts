@@ -22,3 +22,11 @@ test('房间名构造/解析往返（回归）', () => {
   assert.deepEqual(parseRoom(r), { uid: 'uid-1', deviceId: 'dev-9' });
   assert.equal(parseRoom('bad-room'), null);
 });
+
+test('房间名构造/解析——边界形状（合并自原 signaling/tests 副本）', () => {
+  assert.equal(roomFor('uid-1', 'dev-2'), 'sig:uid-1:dev-2');
+  assert.equal(parseRoom('sig:onlyone'), null);
+  assert.equal(parseRoom(''), null);
+  assert.deepEqual(parseRoom('sig:u:a:b'), { uid: 'u', deviceId: 'a:b' }); // deviceId 允许含冒号
+  assert.equal(isSigMessage('offer'), false); // 非对象输入收窄
+});

@@ -109,7 +109,7 @@ test('DEFAULT_WHITELIST / NEVER_PORTS 精确集合', () => {
   assert.deepEqual(DEFAULT_WHITELIST, [3000, 3001, 4200, 5000, 5173, 8000, 8080, 8081, 8888, 9000]);
   assert.deepEqual(
     [...NEVER_PORTS].sort((a, b) => a - b),
-    [3003, 4173, 18080, 18088, 19700, 19727, 19728, 19729],
+    [3003, 4173, 18080, 18088, 19700, 19727, 19728],
   );
 });
 

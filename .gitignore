@@ -4,3 +4,4 @@ pwa-dist/
 *.log
 *.tgz
 bench-samples-*.jsonl
+supabase/.temp/
