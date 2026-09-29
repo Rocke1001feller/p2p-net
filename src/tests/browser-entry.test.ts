@@ -71,5 +71,7 @@ test('package.json exports 映射：. / ./browser / ./package.json', () => {
   // 2026-09-25 起 test 链最前接入 lint:twins（丙2 孪生复活门禁）：检出已登记孪生即短路失败
   assert.equal(pkg.scripts['lint:twins'], 'node scripts/twin-guard.mjs');
   assert.equal(pkg.scripts['test:parity'], 'tsx --test "src/**/*.parity.ts" "pwa/src/**/*.parity.ts"');
-  assert.equal(pkg.scripts.test, 'npm run lint:twins && npm run test:parallel && npm run test:serial && npm run test:parity');
+  // 2026-09-29 起接 lint:docs（仓库清洁 L5）：版本一致 + Markdown 死链硬门禁，防文档漂移
+  assert.equal(pkg.scripts['lint:docs'], 'node scripts/docs-guard.mjs');
+  assert.equal(pkg.scripts.test, 'npm run lint:twins && npm run lint:docs && npm run test:parallel && npm run test:serial && npm run test:parity');
 });
