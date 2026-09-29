@@ -28,7 +28,7 @@ const HELP = `p2p-net — Self-hosted WebRTC remote-access data plane
   start     前台启动桌面端代理（--foreground 由常驻服务调用，抑制提示横幅）
   service   常驻服务管理 install|uninstall|status|logs（崩溃自愈 + 开机自启）
   status    查看运行状态（设备/活跃会话/链路模式/平均 RTT/服务数）
-  doctor    七层归因诊断（auth→supabase→signaling→ice→vps→scanner→service；--json 机器可读，退出码=失败数）
+  doctor    八层归因诊断（auth→supabase→signaling→ice→vps→scanner→service→nat；--json 机器可读，退出码=失败数）
 
 选项：
   -h, --help  显示本帮助

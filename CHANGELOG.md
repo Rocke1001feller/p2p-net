@@ -1,5 +1,40 @@
 # CHANGELOG
 
+## Unreleased
+
+### P1 多服务工作台（产品模型 v1 落地，16 commit）
+- 产品模型 v1（账号→设备→服务）+ 原型 + P1 spec：设备页=启动台、工作台=侧栏树+沉浸式、默认落设备页（c489ffc）
+- 设备页启动台：服务网格 + per-device 分组色（Chrome tab-group 风格）；工作台侧栏树：hide/unhide、per-device 服务记忆与隐藏存储、默认服务选择链 + 引导页（8e46991、a21ed52、e6cb9ee、445bcc7、6d634de、092d5df、5f1b06f、0dc806e）
+- 评审修复：drawer 关闭路径与 stopPropagation（C1/I5）、重连不抢占用户当前服务（C2）、stopSession 复位沉浸式状态机（C3）、健康检查后台化且覆盖全部服务（I4）、svcGuide 入 appHost 去 56px 魔法 inset（I6）
+
+## 0.3.3（2026-09-27）—— W-B① 重连探活 + OPS-1 闭环
+
+- feat(pwa)：重连后工作台先探活再定夺——存活不重建，已死才强制重载（036ffe7；R4-1 候选方向①）
+- 双机真机验证：战役档案 §3.11 W-B①② 实录 + Android CDP 仪器缺口登记（`e2e/wave2-direct-rate-matrix-2026-09-26.md`）
+- OPS-1 闭环：VPS 证书 Caddy 自动续期实证（Sep 26 成功，ARI 排程在位），无需人工值守
+- v0.4.x 立项登记：W-B 残余 / 旁路负缓存 / adopt-direct 补验 / 中继正修 / 证书续期
+
+## 0.3.2（2026-09-27）—— W-A 旁路采纳死亡循环根修
+
+- fix(pwa)：'all' 起跑会话忽略 upgrade restart + 旁路采纳仅真直连（aae0747，Fix C + Fix B1）——根治每 ~2min 假性重级联重建工作台
+- 战役档案 §3.10：根因定罪/修复/真机验证实录（`e2e/wave2-direct-rate-matrix-2026-09-26.md`）
+
+## 0.3.1（2026-09-26）—— v0.3.x 增量包
+
+- feat：实验徽章 + 隧道计量 + 粘性回迁 + tunnel→p2p 升级（d7cc5e7）
+- package-lock 版本号同步（48259fc）
+- 战役档案 §3.9：增量包实施/评审/真机验证实录 + §4 遗留立项状态回填（`e2e/wave2-direct-rate-matrix-2026-09-26.md`）
+
+## 0.3.0（2026-09-26）—— Wave 2 标定：直连率杠杆 + 稳定性三连根修
+
+- feat(wheel)：W2-6 暖场升级轮——relay 暖场会话稳定后原位升级直连，失败留 relay（7d1b8ab；配置开关 upgradeWheel，默认开）
+- feat：W2-2 NAT facts 探针 + doctor 第八层 nat（e28d044）；W2-1 接入类型分桶计量（fa77b33）；W2-3 隧道饱和压测 driver + ramp 数学（eb08c3b）
+- fix(turn)：W2-7 werift 438 stale-nonce 恢复循环——17min 死亡定时器根修（746948b）
+- fix(tunnel)：僵尸腿根修——应用层心跳看门狗 + status 活性如实化（577ae79）
+- fix(pwa)：前台探活——后台超阈回前台轻量探活，失败黄灯「连接待恢复，点我重试」（361d924）；双机同 deviceId 撞车根修（fdaad57）
+- fix(host,pwa)：console-hijack 根治——console 自述 consolePort + PWA last-good 兜底，低位端口劫持工作台白屏不再（b7f5309）
+- W2-5 直连率矩阵战役收口（口径定性：方向性信号）；W2-3/W2-4 成本实测入档 `docs/cost-model.md`
+
 ## 0.2.1（2026-09-25）—— 稳定性根修 + 机制落地（防复发门禁）
 
 真机门禁（`e2e/wave1-realdevice-gate.md`）§5 登记的 5 项独立修复，均经独立分支 + squash 合并：

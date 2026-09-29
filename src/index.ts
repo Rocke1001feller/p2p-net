@@ -6,8 +6,6 @@
  * 端口契约见 contracts/ports.json（单一事实源）。
  */
 
-export const P2P_NET_VERSION = '0.1.0';
-
 export * from './signaling/protocol.js';
 export * from './signaling/client.js';
 export * from './frames.js';

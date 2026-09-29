@@ -8,7 +8,7 @@
 
 1. **Supabase Access Token**：supabase.com → 右上角头像 → Account → Access Tokens 生成一枚（init 全程只调 Supabase Management API 纯 HTTPS，不落盘）。
 2. **至少一台 Ubuntu VPS**：记下 `user@ip` + 密码。支持 Ubuntu 22.04/24.04 与 Debian 12，init 经 SSH 幂等部署 coturn + caddy + 隧道服务 + PWA 静态站。
-3. （可选）**Cloudflare Pages**：Phase 2 的 PWA 托管通道，MVP 阶段不需要——PWA 已由 VPS 上的 caddy 托管。
+3. （可选）**Cloudflare Pages**：Phase 2 的 PWA 托管通道，当前版本不需要——PWA 已由 VPS 上的 caddy 托管。
 
 本机要求 Node.js >= 20；桌面端支持 macOS（launchd）与 Linux（systemd --user）。
 
@@ -87,6 +87,10 @@ relay（TURN）暖场建连的会话，host 会在暖场稳定后请求 PWA 发�
   （默认 `{enabled:true, warmMs:10000, observeMs:15000, maxAttempts:2}`）
 - 环境变量 `P2P_NET_UPGRADE=0` 强制全关（排障用，压过 config）。
 - 观测：`events.jsonl` 的 `upgrade{sid,from,to,ms}` 事件；`node scripts/access-matrix.mjs` 出分桶成功率/回退率。
+
+### 隧道 gzip（默认开）
+隧道响应 gzip 流式压缩默认开启（0.2.1 起，A/B 实测判定），双端协商：浏览器 SW 无 DecompressionStream 时不声明 `x-p2p-gzip`，host 绝不压缩。
+- 环境变量 `P2P_NET_GZIP=0` 紧急全关（排障用）；实现见 `src/bridge/http.ts`。
 
 ## 配额说明
 
