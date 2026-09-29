@@ -113,6 +113,36 @@
 - 49.233.155.13 HTTPS 证书（Let's Encrypt shortlived IP 证书，6 天期）。
 - 状态：**已闭环（自动续期实证，零人工动作）**。2026-09-27 勘察：Caddy 已于 Sep 26 02:24:25 自动续期成功（journalctl `tls.renew certificate renewed successfully`，进程未重启）；ARI 机制在位，下一次续期排程 selected_time≈Sep 29，远早于当前证书 Oct 2 09:25 GMT 到期。续期窗口内唯一风险是 LE/网络瞬时故障，Caddy 会持续重试，无需值守；9-30 前后抽查一次 `openssl s_client` 到期日即可。
 
+### R4-6 隐藏当前服务在离线/重连窗口不生效（P1 评审 I-1）
+- 现象：断线窗口打开侧栏隐藏「断线前正在看」的服务，记录落盘但不回引导页、不清选中——`pwa/src/shell.ts` 的 `onHide` bounce 判定锚在 `connectedId`（级联未开时恒 null）；重连后 C2 守卫保留选中，用户持续看着自己刚隐藏的服务，侧栏却显示它已隐藏。
+- 行动：bounce 判定改锚 `desk.id`（身份而非连接态）；补 harness 测试（离线窗口隐藏当前服务 → 重连落引导页）。
+- 状态：已登记（详见 `docs/superpowers/reports/2026-09-29-p1-workspace-review.md`）。
+
+### R4-7 启动台网格不剔除已隐藏服务（P1 评审 I-2，需产品裁决）
+- 现象：隐藏语义只在侧栏树落地；设备页（启动台）服务网格照样渲染已隐藏服务——`refreshDevicesUI` 直传 `currentServices` 全量给 `renderDevices`，两个入口口径不一致。spec §2.5 对此未裁决（设计留白）。
+- 行动：产品裁决后回填 spec §2.5；建议启动台遵守隐藏、console 服务豁免（对齐 §4.1），实现 + 测试。
+- 状态：已登记（详见 `docs/superpowers/reports/2026-09-29-p1-workspace-review.md`）。
+
+### R4-8 重连抢视图（P1 评审 I-3）
+- 现象：①`afterConnected` 首行无条件 `showTab('workspace')`（v0.3.3 既有，单服务时代无害、多服务化后语义过期）——重连时用户在设备页挑服务会被拽回工作台 tab；②P1 新增 `onTabChange` → `selectedPort` 非 null 即 `enterImmersive()`，tab 切换自动拉满 console，不区分用户发起还是系统重连带动。
+- 行动：重连路径不强制 `showTab`（首连保留）；沉浸触发限定用户发起的切换（来源标记或重连期标志位）。建议与 R4-6 一并真机过验。
+- 状态：已登记（详见 `docs/superpowers/reports/2026-09-29-p1-workspace-review.md`）。
+
+### R4-9 pendingOpenPort 未按设备键控 + btnOfflineClose 死按钮（P1 评审 I-4 / M-7）
+- 现象：跨机直达状态 `pendingOpenPort` 只记 port 不记 deviceId，当前被模态 UI 阻断不可达；一旦离线条可关闭/连接可取消，即「连 B 失败 → 改连 C 同端口 → 服务错投」。关联：`btnOfflineClose` 自 v0.3.3 起未接线（死按钮）；`stopSession` 后旧 iframe 保持可见；`everConnected` 不被 `stopSession` 复位导致 stop→重连走 isReconnect 冗余双开（幂等无害）。
+- 行动：`pendingOpenPort` 改存 `{ deviceId, port }` 并在 `openWorkbench` 消费前校验 `deviceId === desk.id`；设备页直连与 `stopSession` 路径清除；`btnOfflineClose` 接线（可取消连接）或删除；M-7 三项随此一并处置。
+- 状态：已登记（详见 `docs/superpowers/reports/2026-09-29-p1-workspace-review.md`）。
+
+### R4-10 P1 双机真机门禁执行（P1 评审 I-5）
+- 现象：plan（`docs/superpowers/plans/2026-09-28-multi-service-workspace.md` Task 7 Step 4）登记了 5 条双机真机门禁，spec/plan 头注「真机门禁见 ROADMAP」但 ROADMAP 原本无此条目（指针悬空）；C1 遮罩穿透的真冒泡行为等只有真机能钉的项缺最后一环证据。
+- 行动：下次双机在场时执行 5 条门禁（遮罩真冒泡、多设备树渲染、跨机直达、隐藏/恢复、重连不抢选中），结果回填本条目与评审报告。
+- 状态：已登记（详见 `docs/superpowers/reports/2026-09-29-p1-workspace-review.md`）。
+
+### R4-11 换机在途异步回收 + 存储卫生（P1 评审 M-2 / M-3 / M-4）
+- 现象：①换机不回收在途 bootWorkbench 探活/重挂体检链/pendingFetch，`tabs.has(port)` 对新设备同端口 tab 是瞎的（靠 `tab.booted` 闩收敛，最坏无害冗余）；②ServiceSnapshot 不记 consolePort → 离线组 console 行渲染 ✕ 且豁免失效，可写下连上后被无视的隐藏脏记录；③快照无 TTL、`LS_DEVICES` 12 台淘汰后 orphan 键不清理、`writeLastGoodPort` 写 `p2p.lastConsolePort` 已无生产读者、`pickFallbackPort`/`readLastGoodPort`/`markActive` 为生产侧死代码/空桩。
+- 行动：换机时取消在途链（或按 deviceId 键控校验）；快照补 console 身份；快照 TTL 与 orphan 清理；删 `p2p.lastConsolePort` 死写与 consolePick 死导出、`markActive` 空桩。
+- 状态：已登记（详见 `docs/superpowers/reports/2026-09-29-p1-workspace-review.md`）。
+
 ## 三期+（远期构思，仅备忘）
 
 - devanywhere-ui（https://github.com/ai-baymax-dabai/devanywhere-ui）等更多服务清单项接入打磨。
