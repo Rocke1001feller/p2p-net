@@ -3,7 +3,7 @@
 - 日期：2026-09-22
 - 状态：设计已获批准，待 spec 审阅
 - 作者：Rocke1001feller + Kimi Code（brainstorming 流程产出）
-- 后续计划追踪：见 `docs/ROADMAP.md`（长期活文档，本文档第 13 节为机制说明）
+- 后续计划追踪：见根目录 `ROADMAP.md`（唯一事实源；2026-09-29 起由 docs/ 迁回根目录）
 
 ---
 
@@ -197,7 +197,7 @@ email/password 登录（refresh token 自动续期）→ `bind_device_auth(role=
 
 ## 13. 后续计划追踪机制
 
-- **`docs/ROADMAP.md` 为长期活文档**：二期及以后的所有事项先登记、后立项；
+- **根目录 `ROADMAP.md` 为长期活文档**（唯一事实源）：二期及以后的所有事项先登记、后立项；
 - 立项时走各自的 brainstorm → spec → plan 小循环，本文件不承载二期细节；
 - ROADMAP 初版随本 spec 一并提交，已登记：B类 Pages 入口、Windows 服务化、TURN secret 轮换、多 Server 聚合 UI、**统一身份穿透（SSO）**、Server↔Server 数据面（如真需要）。
 
