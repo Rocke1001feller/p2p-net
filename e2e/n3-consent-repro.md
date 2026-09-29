@@ -1,3 +1,4 @@
+> 历史快照（定格日期见文件名/文末）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。
 # N3: consent 失效「静默黑洞」复现取证（spec D3 前置）
 
 - 日期：2026-09-23（UTC，脚本 `at` 字段）；本机 loopback 装置，无公网/netem/VPN 依赖

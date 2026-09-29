@@ -1,3 +1,4 @@
+> 历史快照（定格日期见文件名/文末）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。
 # N3: TURN 单 transport 改造 + coturn 15min 死亡取证
 
 > Wave 1 Task 1（spec D4 改造臂 + spec D3 取证臂）。

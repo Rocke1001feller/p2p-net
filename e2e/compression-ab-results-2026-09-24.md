@@ -1,3 +1,4 @@
+> 历史快照（定格日期见文件名/文末）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。
 # gzip 压缩 A/B 实验结果（spec D6 / H6，2026-09-24 真机蜂窝强制 TURN）
 
 > 预注册：`e2e/compression-ab-prereg.md`（开跑前固定，未后改）。

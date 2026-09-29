@@ -1,3 +1,4 @@
+> 历史快照（2026-09-28 定格）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。状态回填：已合入 main（0dc806e），未发版；Task 7 真机门禁见 ROADMAP。
 # P1 多服务工作台 UI 改造 — 设计 spec（2026-09-28）
 
 > 原型：`docs/prototypes/product-model-v2.html`（P0 已定稿：设备页=启动台，工作台=侧栏树+沉浸式）。

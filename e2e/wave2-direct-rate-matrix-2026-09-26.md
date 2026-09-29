@@ -1,3 +1,4 @@
+> 历史快照（定格日期见文件名/文末）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。
 # Wave 2 W2-5 直连率矩阵战役（2026-09-26 起，跨 ≥2 天）
 
 > 计划：`docs/superpowers/plans/2026-09-25-wave2-calibration.md` Task W2-5；spec §6 诚实清单：N<20 象限留白「样本不足」，禁止编造外推。

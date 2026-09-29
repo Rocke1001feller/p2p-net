@@ -1,3 +1,4 @@
+> 历史快照（定格日期见文件名/文末）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。
 # 真人真机实测报告（human-live）— 2026-09-23
 
 **性质**：p2p-net v0.1.0 发布前最后一项验收 —— 真人（项目 owner）在 Android 蜂窝真机上自由操作真实重量级 SPA（devanywhere-ui :3001，vibe-code-ui 衍生），AI 侧同步观测网络。量化指标与用户实际体感的对齐实验。

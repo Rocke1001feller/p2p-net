@@ -1,3 +1,4 @@
+> 历史快照（定格日期见文件名/文末）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。
 # W2-6 暖场升级轮 spike 报告（2026-09-26）
 
 > 分支 `wave2/spike`（worktree `p2p-net-w2-spike`）。Step 1（werift ICE restart 能力取证）+ Step 4 ①④ + **②③ 浏览器/内存取证（2026-09-26 真机窗口完成，见 §2 §3）**。

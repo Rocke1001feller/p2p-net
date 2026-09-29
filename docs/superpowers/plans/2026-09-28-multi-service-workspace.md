@@ -1,3 +1,4 @@
+> 历史快照（2026-09-28 定格）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。状态回填：已合入 main（0dc806e），未发版；Task 7 真机门禁见 ROADMAP。
 # P1 多服务工作台 UI 改造 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

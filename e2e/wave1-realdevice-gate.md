@@ -1,3 +1,4 @@
+> 历史快照（定格日期见文件名/文末）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。
 # Wave 1 真机蜂窝门禁报告（2026-09-24，spec §验收 / task-13-brief Step 7）
 
 > 链路：红米真机 × 蜂窝网络 × VPS 49.233.155.13（coturn + PWA）；host = Mac 全局安装 p2p-net 0.2.0 候选。

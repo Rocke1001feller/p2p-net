@@ -1,3 +1,4 @@
+> 历史快照（定格日期见文件名/文末）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。 注：§3 目录布局（lib/→现为 src/ 主导）与 §7 `contracts/frames.md` 引用已与现状脱节，布局以 package.json `files` 字段为准。
 # p2p-net 设计文档（一期 MVP）
 
 - 日期：2026-09-22

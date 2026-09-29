@@ -1,3 +1,4 @@
+> 历史快照（定格日期见文件名/文末）：记录当时状态，不代表当前行为；现状以 README / ROADMAP / CHANGELOG 为准。 半活：产品模型裁决结论已入 P1 spec（docs/superpowers/specs/2026-09-28-multi-service-workspace-design.md）。
 # p2p-net 产品模型 v1（2026-09-28 梳理）
 
 ## 0. 定位（经 9-28「Kimi Code 接管工作台」事件实证）
