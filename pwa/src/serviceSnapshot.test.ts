@@ -11,10 +11,10 @@ function memStorage(): { getItem(k: string): string | null; setItem(k: string, v
 
 test('保存后读回，字段完整', () => {
   const s = memStorage();
-  saveSnapshot(s, 'dev-a', [{ name: 'CloudCLI', port: 3001 }, { name: 'vite', port: 5173 }]);
+  saveSnapshot(s, 'dev-a', [{ name: 'devanywhere-ui', port: 3001 }, { name: 'vite', port: 5173 }]);
   const m = readSnapshots(s);
   assert.equal(m['dev-a'].services.length, 2);
-  assert.equal(m['dev-a'].services[0].name, 'CloudCLI');
+  assert.equal(m['dev-a'].services[0].name, 'devanywhere-ui');
   assert.ok(m['dev-a'].at > 0);
 });
 
