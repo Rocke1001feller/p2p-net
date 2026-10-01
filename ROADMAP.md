@@ -109,6 +109,13 @@
 - 行动：两测试的定时器预算放宽或注入时钟；登记前影响为零（分段门禁可靠）。
 - 状态：已登记。
 
+### R4-12 vite dev 模式过隧道白屏（2026-10-01 双机实测发现）
+- 现象：vite **dev** 服务器（默认 base='/'）经隧道访问白屏——shim 能包装 fetch/XHR/WS、SW 能改写 HTML 静态属性的根绝对路径，但 **ES 模块静态 import 走浏览器原生加载**（`/@vite/client`、`/node_modules/.vite/*` 等根绝对路径逃逸出 `/s/<port>/` scope → 源站 404）。生产构建不受影响（入口经改写、chunk 间相对 import）。
+- 影响面：README「点进 5173 即可操作」的承诺对 dev 服务器不成立——恰是开发者最高频场景。
+- 候选方向（立项时定）：① SW 对 scope 外同源请求按 Referer 兜底改写进隧道 scope；② init/start 探测到 vite dev 时引导 `--base`；③ 文档声明仅支持生产构建。① 最彻底但动 SW 拦截面，需评估副作用。
+- 实证：`e2e/p1-workspace-dual-device-2026-10-01.md`。
+- 状态：已登记。
+
 ### OPS-1 VPS 证书续期（运维，非代码）
 - 49.233.155.13 HTTPS 证书（Let's Encrypt shortlived IP 证书，6 天期）。
 - 状态：**已闭环（自动续期实证，零人工动作）**。2026-09-27 勘察：Caddy 已于 Sep 26 02:24:25 自动续期成功（journalctl `tls.renew certificate renewed successfully`，进程未重启）；ARI 机制在位，下一次续期排程 selected_time≈Sep 29，远早于当前证书 Oct 2 09:25 GMT 到期。续期窗口内唯一风险是 LE/网络瞬时故障，Caddy 会持续重试，无需值守；9-30 前后抽查一次 `openssl s_client` 到期日即可。
@@ -116,7 +123,7 @@
 ### R4-6 隐藏当前服务在离线/重连窗口不生效（P1 评审 I-1）
 - 现象：断线窗口打开侧栏隐藏「断线前正在看」的服务，记录落盘但不回引导页、不清选中——`pwa/src/shell.ts` 的 `onHide` bounce 判定锚在 `connectedId`（级联未开时恒 null）；重连后 C2 守卫保留选中，用户持续看着自己刚隐藏的服务，侧栏却显示它已隐藏。
 - 行动：bounce 判定改锚 `desk.id`（身份而非连接态）；补 harness 测试（离线窗口隐藏当前服务 → 重连落引导页）。
-- 状态：已登记（详见 `docs/superpowers/reports/2026-09-29-p1-workspace-review.md`）。
+- 状态：**运行时反证，建议核销（2026-10-01 双机战役）**——iPhone 真机 + host 停机离线窗口实测：离线隐藏当前服务 bounce 正常触发（sel=null、回引导页、LS 正确落盘），重连后默认链开 console，全程无「卡在隐藏服务」；评审的锚点机制推断与运行时行为不符。详见 `e2e/p1-workspace-dual-device-2026-10-01.md` G5/R4-6 段。
 
 ### R4-7 启动台网格不剔除已隐藏服务（P1 评审 I-2，需产品裁决）
 - 现象：隐藏语义只在侧栏树落地；设备页（启动台）服务网格照样渲染已隐藏服务——`refreshDevicesUI` 直传 `currentServices` 全量给 `renderDevices`，两个入口口径不一致。spec §2.5 对此未裁决（设计留白）。
@@ -136,7 +143,17 @@
 ### R4-10 P1 双机真机门禁执行（P1 评审 I-5）
 - 现象：plan（`docs/superpowers/plans/2026-09-28-multi-service-workspace.md` Task 7 Step 4）登记了 5 条双机真机门禁，spec/plan 头注「真机门禁见 ROADMAP」但 ROADMAP 原本无此条目（指针悬空）；C1 遮罩穿透的真冒泡行为等只有真机能钉的项缺最后一环证据。
 - 行动：下次双机在场时执行 5 条门禁（遮罩真冒泡、多设备树渲染、跨机直达、隐藏/恢复、重连不抢选中），结果回填本条目与评审报告。
-- 状态：已登记（详见 `docs/superpowers/reports/2026-09-29-p1-workspace-review.md`）。
+- 状态：**iPhone 侧已闭环（2026-10-01）**——G1/G3/G4 PASS、G2 iPhone 侧机制 PASS、G5 PASS（tunnel 对 host 重启透明、长中断自愈）、多设备树真机渲染 ✓，全部仪器直测留证于 `e2e/p1-workspace-dual-device-2026-10-01.md`；Android 侧待接入补判。
+
+### R4-12 vite dev server 经隧道永不就绪（2026-10-01 战役发现）
+- 现象：vite dev client（5173）经隧道打开后 root 恒空、innerText=0，永不就绪——PWA 健康检查按 5s/12s/25s 反复后台重载（动作符合设计，但永不成功）；devanywhere-ui server(3001，生产式) 与 Kimi Code(51778) 同链路正常。疑 vite dev 模块协议（逐文件 ESM + HMR WS + import query）过不了 SW→隧道转发面；与 NEVER 集合含 4173（vite preview）的历史经验互证。
+- 行动：定位断点层（SW 转发 / 隧道 WS / vite HMR 握手）；如属协议面不可行，文档化「vite dev 请经 build 预览或直连使用」。
+- 状态：已登记。
+
+### R4-13 体检首拍 5s 对蜂窝隧道偏紧（2026-10-01 战役发现）
+- 现象：51778 首启在 5s 首拍时尚未就绪（蜂窝+隧道首载偏慢）→ 被设计性后台重载一次后才就绪——自愈但多一跳，首启体感白屏窗口被拉长；对「永不就绪」型服务（R4-12）则构成无意义重载循环。
+- 行动：评估首拍延迟放宽（如 5s→10s）或首拍前加数据面就绪闸；与 R4-12 一并评审。
+- 状态：已登记。
 
 ### R4-11 换机在途异步回收 + 存储卫生（P1 评审 M-2 / M-3 / M-4）
 - 现象：①换机不回收在途 bootWorkbench 探活/重挂体检链/pendingFetch，`tabs.has(port)` 对新设备同端口 tab 是瞎的（靠 `tab.booted` 闩收敛，最坏无害冗余）；②ServiceSnapshot 不记 consolePort → 离线组 console 行渲染 ✕ 且豁免失效，可写下连上后被无视的隐藏脏记录；③快照无 TTL、`LS_DEVICES` 12 台淘汰后 orphan 键不清理、`writeLastGoodPort` 写 `p2p.lastConsolePort` 已无生产读者、`pickFallbackPort`/`readLastGoodPort`/`markActive` 为生产侧死代码/空桩。
