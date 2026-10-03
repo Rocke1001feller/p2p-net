@@ -77,3 +77,30 @@
 **仪器副产品**：pymobiledevice3 CDP server（9333）被扫描器判为 website 上架——实测期已隐藏，提示「本机调试类 HTTP 服务会被自动发现」这一既有行为，不设 NEVER（属预期自动发现面）。
 
 **gen 语义记录**：长中断期间 gen 1→10——gen 是重连代际计数而非重建计数（重建未发生）。
+
+---
+
+## §6 Android 侧（2026-10-03，红米 K80 / Android 16 / MIUI 浏览器 Chrome135 内核）
+
+**仪器链突破（重要）**：Android「无 CDP」缺口关闭——MIUI 浏览器暴露 `browser_webview_devtools_remote_<pid>` Unix socket，`adb forward tcp:9334 localabstract:<socket>` 即得完整 CDP（本战役驱动脚本与 iPhone 同一套 `ios-cdp.tmp.mjs`）。此前触屏盲驾阶段的两个「疑点」事后证明全是触屏伪影：①「切回白屏」= 我误按 BACK 键把 iframe 历史导航到空白（恢复由健康检查重载完成）；②「抽屉点了不收口」= 抽屉滑入动画未结束时点击落在遮罩上（C1 遮罩收抽屉，设计行为）。**教训：无仪器阶段的「疑似缺陷」必须先拿仪器复核再立案。**
+
+**配对路径实录（真实用户路径踩坑链）**：MIUI 浏览器 VIEW intent 可复用已开实例不导航前台 tab（需进标签管理器手动切）；`input text` 经中文 IME 会拼音重组（解法：键盘「中/英」切英文模式）；`input text` 在首个 `&` 处截断（解法：`/connect?t=<ticket>` 精简 URL——redeem 只需 ticket，d/u 为提示参数，缺省走「登录成功→选设备」流）；「连不上」底条会随自动重连循环反复弹出。**建议产品项登记：connect URL 容错（去 query 参数依赖）已足够，但 bootPolicy 对死设备的自动重连循环应考虑降频/让位用户选机。**
+
+### 门禁判定（Android，蜂窝/电信 ep-dep → tunnel，中途 WiFi(GOAWAY0724) 双向切换）
+
+| # | 条件 | 判定 | 证据 |
+|---|---|---|---|
+| G1 | 切换服务现场不丢 | **PASS** | CDP 直验：3001↔52233 双向切换，iframe 元素恒等、`__markA` 窗口标记往返存活、无重载日志 |
+| G2 | 隐藏/恢复跨设备隔离 | **PASS** | iPhone 10-01 隐藏 5173 → Android 侧 5173 仍可见（live 对照）；Android 隐藏 52233 → 仅自身 LS 落键 `{"47290b9b…":[52233]}`，选中视图不受扰；双向同码同键，iPhone 侧此前已实证 |
+| G3 | 沉浸 + 唤起 4s 回沉浸 | **PASS** | 唤起后 chrome 呈现，5.5s 后复查已自动回沉浸 |
+| G4 | 设备页图标直达 | **PASS** | 启动台点 Kimi Code 图标 → 直达 52233 沉浸；离线设备（dva-win）卡片无服务网格（评审 Review Focus #3 顺带实证） |
+| G5 | 通道切换不重载/不打破 | **PASS** | WiFi 加入（12:37:58）+ 蜂窝数据关闭（12:39:52）+ 反向（12:41:15）三事件窗内 PWA connected/sel/imm/gen 全稳，host 侧零 session 事件 |
+
+### 顺带实证与观测
+
+- `[workbench] 数据面已重连 → 工作台仍存活，不重建`（W-B①）与 `[p2pupg] 旁路落中继（非直连）→ 不采纳，保持隧道`（W-A 修复）在 Android 真机日志面板上逐字在档；
+- 多设备侧栏树 Android 渲染 ✓（在线/离线分组、console 行无 ✕、离线组灰显带 ✕）；
+- R4-3 维持开放：WiFi 窗口内旁路仍落 relay 被正确拒绝（04:42:58，ep-dep），adopt-direct 真直连路径仍未获实机样本；
+- 新发现（minor）：`[services] 3 个； console=[object Object]`——日志格式瑕疵（对象未展开）；Android BACK 键在 iframe 聚焦时导航 iframe 历史（可致白屏，健康检查 5s 后自愈）——建议评估 BACK 键拦截策略。
+
+**Android 阶段收尾状态**：WiFi 已恢复关闭（与开测前一致）；选中停留在 Kimi Code 52233；debug 浮层页面（?debug=1）保持打开供复查。

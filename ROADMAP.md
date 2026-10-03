@@ -143,7 +143,7 @@
 ### R4-10 P1 双机真机门禁执行（P1 评审 I-5）
 - 现象：plan（`docs/superpowers/plans/2026-09-28-multi-service-workspace.md` Task 7 Step 4）登记了 5 条双机真机门禁，spec/plan 头注「真机门禁见 ROADMAP」但 ROADMAP 原本无此条目（指针悬空）；C1 遮罩穿透的真冒泡行为等只有真机能钉的项缺最后一环证据。
 - 行动：下次双机在场时执行 5 条门禁（遮罩真冒泡、多设备树渲染、跨机直达、隐藏/恢复、重连不抢选中），结果回填本条目与评审报告。
-- 状态：**iPhone 侧已闭环（2026-10-01）**——G1/G3/G4 PASS、G2 iPhone 侧机制 PASS、G5 PASS（tunnel 对 host 重启透明、长中断自愈）、多设备树真机渲染 ✓，全部仪器直测留证于 `e2e/p1-workspace-dual-device-2026-10-01.md`；Android 侧待接入补判。
+- 状态：**已全部闭环（2026-10-03）**——iPhone 侧 10-01、Android 侧 10-03 均仪器直测完成，G1–G5 双端 PASS，证据链见 `e2e/p1-workspace-dual-device-2026-10-01.md`（含 Android CDP 仪器链突破与触屏伪影甄别实录）。
 
 ### R4-12 vite dev server 经隧道永不就绪（2026-10-01 战役发现）
 - 现象：vite dev client（5173）经隧道打开后 root 恒空、innerText=0，永不就绪——PWA 健康检查按 5s/12s/25s 反复后台重载（动作符合设计，但永不成功）；devanywhere-ui server(3001，生产式) 与 Kimi Code(51778) 同链路正常。疑 vite dev 模块协议（逐文件 ESM + HMR WS + import query）过不了 SW→隧道转发面；与 NEVER 集合含 4173（vite preview）的历史经验互证。
